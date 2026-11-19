@@ -1,13 +1,95 @@
+import { constants, statSync } from "node:fs";
+import { open, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { Readable } from "node:stream";
 import type { ServerType } from "@hono/node-server";
+import type { FileHandle } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
+import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";
+import { s3Store } from "./core/s3.ts";
+import { isStoreKey } from "./core/store.ts";
+
+/**
+ * Returns a store over a directory, for tests and single-host development. The root is trusted (only the publisher
+ * writes it), so the key grammar is the whole containment rule.
+ */
+export function diskStore(root: string): Store {
+  if (!statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`disk store root ${root} is not a directory`);
+  }
+  return {
+    async get(key) {
+      if (!isStoreKey(key)) throw new Error(`invalid store key ${JSON.stringify(key)}`);
+      let fh: FileHandle;
+      try {
+        // Nonblocking, so a FIFO at the key cannot hold a libuv thread; regular-file reads are unaffected.
+        fh = await open(join(root, key), constants.O_RDONLY | constants.O_NONBLOCK);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        // A root gone after startup is an outage, not a miss for every key.
+        if ((await stat(root).catch(() => undefined))?.isDirectory()) return undefined;
+        throw new Error(`disk store root ${root} unavailable`, { cause: e });
+      }
+      try {
+        const st = await fh.stat();
+        if (!st.isFile()) throw new Error(`${key} is not a regular file`);
+        // createReadStream closes the handle on end, error and cancel alike.
+        const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
+        return { body, size: st.size };
+      } catch (e) {
+        await fh.close();
+        throw e;
+      }
+    },
+  };
+}
+
+// In S3Config order; the TIDE_ prefix keeps ambient AWS credentials out.
+const S3_VARS = [
+  "TIDE_S3_ENDPOINT",
+  "TIDE_S3_REGION",
+  "TIDE_S3_BUCKET",
+  "TIDE_S3_ACCESS_KEY_ID",
+  "TIDE_S3_SECRET_ACCESS_KEY",
+];
+
+/** Returns the store the environment configures: TIDE_DISK_DIR, or every TIDE_S3_* variable. Empty means unset. */
+export function storeFromEnv(env: Readonly<Record<string, string | undefined>>): Store {
+  const read = (name: string) => (env[name] === "" ? undefined : env[name]);
+  const disk = read("TIDE_DISK_DIR");
+  const s3 = S3_VARS.map(read);
+  const missing = S3_VARS.filter((_, i) => s3[i] === undefined);
+
+  if (missing.length === S3_VARS.length) {
+    if (disk !== undefined) return diskStore(disk);
+    throw new Error(`no store configured: set TIDE_DISK_DIR, or all of ${S3_VARS.join(", ")}`);
+  }
+  if (disk !== undefined) throw new Error("set TIDE_DISK_DIR or the TIDE_S3_* variables, not both");
+  if (missing.length > 0) throw new Error(`S3 store incomplete: set ${missing.join(", ")}`);
+  const [endpoint = "", region = "", bucket = "", accessKeyId = "", secretAccessKey = ""] = s3;
+  return s3Store({ endpoint, region, bucket, accessKeyId, secretAccessKey });
+}
 
 /** Starts the app on Node; port 0 picks a free port. */
-export function startServer(port: number): Promise<ServerType> {
+export function startServer(options: { port: number; store: Store }): Promise<ServerType> {
   return new Promise((resolve) => {
-    const server = serve({ fetch: createApp().fetch, port }, () => resolve(server));
+    const server = serve({ fetch: createApp(options.store).fetch, port: options.port }, () =>
+      resolve(server),
+    );
   });
 }
 
-if (import.meta.main) await startServer(Number(process.env.PORT ?? 8787));
+if (import.meta.main) {
+  let store: Store;
+  try {
+    store = storeFromEnv(process.env);
+  } catch (e) {
+    console.error(`tide: ${(e as Error).message}`);
+    process.exit(1);
+  }
+  const server = await startServer({ port: Number(process.env.PORT ?? 8787), store });
+  console.log(`tide listening on port ${(server.address() as AddressInfo).port}`);
+}

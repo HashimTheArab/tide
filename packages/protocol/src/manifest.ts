@@ -135,7 +135,8 @@ export function buildRollBackToEmbedded(input: {
 }
 
 function encode(value: object): Uint8Array<ArrayBuffer> {
-  return encoder.encode(JSON.stringify(value));
+  // The copy types the bytes as ArrayBuffer-backed under Workers types too, where the server compiles this.
+  return new Uint8Array(encoder.encode(JSON.stringify(value)));
 }
 
 function assetFile(a: Readonly<Record<string, unknown>>, field: string) {
