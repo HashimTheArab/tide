@@ -38,7 +38,7 @@ reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or roll
 reply/no-update                          stored reply: the signed noUpdateAvailable
 bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
 patches/<fromHash>/<toHash>              BSDIFF40 patch
-lock                                     publish and gc lock
+gc/candidates.json                       objects the last gc scan found unreferenced, with the scan time
 ```
 
 The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
@@ -149,23 +149,29 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 
 ## CLI
 
-`publish` (in CI):
+**One writer at a time.** `publish`, `rollback`, `republish`, `register-build` and `gc` run only from one CI
+workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
+object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
+backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
 
-1. Take `lock` with a conditional create.
-2. Run `expo export`; hash every file (SHA-256, base64url); upload missing `assets/` and `bundles/`. Keep Metro's
+`publish`:
+
+1. Run `expo export`; hash every file (SHA-256, base64url); upload missing `assets/` and `bundles/`. Keep Metro's
    asset keys, which the bundle references, and refuse to publish a key already recorded for a different SHA-256 in
    any retained update or registered build.
-3. Compose the manifest with `createdAt = max(now, previous pointer and any rollback commitTime + 1 ms)`; refuse if
+2. Compose the manifest with `createdAt = max(now, previous pointer and any rollback commitTime + 1 ms)`; refuse if
    the clock differs from the bucket's `Date` by more than a minute.
-4. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through a KMS or a protected CI secret.
-5. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
+3. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through a KMS or a protected CI secret.
+4. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
    updates); apply each and check its hash before upload; keep one only if it is well under the compressed bundle.
-6. Write the release record, bases and patches, then the pointer with `If-Match` on its ETag; release `lock`.
+5. Write the release record, bases and patches, then the pointer with `If-Match` on its ETag.
 
 Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `rollback`
 (a signed `rollBackToEmbedded` with a fresh `commitTime`, or a republish of older code under a new ID), `republish`,
-`status`, and `gc` (under `lock`, dry-run by default; never deletes anything a retained update, rollback, base or
-legacy map references).
+`status`, and `gc` (dry-run by default; never deletes anything a retained update, rollback, base or legacy map
+references). `gc` is two-pass mark and sweep: each run records the unreferenced objects it finds in
+`gc/candidates.json`, and deletes only objects that were already candidates in a scan at least 24 hours earlier and
+are still unreferenced. A publish that reuses an object in between makes it referenced again, so it survives.
 
 ## Keys
 
