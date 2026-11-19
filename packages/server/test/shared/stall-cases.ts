@@ -115,19 +115,15 @@ export function stallCases(): void {
       );
       // Promise.race and explicit .then both subscribe through the observable Promise.prototype.then.
       const subscriptions = new Map<object, number>();
-      const then = Object.getOwnPropertyDescriptor(Promise.prototype, "then")!;
-      const original = then.value as typeof Promise.prototype.then;
-      Object.defineProperty(Promise.prototype, "then", {
-        ...then,
-        value: function (this: Promise<unknown>, ...args: Parameters<typeof original>) {
-          subscriptions.set(this, (subscriptions.get(this) ?? 0) + 1);
-          return original.apply(this, args);
-        },
-      });
+      const then = Reflect.get(Promise.prototype, "then") as (...args: unknown[]) => never;
+      Promise.prototype.then = function (this: Promise<unknown>, ...args) {
+        subscriptions.set(this, (subscriptions.get(this) ?? 0) + 1);
+        return Reflect.apply(then, this, args);
+      };
       try {
         await readBounded({ body, size: chunks }, chunks, live());
       } finally {
-        Object.defineProperty(Promise.prototype, "then", then);
+        Reflect.set(Promise.prototype, "then", then);
       }
       expect(Math.max(0, ...subscriptions.values())).toBeLessThan(2);
     });
