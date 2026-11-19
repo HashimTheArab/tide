@@ -23,10 +23,15 @@ const encoder = new TextEncoder();
 
 /** Returns a store that reads objects with signed GetObject requests. */
 export function s3Store(config: S3Config): Store {
-  const endpoint = new URL(config.endpoint);
-  if (!/^https?:$/.test(endpoint.protocol) || endpoint.href !== `${endpoint.origin}/`) {
+  const endpoint = URL.parse(config.endpoint);
+  // The value is never echoed: a rejected URL may carry credentials or a signature.
+  if (
+    !endpoint ||
+    !/^https?:$/.test(endpoint.protocol) ||
+    endpoint.href !== `${endpoint.origin}/`
+  ) {
     throw new Error(
-      `S3 endpoint must be an http or https origin with no path, got ${config.endpoint}`,
+      "S3 endpoint must be an http or https origin with no credentials, path or query",
     );
   }
   const timeoutMs = config.timeoutMs ?? 10_000;

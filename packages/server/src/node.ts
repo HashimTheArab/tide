@@ -72,7 +72,11 @@ export function storeFromEnv(env: Readonly<Record<string, string | undefined>>):
   if (disk !== undefined) throw new Error("set TIDE_DISK_DIR or the TIDE_S3_* variables, not both");
   if (missing.length > 0) throw new Error(`S3 store incomplete: set ${missing.join(", ")}`);
   const config = Object.fromEntries(Object.entries(S3_VARS).map(([k, v]) => [k, read(v)]));
-  return s3Store(config as Record<keyof typeof S3_VARS, string>);
+  try {
+    return s3Store(config as Record<keyof typeof S3_VARS, string>);
+  } catch (e) {
+    throw new Error(`${S3_VARS.endpoint}: ${(e as Error).message}`); // Only the endpoint is checked here.
+  }
 }
 
 /** Starts the app on Node; port 0 picks a free port. */

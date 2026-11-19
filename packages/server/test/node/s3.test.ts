@@ -35,12 +35,33 @@ test("signV4 reproduces AWS's published GET Object example", async () => {
   );
 });
 
-test.each(["ftp://s3.test", "http://s3.test/bucket", "http://s3.test/?x=1", "http://u:p@s3.test"])(
-  "s3Store rejects the endpoint %s",
-  (endpoint) => {
-    expect(() => s3Store({ ...FAKE_S3, endpoint })).toThrow("S3 endpoint must be");
-  },
-);
+test.each([
+  "ftp://s3.test",
+  "http://s3.test/bucket",
+  "http://s3.test/?x=1",
+  "http://u:p@s3.test",
+  "not a url",
+])("s3Store rejects the endpoint %s", (endpoint) => {
+  expect(() => s3Store({ ...FAKE_S3, endpoint })).toThrow("S3 endpoint must be");
+});
+
+test("a rejected TIDE_S3_ENDPOINT stops the node entry without echoing its secrets", async () => {
+  const mark = "leak"; // Stands in for the user, password and signature.
+  const endpoint = new URL(`https://s3.test/b?X-Amz-Signature=${mark}`);
+  endpoint.username = mark;
+  endpoint.password = mark;
+  const { code, stdout, stderr } = await runEntry({
+    TIDE_S3_ENDPOINT: endpoint.href,
+    TIDE_S3_REGION: FAKE_S3.region,
+    TIDE_S3_BUCKET: FAKE_S3.bucket,
+    TIDE_S3_ACCESS_KEY_ID: FAKE_S3.accessKeyId,
+    TIDE_S3_SECRET_ACCESS_KEY: FAKE_S3.secretAccessKey,
+  }).exited;
+  expect(code).not.toBe(0);
+  expect(stdout).not.toContain("listening");
+  expect(stderr).not.toContain(mark);
+  expect(stderr).toContain("TIDE_S3_ENDPOINT: S3 endpoint must be");
+});
 
 describe("s3Store against a local S3-compatible endpoint", () => {
   let fake: FakeS3;
