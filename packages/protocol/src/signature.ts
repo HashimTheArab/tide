@@ -46,6 +46,18 @@ export async function verifyExpoSignature(
   keyId: string,
 ): Promise<void> {
   checkKey(key, "public", "verify");
+  const { sig, keyId: id } = parseExpoSignature(header);
+  if (id !== keyId) throw new ProtocolError("signature.keyid", `must be ${keyId}`);
+  if (!(await crypto.subtle.verify(RSA, key, sig, bytes))) {
+    throw new ProtocolError("signature.sig", "does not match the bytes and key");
+  }
+}
+
+/** Returns the signature bytes and key ID of an expo-signature header, checked as `verifyExpoSignature` does. */
+export function parseExpoSignature(header: string): {
+  readonly sig: Uint8Array<ArrayBuffer>;
+  readonly keyId: string;
+} {
   const members = parseSfvDictionary(header, "signature");
   const member = (name: string, fallback?: string): string => {
     const m = members.get(name);
@@ -61,14 +73,11 @@ export async function verifyExpoSignature(
   }
   const sigText = member("sig");
   const alg = member("alg", ALG);
-  const id = member("keyid", "root");
+  const keyId = member("keyid", "root");
   const sig = decodeBase64(sigText);
   if (sig === undefined) throw new ProtocolError("signature", "sig must be padded base64");
   if (alg !== ALG) throw new ProtocolError("signature.alg", `must be ${ALG}`);
-  if (id !== keyId) throw new ProtocolError("signature.keyid", `must be ${keyId}`);
-  if (!(await crypto.subtle.verify(RSA, key, sig, bytes))) {
-    throw new ProtocolError("signature.sig", "does not match the bytes and key");
-  }
+  return { sig, keyId };
 }
 
 /** Returns the verify key in the first CERTIFICATE block of `pem`. Dates, usages and the chain are not checked. */

@@ -16,6 +16,7 @@ export {
   decodeStoredReply,
   diskKey,
   diskPath,
+  unescapeDiskPath,
   encodeStoredReply,
   replyKey,
 } from "./reply.ts";
@@ -40,5 +41,6 @@ export {
   certificatePublicKey,
   cryptoKeySigner,
   expoSignature,
+  parseExpoSignature,
   verifyExpoSignature,
 } from "./signature.ts";

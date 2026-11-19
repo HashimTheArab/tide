@@ -50,6 +50,12 @@ const rollbackWith = (edit: (multipart: string) => string) =>
     boundary: BOUNDARY,
     body: utf8(edit(ascii(fixture("rollback.multipart")))),
   });
+const noUpdateWith = (edit: (multipart: string) => string) =>
+  encodeStoredReply({
+    kind: "noUpdateAvailable",
+    boundary: BOUNDARY,
+    body: utf8(edit(ascii(fixture("no-update.multipart")))),
+  });
 
 /** Runs the `tide` bin as an executable, with `node` first on PATH, and only `env` besides. */
 async function tide(env: Record<string, string>) {
@@ -163,6 +169,24 @@ describe.each(stores)("tide status on %s", (_, open) => {
       "reply/a/1.0.0/ios",
       manifestWith((m) => m.replace(/expo-signature: [^\r]*\r\n/, "")),
       "manifest part has no expo-signature",
+    ],
+    [
+      "a reply/no-update whose expo-signature has no sig",
+      "reply/no-update",
+      noUpdateWith((m) => m.replace(/expo-signature: sig="[^"]*", /, "expo-signature: ")),
+      "directive part has a malformed expo-signature",
+    ],
+    [
+      "a manifest signed with another alg",
+      "reply/a/1.0.0/ios",
+      manifestWith((m) => m.replace('alg="rsa-v1_5-sha256"', 'alg="rsa-v1_5-sha1"')),
+      "manifest part has a malformed expo-signature",
+    ],
+    [
+      "a manifest whose sig is not base64",
+      "reply/a/1.0.0/ios",
+      manifestWith((m) => m.replace(/sig="[^"]*"/, 'sig="not base64"')),
+      "manifest part has a malformed expo-signature",
     ],
     [
       "a record whose updateId differs from the signed id",

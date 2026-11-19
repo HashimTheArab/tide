@@ -1,5 +1,11 @@
 import type { StoredReply } from "@tide/protocol";
-import { MAX_REPLY_BYTES, NO_UPDATE_KEY, decodeStoredReply, parseMultipart } from "@tide/protocol";
+import {
+  MAX_REPLY_BYTES,
+  NO_UPDATE_KEY,
+  decodeStoredReply,
+  parseExpoSignature,
+  parseMultipart,
+} from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
@@ -77,6 +83,11 @@ async function check(bucket: Bucket, key: string): Promise<Verdict> {
   if (part === undefined) return `body has no ${partName} part`;
   // A client configured for code signing rejects a part without one.
   if (part.signature === undefined) return `${partName} part has no expo-signature`;
+  try {
+    parseExpoSignature(part.signature);
+  } catch {
+    return `${partName} part has a malformed expo-signature`;
+  }
   let json: unknown;
   try {
     json = JSON.parse(utf8.decode(part.body));
