@@ -1346,8 +1346,8 @@ describe("stored reply", () => {
   );
 
   const base = () => ({ ...manifestReply() }) as Record<string, unknown>;
-  test.each<[string, () => unknown, string]>([
-    ["a null reply", () => null, "reply"],
+  // Encode checks its output with decode, so each failure names the record field decode reports.
+  test.each<[string, () => Record<string, unknown>, string]>([
     ["an unknown kind", () => ({ ...base(), kind: "patch" }), "kind"],
     ["a missing updateId", () => ({ ...base(), updateId: undefined }), "updateId"],
     [
@@ -1355,25 +1355,22 @@ describe("stored reply", () => {
       () => ({ ...base(), updateId: "0F6A9A3E-6C1B-4C4E-9D55-2B8F3F7C1A90" }),
       "updateId",
     ],
-    ["a boundary with a space", () => ({ ...base(), boundary: "a b" }), "boundary"],
-    ["a missing boundary", () => ({ ...base(), boundary: undefined }), "boundary"],
+    ["a boundary with a space", () => ({ ...base(), boundary: "a b" }), "contentType"],
     ["an empty body", () => ({ ...base(), body: new Uint8Array() }), "body"],
     ["a string body", () => ({ ...base(), body: "--b" }), "body"],
     ["a body that is not UTF-8", () => ({ ...base(), body: new Uint8Array([0xc3]) }), "body"],
-    ["an unknown field", () => ({ ...base(), extra: 1 }), "extra"],
-    [
-      "updateId on a directive",
-      () => ({ ...goldenReply("rollback.reply.json"), updateId: base().updateId }),
-      "updateId",
-    ],
     ["a record one byte over the limit", () => replyOfSize(MAX_REPLY_BYTES + 1), "record"],
   ])("encode rejects %s", async (_, reply, field) => {
     const r = reply();
     // An undefined field stands for a missing one.
-    if (typeof r === "object" && r !== null) {
-      for (const [k, v] of Object.entries(r)) if (v === undefined) Reflect.deleteProperty(r, k);
-    }
+    for (const [k, v] of Object.entries(r)) if (v === undefined) Reflect.deleteProperty(r, k);
     await rejects(() => encodeStoredReply(loose(r)), field);
+  });
+
+  test("encode writes only the fields of the reply's kind", () => {
+    const rollback = goldenReply("rollback.reply.json");
+    const extra = loose<StoredReply>({ ...rollback, updateId: base().updateId, createdAt: "now" });
+    expect(encodeStoredReply(extra)).toEqual(fixture("rollback.reply.json"));
   });
 
   test("encode accepts a record of exactly the limit", () => {

@@ -106,7 +106,7 @@ if (import.meta.main) {
   const server = await startServer({
     port: Number(process.env.PORT ?? 8787),
     store,
-    appId: process.env.TIDE_APP_ID === "" ? undefined : process.env.TIDE_APP_ID, // Empty is unset.
+    appId: process.env.TIDE_APP_ID,
   });
   console.log(`tide listening on port ${(server.address() as AddressInfo).port}`);
 }

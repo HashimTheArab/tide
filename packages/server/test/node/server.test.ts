@@ -175,7 +175,7 @@ describe("app ID", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(fixture("no-update.multipart"));
   });
 
-  test.each([" x", "x ", "", "café"])("createApp rejects the app ID %j", (appId) => {
+  test.each([" x", "x ", "café"])("createApp rejects the app ID %j", (appId) => {
     expect(() => createApp(diskStore(tempRoot()), { appId })).toThrow("app ID must be");
   });
 });

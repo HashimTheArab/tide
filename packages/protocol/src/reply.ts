@@ -30,16 +30,11 @@ export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 export const MAX_FILTERS_BYTES = 4096;
 
 const VERSION = 1;
-// Record keys in the order they are written; a directive has no update ID or filters.
+// Fields each kind's record may hold; a directive has no update ID or filters.
 const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   manifest: ["version", "kind", "updateId", "contentType", "manifestFilters", "body"],
   rollBackToEmbedded: ["version", "kind", "contentType", "body"],
   noUpdateAvailable: ["version", "kind", "contentType", "body"],
-};
-const REPLY_FIELDS: Record<Kind, readonly string[]> = {
-  manifest: ["kind", "updateId", "boundary", "manifestFilters", "body"],
-  rollBackToEmbedded: ["kind", "boundary", "body"],
-  noUpdateAvailable: ["kind", "boundary", "body"],
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
@@ -50,47 +45,26 @@ const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Returns the record bytes for `reply`: one JSON object, keys in a fixed order, the body as a string. */
 export function encodeStoredReply(reply: StoredReply): Uint8Array<ArrayBuffer> {
-  const r = plainObject(reply, "reply");
-  const kind = checkKind(r.kind);
-  for (const key of Object.keys(r)) {
-    if (!REPLY_FIELDS[kind].includes(key)) {
-      throw new ProtocolError(key, `is not a field of a ${kind} reply`);
-    }
-  }
-  const boundary = present(r, "boundary");
-  if (typeof boundary !== "string" || !BOUNDARY.test(boundary)) {
-    throw new ProtocolError("boundary", "must be 1 to 70 characters of A-Z, a-z, 0-9, _ or -");
-  }
-  const body = present(r, "body");
-  if (!(body instanceof Uint8Array) || body.length === 0) {
-    throw new ProtocolError("body", "must be non-empty bytes");
-  }
-  let text: string;
+  let body: string;
   try {
-    text = utf8.decode(body);
+    body = utf8.decode(reply.body);
   } catch {
     throw new ProtocolError("body", "is not UTF-8");
   }
+  const contentType = `multipart/mixed; boundary=${reply.boundary}`;
   const record =
-    kind === "manifest"
+    reply.kind === "manifest"
       ? {
           version: VERSION,
-          kind,
-          updateId: checkUpdateId(present(r, "updateId")),
-          contentType: `multipart/mixed; boundary=${boundary}`,
-          manifestFilters: checkFilters(present(r, "manifestFilters")),
-          body: text,
+          kind: reply.kind,
+          updateId: reply.updateId,
+          contentType,
+          manifestFilters: reply.manifestFilters,
+          body,
         }
-      : {
-          version: VERSION,
-          kind,
-          contentType: `multipart/mixed; boundary=${boundary}`,
-          body: text,
-        };
+      : { version: VERSION, kind: reply.kind, contentType, body };
   const bytes = new Uint8Array(encoder.encode(JSON.stringify(record)));
-  if (bytes.length > MAX_REPLY_BYTES) {
-    throw new ProtocolError("record", `is too large: over ${MAX_REPLY_BYTES} bytes`);
-  }
+  decodeStoredReply(bytes); // Encode never writes what decode refuses.
   return bytes;
 }
 
@@ -150,6 +124,11 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   };
 }
 
+/** Returns whether `value` is a UUID in lowercase. */
+export function isUuid(value: string): boolean {
+  return UUID.test(value);
+}
+
 /** Returns the pointer key for a channel, runtime version and platform; names outside the grammar are rejected. */
 export function replyKey(channel: string, runtimeVersion: string, platform: string): string {
   checkName(channel, "channel");
@@ -198,7 +177,7 @@ function checkKind(kind: unknown): Kind {
 }
 
 function checkUpdateId(value: unknown): string {
-  if (typeof value !== "string" || !UUID.test(value)) {
+  if (typeof value !== "string" || !isUuid(value)) {
     throw new ProtocolError("updateId", "must be a lowercase UUID");
   }
   return value;
@@ -221,15 +200,6 @@ function checkFilters(value: unknown): string {
     throw new ProtocolError("manifestFilters", "must be written by encodeSfvDictionary");
   }
   return value;
-}
-
-function plainObject(value: unknown, field: string): Record<string, unknown> {
-  const proto: unknown =
-    typeof value === "object" && value !== null && Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) {
-    throw new ProtocolError(field, "must be a plain object");
-  }
-  return value as Record<string, unknown>;
 }
 
 function present(r: Record<string, unknown>, field: string): unknown {

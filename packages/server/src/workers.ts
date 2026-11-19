@@ -20,6 +20,4 @@ function r2Store(bucket: Pick<R2Bucket, "get">): Store {
   };
 }
 
-export default createApp(r2Store(env.BUCKET), {
-  appId: env.TIDE_APP_ID === "" ? undefined : env.TIDE_APP_ID, // Empty is unset.
-});
+export default createApp(r2Store(env.BUCKET), { appId: env.TIDE_APP_ID });

@@ -11,19 +11,21 @@ export const FAKE_S3 = {
 /** What `stall-body` declares and what it sends before it stops. */
 export const STALL_BODY = { size: 64, sent: 32 };
 
-/** A scripted reply in place of a stored object. */
-export type Behaviour =
-  | "internal-error" // 500 InternalError
-  | "access-denied" // 403 AccessDenied
-  | "html-404" // A 404 that is not an S3 error document
-  | "redirect" // 301 to another path
-  | "truncated-404" // NoSuchKey, then the connection drops mid-document
-  | "gzip" // 200 gzip: a valid unfinished prefix of its declared length, never ended
-  | "no-length" // 200 chunked: one chunk, never ended
-  | "hang" // Never answers
-  | "stall" // 500 headers flushed, then no body
-  | "stall-body" // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
-  | "oversize"; // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
+/** Scripted replies in place of a stored object; the fake also serves each one at `script/<behaviour>`. */
+export const BEHAVIOURS = [
+  "internal-error", // 500 InternalError
+  "access-denied", // 403 AccessDenied
+  "html-404", // A 404 that is not an S3 error document
+  "redirect", // 301 to another path
+  "truncated-404", // NoSuchKey, then the connection drops mid-document
+  "gzip", // 200 gzip: a valid unfinished prefix of its declared length, never ended
+  "no-length", // 200 chunked: one chunk, never ended
+  "hang", // Never answers
+  "stall", // 500 headers flushed, then no body
+  "stall-body", // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
+  "oversize", // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
+] as const;
+export type Behaviour = (typeof BEHAVIOURS)[number];
 
 /** Points in a request's life a test can wait for. */
 export type FakeEvent =

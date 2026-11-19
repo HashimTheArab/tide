@@ -9,6 +9,7 @@ import {
   assetContentType,
   contentKey,
   decodeStoredReply,
+  isUuid,
   replyKey,
 } from "@tide/protocol";
 
@@ -17,12 +18,11 @@ import { abortable, readBounded } from "./store.ts";
 
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
 const NO_STORE = { "cache-control": "no-store" };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Media-type parameters and q-values are ignored: stock clients send multipart/mixed, the only type Tide stores.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
 
 export interface AppOptions {
-  /** When set, a request whose `expo-app-id` is present and differs is rejected. */
+  /** When set and not empty, a request whose `expo-app-id` is present and differs is rejected. */
   readonly appId?: string | undefined;
   /** Returns the one deadline covering every store read of a `/manifest` request. */
   readonly replyDeadline?: () => AbortSignal;
@@ -30,7 +30,8 @@ export interface AppOptions {
 
 /** Returns the Tide HTTP app; it uses only web-standard APIs, so every runtime serves the same app. */
 export function createApp(store: Store, options: AppOptions = {}): Hono {
-  const { appId, replyDeadline = () => AbortSignal.timeout(10_000) } = options;
+  const { replyDeadline = () => AbortSignal.timeout(10_000) } = options;
+  const appId = options.appId === "" ? undefined : options.appId; // Empty is unset.
   // A received header value never has edge whitespace, so such an app ID could never match.
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw new Error("app ID must be printable ASCII without edge whitespace");
@@ -91,11 +92,9 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     try {
       const pointer = await read(key, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
-      const current = {
-        update: header("expo-current-update-id"),
-        embedded: header("expo-embedded-update-id"),
-      };
-      if (pointer !== undefined && !isCurrent(pointer, current)) reply = pointer;
+      const current = header("expo-current-update-id");
+      const embedded = header("expo-embedded-update-id");
+      if (pointer !== undefined && !isCurrent(pointer, current, embedded)) reply = pointer;
       else {
         const noUpdate = await read(NO_UPDATE_KEY, signal);
         if (noUpdate === undefined) throw new Error(`${NO_UPDATE_KEY} is missing`);
@@ -166,10 +165,11 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
  */
 function isCurrent(
   pointer: StoredReply,
-  ids: { readonly update: string | undefined; readonly embedded: string | undefined },
+  currentId: string | undefined,
+  embeddedId: string | undefined,
 ): boolean {
-  const current = ids.update?.toLowerCase();
-  if (current === undefined || !UUID.test(current)) return false;
+  const current = currentId?.toLowerCase();
+  // Decode checked the manifest's update ID, so equality already implies a UUID.
   if (pointer.kind === "manifest") return current === pointer.updateId;
-  return current === ids.embedded?.toLowerCase();
+  return current !== undefined && isUuid(current) && current === embeddedId?.toLowerCase();
 }

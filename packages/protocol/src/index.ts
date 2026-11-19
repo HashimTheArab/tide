@@ -16,6 +16,7 @@ export {
   decodeStoredReply,
   diskPath,
   encodeStoredReply,
+  isUuid,
   replyKey,
 } from "./reply.ts";
 export { encodeSfvDictionary } from "./sfv.ts";

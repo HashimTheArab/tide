@@ -18,15 +18,8 @@ export function abortable(
   get: Promise<StoredObject | undefined>,
   signal: AbortSignal,
 ): Promise<StoredObject | undefined> {
-  const aborted = Promise.withResolvers<never>();
-  const abort = () => {
-    aborted.reject(signal.reason as Error);
-  };
-  if (signal.aborted) abort();
-  else signal.addEventListener("abort", abort, { once: true });
-  const settled = get.finally(() => {
-    signal.removeEventListener("abort", abort);
-  });
+  const aborted = rejectOnAbort(signal);
+  const settled = get.finally(aborted.dispose);
   settled.then(
     (object) => {
       if (signal.aborted && object !== undefined) discard(object.body);
@@ -57,11 +50,7 @@ export async function readBounded(
   const out = new Uint8Array(size);
   const reader = body.getReader();
   // A cancelled read resolves done: true, so an abort must reject on its own rather than look like EOF.
-  const aborted = Promise.withResolvers<never>();
-  const abort = () => {
-    aborted.reject(signal.reason as Error);
-  };
-  signal.addEventListener("abort", abort, { once: true });
+  const aborted = rejectOnAbort(signal);
   let at = 0;
   try {
     for (;;) {
@@ -76,10 +65,26 @@ export async function readBounded(
     discard(reader);
     throw e;
   } finally {
-    signal.removeEventListener("abort", abort);
+    aborted.dispose();
   }
   if (at !== size) throw new Error(`object ended after ${at} of its ${size} bytes`);
   return out;
+}
+
+/** Returns a promise that rejects with `signal`'s reason once it aborts, until `dispose` is called. */
+function rejectOnAbort(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
+  const { promise, reject } = Promise.withResolvers<never>();
+  const abort = () => {
+    reject(signal.reason as Error);
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  return {
+    promise,
+    dispose: () => {
+      signal.removeEventListener("abort", abort);
+    },
+  };
 }
 
 /** Starts cancelling without waiting: a source's `cancel` may never settle, and must not delay a reply. */

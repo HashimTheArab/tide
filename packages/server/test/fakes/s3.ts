@@ -7,20 +7,7 @@ import { MAX_REPLY_BYTES } from "@tide/protocol";
 
 import type { Behaviour, FakeEvent } from "../shared/fake-s3.ts";
 import { signV4 } from "../../src/core/s3.ts";
-import { FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";
-
-/** Keys scripted from the start, for the adapter tests. */
-export const SCRIPTED = {
-  internalError: "script/internal-error",
-  accessDenied: "script/access-denied",
-  htmlNotFound: "script/html-404",
-  redirect: "script/redirect",
-  truncatedNoSuchKey: "script/truncated-404",
-  gzip: "script/gzip",
-  noLength: "script/no-length",
-  hang: "script/hang",
-  stall: "script/stall",
-};
+import { BEHAVIOURS, FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";
 
 const SIGNED_HEADERS = "host;x-amz-content-sha256;x-amz-date";
 
@@ -39,9 +26,7 @@ export interface FakeS3 {
  */
 export async function startFakeS3(): Promise<FakeS3> {
   const objects = new Map<string, Uint8Array>();
-  const behaviours = new Map<string, Behaviour>(
-    Object.values(SCRIPTED).map((key) => [key, key.slice("script/".length) as Behaviour]),
-  );
+  const behaviours = new Map<string, Behaviour>(BEHAVIOURS.map((b) => [`script/${b}`, b]));
   const events = new Map<string, PromiseWithResolvers<void>>();
   const event = (name: FakeEvent, key: string) => {
     let e = events.get(`${name} ${key}`);
