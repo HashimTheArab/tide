@@ -1,19 +1,35 @@
 import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
-import type { ManifestInput, Part, PartName } from "../src/index.ts";
+import type { ManifestInput, Part, PartName, Signer } from "../src/index.ts";
+import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   ProtocolError,
   assetHash,
   buildManifest,
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
+  certificatePublicKey,
   contentKey,
+  cryptoKeySigner,
   encodeMultipart,
   encodeSfvDictionary,
+  expoSignature,
   parseMultipart,
   sha256Base64Url,
+  verifyExpoSignature,
 } from "../src/index.ts";
+import { parseSfvDictionary } from "../src/sfv.ts";
+import {
+  BOUNDARY,
+  EXPO_GOLDEN,
+  RSA_SHA256,
+  TIDE_GOLDEN,
+  certificate,
+  goldenParts,
+  pem,
+  signedFixtures,
+} from "./fixtures.ts";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -34,10 +50,10 @@ const hex = (bytes: Uint8Array) =>
 /** Passes a malformed value where the types forbid it, as a JavaScript caller could. */
 const loose = <T>(value: unknown) => value as T;
 
-function rejects(run: () => unknown, field: string, message = ""): void {
+async function rejects(run: () => unknown, field: string, message = "") {
   let error: unknown;
   try {
-    run();
+    await run();
   } catch (e) {
     error = e;
   }
@@ -85,8 +101,8 @@ describe("hash", () => {
     ["/", `/${PNG_HASH.slice(1)}`],
     ["a non-canonical last character", `${EMPTY_HASH.slice(0, 42)}V`],
     ["a non-string", 123],
-  ])("contentKey rejects %s", (_, hash) => {
-    rejects(() => contentKey(loose(hash)), "hash");
+  ])("contentKey rejects %s", async (_, hash) => {
+    await rejects(() => contentKey(loose(hash)), "hash");
   });
 });
 
@@ -313,10 +329,10 @@ describe("manifest", () => {
         extra(d, loop);
       },
     ],
-  ])("buildManifest rejects %s", (_, field, change) => {
+  ])("buildManifest rejects %s", async (_, field, change) => {
     const d = draft();
     change(d);
-    rejects(() => build(d), field);
+    await rejects(() => build(d), field);
   });
 });
 
@@ -343,8 +359,8 @@ describe("directives", () => {
     ["a missing commitTime", {}, "commitTime"],
     ["a null input", null, "input"],
     ["an undefined input", undefined, "input"],
-  ])("rollBackToEmbedded rejects %s", (_, input, field) => {
-    rejects(() => buildRollBackToEmbedded(loose(input)), field);
+  ])("rollBackToEmbedded rejects %s", async (_, input, field) => {
+    await rejects(() => buildRollBackToEmbedded(loose(input)), field);
   });
 });
 
@@ -366,32 +382,94 @@ describe("sfv", () => {
     ["a leading digit", { "1branch": "main" }, "1branch"],
     ["a non-ASCII value", { branch: "café" }, "branch"],
     ["a non-string value", { branch: 1 }, "branch"],
-  ])("rejects %s", (_, members, field) => {
-    rejects(() => encodeSfvDictionary(loose(members)), field);
+  ])("rejects %s", async (_, members, field) => {
+    await rejects(() => encodeSfvDictionary(loose(members)), field);
+  });
+
+  const str = (text: string) => ({ kind: "string", text });
+  test.each<[string, string, [string, object][]]>([
+    ["escaped strings", 'a="say \\"hi\\" \\\\ bye"', [["a", str('say "hi" \\ bye')]]],
+    ["the empty header", "", []],
+    [
+      "surrounding and separating whitespace",
+      '  a="x" ,\tb="y"\t',
+      [
+        ["a", str("x")],
+        ["b", str("y")],
+      ],
+    ],
+    [
+      "parameters, which are dropped",
+      'a="x";p=1;q;r="s", b="y"',
+      [
+        ["a", str("x")],
+        ["b", str("y")],
+      ],
+    ],
+    [
+      "a repeated key, last wins",
+      'a="1", b="2", a="3"',
+      [
+        ["a", str("3")],
+        ["b", str("2")],
+      ],
+    ],
+    [
+      "every other item by kind",
+      't=tok/en:x, i=-42, d=1.125, bs=:aGk=:, z=::, b=?0, l=("a" b;p=1);q, e=(), bare;p',
+      [
+        ["t", { kind: "token", text: "tok/en:x" }],
+        ["i", { kind: "number" }],
+        ["d", { kind: "number" }],
+        ["bs", { kind: "bytes" }],
+        ["z", { kind: "bytes" }],
+        ["b", { kind: "boolean" }],
+        ["l", { kind: "inner-list" }],
+        ["e", { kind: "inner-list" }],
+        ["bare", { kind: "boolean" }],
+      ],
+    ],
+  ])("parses %s", (_, header, members) => {
+    expect([...parseSfvDictionary(header, "h")]).toEqual(members);
+  });
+
+  test.each<[string, string, string]>([
+    ["an uppercase key", 'A="x"', "expected a key"],
+    ["a missing value", "a=", "expected an item"],
+    ["a trailing comma", 'a="x",', "trailing comma"],
+    ["a missing comma", 'a="x" b="y"', "expected ,"],
+    ["an unterminated string", 'a="x', "unterminated"],
+    ["a bad escape", 'a="\\q"', "bad escape"],
+    ["a non-ASCII string", 'a="café"', "bad string character"],
+    ["four decimal places", "a=1.2345", "bad number"],
+    ["a 16-digit integer", "a=1234567890123456", "bad number"],
+    ["a trailing decimal point", "a=1.", "bad number"],
+    ["a boolean ?2", "a=?2", "bad boolean"],
+    ["an unclosed inner list", "a=(1 2", "expected space or )"],
+    ["a comma in an inner list", "a=(1,2)", "expected space or )"],
+    ["a bad byte sequence", "a=:ab$:", "bad byte sequence"],
+    // Both stock clients decode byte sequences, even in ignored parameters, and neither takes these.
+    ["an undecodable byte sequence", "a=:A:", "bad byte sequence"],
+    ["an undecodable byte-sequence parameter", 'a="x";p=:A:', "bad byte sequence"],
+    ["unpadded base64", "a=:aGk:", "bad byte sequence"],
+    ["excess padding", "a=:aGk==:", "bad byte sequence"],
+    ["padding mid-sequence", "a=:a=Gk:", "bad byte sequence"],
+    ["an RFC 9651 date", "a=@1", "expected an item"],
+  ])("parse rejects %s", async (_, header, message) => {
+    await rejects(() => parseSfvDictionary(header, "h"), "h", message);
   });
 });
 
-const B = "tide_fixture_boundary";
+const B = BOUNDARY;
 const part = (name: PartName, body: Uint8Array<ArrayBuffer>): Part => ({ name, body });
 const SIGNATURE = 'sig="a", keyid="main"';
+const GOLDEN_PARTS = { ...TIDE_GOLDEN, ...EXPO_GOLDEN };
+const GOLDEN = Object.keys(GOLDEN_PARTS);
 
-/** The golden multipart files and the parts they hold. */
-function golden(): [string, Part[]][] {
-  return [
-    [
-      "manifest.multipart",
-      [
-        part("manifest", fixture("manifest.json")),
-        part("extensions", ascii('{"assetRequestHeaders":{}}')),
-      ],
-    ],
-    ["rollback.multipart", [part("directive", fixture("directive-rollback.json"))]],
-    ["no-update.multipart", [part("directive", fixture("directive-no-update.json"))]],
-    [
-      "certificate.multipart",
-      [part("manifest", fixture("manifest.json")), part("certificate_chain", fixture("chain.pem"))],
-    ],
-  ];
+/** A golden's parts from their source files, each signed part carrying the signature parsed from the golden. */
+function golden(file: string): Promise<Part[]> {
+  const parsed = parseMultipart(fixture(file), B);
+  return goldenParts(GOLDEN_PARTS[file] ?? [], fixture, (_, i) => parsed[i]?.signature ?? "none");
 }
 
 /** Frames parts by hand, independently of encodeMultipart. */
@@ -418,26 +496,27 @@ class AliasingBytes extends Uint8Array<ArrayBuffer> {
 }
 
 describe("multipart", () => {
-  test.each(golden())("encoding the parts of %s gives its bytes", (file, parts) => {
-    expect(encodeMultipart(parts, B)).toEqual({ boundary: B, body: fixture(file) });
+  test.each(GOLDEN)("encoding the parts of %s gives its bytes", async (file) => {
+    expect(encodeMultipart(await golden(file), B)).toEqual({ boundary: B, body: fixture(file) });
   });
 
-  test.each(golden())("parsing %s gives its parts and exact bodies", (file, parts) => {
+  test.each(GOLDEN)("parsing %s gives its parts and exact bodies", async (file) => {
     const parsed = parseMultipart(fixture(file), B);
-    expect(parsed).toEqual(parts);
+    expect(parsed).toEqual(await golden(file));
   });
 
   test("the noUpdateAvailable response carries the builder's directive bytes", () => {
     const [directive] = parseMultipart(fixture("no-update.multipart"), B);
-    expect(directive).toEqual({ name: "directive", body: buildNoUpdateAvailable() });
+    expect(directive?.name).toBe("directive");
+    expect(directive?.body).toEqual(buildNoUpdateAvailable());
   });
 
-  test("the certificate chain part is sent as a PEM file", () => {
-    const parsed = parseMultipart(fixture("certificate.multipart"), B);
-    expect(text(fixture("certificate.multipart"))).toContain(
+  test("the certificate chain part is sent as a PEM file with the chain's exact bytes", () => {
+    const parsed = parseMultipart(fixture("expo.multipart"), B);
+    expect(text(fixture("expo.multipart"))).toContain(
       'name="certificate_chain"\r\nContent-Type: application/x-pem-file\r\n',
     );
-    expect(parsed[1]).toEqual({ name: "certificate_chain", body: fixture("chain.pem") });
+    expect(parsed[1]).toEqual({ name: "certificate_chain", body: fixture("expo-chain.pem") });
   });
 
   test("parsed bodies do not alias the input", () => {
@@ -553,15 +632,18 @@ describe("multipart", () => {
       "parts[0]",
       "contains the boundary",
     ],
-  ])("parse rejects %s", (_, body, field, message) => {
-    rejects(() => parseMultipart(body(), B), field, message);
+  ])("parse rejects %s", async (_, body, field, message) => {
+    await rejects(() => parseMultipart(body(), B), field, message);
   });
 
   test.each<[string, unknown]>([
     ["an empty boundary", ""],
     ["a boundary inside an array", [B]],
-  ])("parse rejects %s", (_, boundary) => {
-    rejects(() => parseMultipart(fixture("no-update.multipart"), loose(boundary)), "boundary");
+  ])("parse rejects %s", async (_, boundary) => {
+    await rejects(
+      () => parseMultipart(fixture("no-update.multipart"), loose(boundary)),
+      "boundary",
+    );
   });
 
   const json = ascii("{}");
@@ -606,9 +688,306 @@ describe("multipart", () => {
       () => [[loose({ ...part("manifest", json), headers: { 0: ["expo-signature", SIGNATURE] } })]],
       "parts[0].headers",
     ],
-  ])("encode rejects %s", (_, args, field) => {
+  ])("encode rejects %s", async (_, args, field) => {
     const [parts, boundary] = args();
-    rejects(() => encodeMultipart(parts, boundary), field);
+    await rejects(() => encodeMultipart(parts, boundary), field);
+  });
+});
+
+const header = (sig: string, rest = ', keyid="main", alg="rsa-v1_5-sha256"') =>
+  `sig="${sig}"${rest}`;
+const sigOf = (h: string) => /sig="([^"]*)"/.exec(h)?.[1] ?? "";
+
+/** Returns `make()`'s promise, made on first use, so key generation runs once per file. */
+function once<T>(make: () => Promise<T>): () => Promise<T> {
+  let made: Promise<T> | undefined;
+  return () => (made ??= make());
+}
+const rsa = (hash: string) => () =>
+  crypto.subtle.generateKey({ ...RSA_SHA256, hash }, true, ["sign", "verify"]);
+const mainKeys = once(rsa("SHA-256"));
+const otherKeys = once(rsa("SHA-256"));
+const sha1Keys = once(rsa("SHA-1"));
+const ecKeys = once(() =>
+  crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]),
+);
+const mainCertificate = once(async () => {
+  const keys = await mainKeys();
+  return certificate(keys.publicKey, keys.privateKey, new Date());
+});
+
+describe("signature", () => {
+  test("expoSignature is the SFV form of the RSA signature and verifies through the certificate", async () => {
+    const keys = await mainKeys();
+    const body = fixture("manifest.json");
+    const raw = new Uint8Array(await crypto.subtle.sign(RSA_SHA256, keys.privateKey, body));
+    const h = await expoSignature(body, cryptoKeySigner(keys.privateKey, "main"));
+    expect(h).toBe(`sig="${base64(raw)}", keyid="main", alg="rsa-v1_5-sha256"`);
+    const key = await certificatePublicKey(await mainCertificate());
+    await expect(verifyExpoSignature(body, h, key, "main")).resolves.toBeUndefined();
+  });
+
+  test("a header without keyid or alg verifies as root with the default algorithm", async () => {
+    const keys = await mainKeys();
+    const body = fixture("manifest.json");
+    const h = await expoSignature(body, cryptoKeySigner(keys.privateKey, "root"));
+    await expect(
+      verifyExpoSignature(body, header(sigOf(h), ""), keys.publicKey, "root"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("parameters, a token member and an earlier duplicate sig do not change the verdict", async () => {
+    const keys = await mainKeys();
+    const body = fixture("manifest.json");
+    const sig = sigOf(await expoSignature(body, cryptoKeySigner(keys.privateKey, "main")));
+    const h = `sig="AAAA", sig="${sig}";p=1, keyid="main";q, t=tok`;
+    await expect(verifyExpoSignature(body, h, keys.publicKey, "main")).resolves.toBeUndefined();
+  });
+
+  test.each<[string, (sig: string) => string, string, string]>([
+    [
+      "an unknown alg",
+      (s) => header(s, ', keyid="main", alg="rsa-v1_5-sha512"'),
+      "signature.alg",
+      "must be rsa-v1_5-sha256",
+    ],
+    ["a keyid mismatch", (s) => header(s, ', keyid="other"'), "signature.keyid", "must be main"],
+    ["an absent keyid, which means root", (s) => header(s, ""), "signature.keyid", "must be main"],
+    ["a header that is not SFV", (s) => `sig="${s}`, "signature", "RFC 8941"],
+    ["sig as a token", () => "sig=abc", "signature", "sig must be a string"],
+    ["sig as a byte sequence", (s) => `sig=:${s}:`, "signature", "sig must be a string"],
+    ["a missing sig", () => 'keyid="main"', "signature", "sig must be a string"],
+    ["unpadded base64", (s) => header(s.replace(/=+$/, "")), "signature", "padded base64"],
+    ["base64url", () => header("-_-_"), "signature", "padded base64"],
+    ["non-canonical base64", () => header("AB=="), "signature", "padded base64"],
+    ["an empty sig", () => header(""), "signature", "padded base64"],
+    ["keyid as a token", (s) => header(s, ", keyid=root"), "signature", "keyid must be a string"],
+    [
+      "an undecodable byte-sequence parameter",
+      (s) => `${header(s)};p=:A:`,
+      "signature",
+      "bad byte sequence",
+    ],
+    // iOS reads the whole dictionary as [String: String], so any member but a string or token fails there.
+    [
+      "a boolean member",
+      (s) => `${header(s)}, flag=?1`,
+      "signature",
+      "flag must be a string or token",
+    ],
+    ["a bare key", (s) => `${header(s)}, flag`, "signature", "flag must be a string or token"],
+    ["a number member", (s) => `${header(s)}, n=1`, "signature", "n must be a string or token"],
+    [
+      "a byte-sequence member",
+      (s) => `${header(s)}, b=:aGk=:`,
+      "signature",
+      "b must be a string or token",
+    ],
+    [
+      "an inner-list member",
+      (s) => `${header(s)}, l=("a")`,
+      "signature",
+      "l must be a string or token",
+    ],
+    [
+      "alg as a boolean",
+      (s) => header(s, ', keyid="main", alg=?1'),
+      "signature",
+      "alg must be a string",
+    ],
+  ])("verify rejects %s", async (_, make, field, message) => {
+    const keys = await mainKeys();
+    const body = fixture("manifest.json");
+    const sig = sigOf(await expoSignature(body, cryptoKeySigner(keys.privateKey, "main")));
+    await rejects(
+      () => verifyExpoSignature(body, make(sig), keys.publicKey, "main"),
+      field,
+      message,
+    );
+  });
+
+  test("verify rejects other bytes and another key's signature", async () => {
+    const [keys, other] = [await mainKeys(), await otherKeys()];
+    const body = fixture("manifest.json");
+    const h = await expoSignature(body, cryptoKeySigner(keys.privateKey, "main"));
+    const wrong = fixture("directive-no-update.json");
+    await rejects(() => verifyExpoSignature(wrong, h, keys.publicKey, "main"), "signature.sig");
+    const byOther = await expoSignature(body, cryptoKeySigner(other.privateKey, "main"));
+    await rejects(
+      () => verifyExpoSignature(body, byOther, keys.publicKey, "main"),
+      "signature.sig",
+    );
+  });
+
+  test("a SHA-1 signature labelled rsa-v1_5-sha256 never verifies", async () => {
+    const sha1 = await sha1Keys();
+    const body = fixture("manifest.json");
+    const h = header(
+      base64(new Uint8Array(await crypto.subtle.sign(RSA_SHA256, sha1.privateKey, body))),
+    );
+    await rejects(() => verifyExpoSignature(body, h, sha1.publicKey, "main"), "key", "SHA-256");
+    const spki = await crypto.subtle.exportKey("spki", sha1.publicKey);
+    const asSha256 = await crypto.subtle.importKey("spki", spki, RSA_SHA256, false, ["verify"]);
+    await rejects(() => verifyExpoSignature(body, h, asSha256, "main"), "signature.sig");
+  });
+
+  test("verify rejects a private key", async () => {
+    const keys = await mainKeys();
+    await rejects(
+      () => verifyExpoSignature(fixture("manifest.json"), header("AAAA"), keys.privateKey, "main"),
+      "key",
+      "public",
+    );
+  });
+
+  test("cryptoKeySigner rejects a SHA-1 key and a public key", async () => {
+    const [sha1, keys] = [await sha1Keys(), await mainKeys()];
+    await rejects(() => cryptoKeySigner(sha1.privateKey, "main"), "key", "SHA-256");
+    await rejects(() => cryptoKeySigner(keys.publicKey, "main"), "key", "private");
+  });
+
+  test.each<[string, string, string]>([
+    ["an empty keyId", "", "keyId"],
+    ["a non-ASCII keyId", "clé", "keyId"],
+    ["a keyId with a newline", "a\nb", "keyId"],
+  ])("expoSignature rejects %s before the signer runs", async (_, keyId, field) => {
+    let calls = 0;
+    const signer: Signer = {
+      keyId,
+      sign: () => {
+        calls++;
+        return Promise.resolve(new Uint8Array([1]));
+      },
+    };
+    await rejects(() => expoSignature(fixture("manifest.json"), signer), field);
+    expect(calls).toBe(0);
+  });
+
+  test.each<[string, unknown]>([
+    ["empty bytes", new Uint8Array()],
+    ["an ArrayBuffer", new ArrayBuffer(4)],
+    ["a string", "sig"],
+  ])("expoSignature rejects a signer resolving %s", async (_, result) => {
+    const signer: Signer = { keyId: "main", sign: () => Promise.resolve(loose(result)) };
+    await rejects(() => expoSignature(fixture("manifest.json"), signer), "signer");
+  });
+});
+
+/** The DER of a PEM certificate. */
+const derOf = (text: string) => decodeBase64(text.replace(/-----[^-]+-----|\n/g, ""))!;
+
+describe("certificate", () => {
+  test.each<[string, (der: Uint8Array<ArrayBuffer>) => string, string]>([
+    [
+      "no CERTIFICATE block",
+      () => "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+      "no CERTIFICATE block",
+    ],
+    ["bad base64", (d) => pem(d).replace("\n", "\n!"), "canonical base64"],
+    ["a space inside the base64", (d) => pem(d).replace("\n", "\n "), "canonical base64"],
+    [
+      "an empty block",
+      () => "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
+      "canonical base64",
+    ],
+    ["truncated DER", (d) => pem(d.subarray(0, -1)), "truncated"],
+    [
+      "an indefinite length",
+      () => pem(new Uint8Array([0x30, 0x80, 0x00, 0x00])),
+      "minimal and definite",
+    ],
+    [
+      "a long-form length below 128",
+      () => pem(new Uint8Array([0x30, 0x81, 0x03, 0x02, 0x01, 0x00])),
+      "minimal and definite",
+    ],
+    [
+      "a length with a leading zero octet",
+      (d) => pem(new Uint8Array([0x30, 0x83, 0x00, ...d.subarray(2)])),
+      "minimal and definite",
+    ],
+    [
+      "an extra child in the envelope",
+      (d) => pem(rewrap(d, [0x05, 0x00])),
+      "exactly SEQUENCE { tbs, algorithm, signature }",
+    ],
+    [
+      "bytes after the certificate",
+      (d) => pem(new Uint8Array([...d, 0x00])),
+      "bytes after the DER",
+    ],
+    ["a high tag number", () => pem(new Uint8Array([0x1f, 0x01, 0x00])), "high DER tag number"],
+    [
+      "an empty TBSCertificate",
+      () => pem(new Uint8Array([0x30, 7, 0x30, 0, 0x30, 0, 3, 1, 0])),
+      "malformed TBSCertificate",
+    ],
+    ["a non-sequence envelope", () => pem(new Uint8Array([0x04, 0x00])), "expected a DER SEQUENCE"],
+  ])("certificatePublicKey rejects %s", async (_, make, message) => {
+    const der = derOf(await mainCertificate());
+    await rejects(() => certificatePublicKey(make(der)), "certificate", message);
+  });
+
+  test("certificatePublicKey rejects a certificate for an EC key", async () => {
+    const ec = await ecKeys();
+    const pemText = await certificate(ec.publicKey, (await mainKeys()).privateKey, new Date());
+    await rejects(() => certificatePublicKey(pemText), "certificate", "RSA public key");
+  });
+});
+
+/** Returns the certificate DER with `extra` appended inside its outer SEQUENCE; the outer length takes two octets. */
+function rewrap(der: Uint8Array, extra: number[]): Uint8Array<ArrayBuffer> {
+  const body = [...der.subarray(4), ...extra];
+  return new Uint8Array([0x30, 0x82, body.length >> 8, body.length & 0xff, ...body]);
+}
+
+describe("signed goldens", () => {
+  test.each(Object.keys(TIDE_GOLDEN))(
+    "every signed part of %s verifies against certificate.pem as main",
+    async (file) => {
+      const key = await certificatePublicKey(text(fixture("certificate.pem")));
+      const signed = parseMultipart(fixture(file), B).filter((p) => p.signature !== undefined);
+      expect(signed.length).toBe(TIDE_GOLDEN[file]?.filter((p) => p.signed).length);
+      for (const p of signed)
+        await expect(
+          verifyExpoSignature(p.body, p.signature!, key, "main"),
+        ).resolves.toBeUndefined();
+    },
+  );
+
+  test("the generator's fixtures carry the committed parts, signed for its certificate", async () => {
+    const keys = await mainKeys();
+    const key = await certificatePublicKey(await mainCertificate());
+    const files = await signedFixtures(fixture, cryptoKeySigner(keys.privateKey, "main"));
+    expect(Object.keys(files)).toEqual(Object.keys(TIDE_GOLDEN));
+    const shape = (bytes: Uint8Array<ArrayBuffer>) =>
+      parseMultipart(bytes, B).map(({ name, body, signature }) => [name, body, !signature]);
+    for (const [file, bytes] of Object.entries(files)) {
+      expect(shape(bytes)).toEqual(shape(fixture(file)));
+      for (const p of parseMultipart(bytes, B).filter((p) => p.signature !== undefined))
+        await expect(
+          verifyExpoSignature(p.body, p.signature!, key, "main"),
+        ).resolves.toBeUndefined();
+    }
+  });
+
+  test("the expo-updates directive verifies against the chain's leaf as root", async () => {
+    const [directive] = parseMultipart(fixture("expo.multipart"), B);
+    const leaf = await certificatePublicKey(text(fixture("expo-chain.pem")));
+    await expect(
+      verifyExpoSignature(directive!.body, directive!.signature!, leaf, "root"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("the expo-updates directive with one body byte changed fails", async () => {
+    const [directive] = parseMultipart(fixture("expo.multipart"), B);
+    const leaf = await certificatePublicKey(text(fixture("expo-chain.pem")));
+    const body = new Uint8Array(directive!.body);
+    body[10]! ^= 0x01;
+    await rejects(
+      () => verifyExpoSignature(body, directive!.signature!, leaf, "root"),
+      "signature.sig",
+    );
   });
 });
 
@@ -669,6 +1048,34 @@ describe(`properties (seed ${seed})`, () => {
         const parsed = parseMultipart(encoded.body, encoded.boundary);
         expect(parsed).toEqual(ps);
       }),
+      { seed },
+    );
+  });
+
+  test("a signed manifest verifies, and any flipped byte of body or signature fails", async () => {
+    const keys = await mainKeys();
+    const signer = cryptoKeySigner(keys.privateKey, "main");
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uuid(),
+        fc.string({ minLength: 1 }),
+        fc.dictionary(fc.string(), fc.jsonValue(), { maxKeys: 4 }),
+        fc.boolean(),
+        fc.nat(),
+        fc.integer({ min: 1, max: 255 }),
+        async (id, runtimeVersion, extra, inSignature, at, mask) => {
+          const d = draft();
+          Object.assign(d.input, { id, runtimeVersion, extra });
+          const body = build(d);
+          const h = await expoSignature(body, signer);
+          await verifyExpoSignature(body, h, keys.publicKey, "main");
+          const sig = decodeBase64(sigOf(h))!;
+          const flipped = new Uint8Array(inSignature ? sig : body);
+          flipped[at % flipped.length]! ^= mask;
+          const [b, s] = inSignature ? [body, header(base64(flipped))] : [flipped, h];
+          await rejects(() => verifyExpoSignature(b, s, keys.publicKey, "main"), "signature.sig");
+        },
+      ),
       { seed },
     );
   });

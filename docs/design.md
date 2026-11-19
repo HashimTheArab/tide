@@ -103,7 +103,8 @@ without an app release.
 ## Observability
 
 One analytics data point per `/manifest` (runtime, platform, current and embedded IDs, recent failed update IDs,
-fatal-error flag), and a synthetic probe that verifies a manifest's signature and fetches its bundle.
+fatal-error flag), and a synthetic probe that verifies a manifest's signature against a pinned certificate and
+fetches its bundle.
 
 ## Later
 

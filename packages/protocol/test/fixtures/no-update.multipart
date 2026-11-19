@@ -1,6 +1,7 @@
 --tide_fixture_boundary
 Content-Disposition: form-data; name="directive"
 Content-Type: application/json
+expo-signature: sig="dTHLsWg0Z07lU90aIulaoF/N750zI4KK2Tg0g+8rQ13TQ2ob1b2oiXwuCROjioGASmZX+FkXDSdKLGU7uBZ8ikpez/I1NXe0ecRFZVAs6O83H9KQPxoO+C5ttKXbpnLfKqIOLc+4KOv1Nr7pESZRfITaMAXju4V4SuRznsqSNNIZftcuuOFfp8+BHrUiXVCl2pAYfIjEHs+xAcH2lpDvu2XBAjSskq9pYIRFLU516H5dLgZV+pO2A+iLa+yXVIB7UhJLqYfuquqJ3dQq58tdbz9HvpbYxRDrSF9I+3FG+SAy1Gl5JFCOAGsSx3egnJkGnSqMaEPcmcVdvYni5/ekRg==", keyid="main", alg="rsa-v1_5-sha256"
 
 {"type":"noUpdateAvailable"}
 --tide_fixture_boundary--

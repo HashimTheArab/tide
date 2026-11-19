@@ -1,4 +1,4 @@
-/** The one error this package throws for malformed input; `field` names the offending input. */
+/** The one error this package throws for rejected input; `field` names the offending input. */
 export class ProtocolError extends Error {
   readonly field: string;
 
@@ -12,9 +12,26 @@ export class ProtocolError extends Error {
 /** Returns the SHA-256 of `bytes` as unpadded base64url, the Expo manifest `hash` field. */
 export async function sha256Base64Url(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return base64(digest).replaceAll("+", "-").replaceAll("/", "_").replace(/=$/, "");
+}
+
+/** Returns `bytes` as standard padded base64. */
+export function base64(bytes: Uint8Array): string {
   let binary = "";
-  for (const b of digest) binary += String.fromCharCode(b);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=$/, "");
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+/** Returns the bytes of non-empty canonical padded base64, or undefined. */
+export function decodeBase64(text: string): Uint8Array<ArrayBuffer> | undefined {
+  if (
+    text === "" ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)
+  ) {
+    return undefined;
+  }
+  const bytes = Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+  return base64(bytes) === text ? bytes : undefined;
 }
 
 /** Returns `value` if it is the canonical 43-character base64url encoding of a 32-byte digest. */

@@ -2,5 +2,10 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignore": [
     ".claude/workflows/**"
-  ]
+  ],
+  "workspaces": {
+    "packages/protocol": {
+      "entry": ["test/generate-fixtures.ts"]
+    }
+  }
 }

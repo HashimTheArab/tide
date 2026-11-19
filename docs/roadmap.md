@@ -11,7 +11,7 @@ each plans as one PR. P2 to P5 are risky: each gets a design note and the deep r
 | Phase | Scope | State |
 | --- | --- | --- |
 | P1 | Workspace: tooling, gate, CI, docs, delivery loop, Workers and Node entry points with a health check | done |
-| P2 | `packages/protocol`: manifest and directive types, multipart encode and parse, signature sign and verify, asset hashing, golden fixtures | pending |
+| P2 | `packages/protocol`: manifest and directive types, multipart encode and parse, signature sign and verify, asset hashing, golden fixtures | done |
 | P3 | Server: `Store` with R2, S3 and disk adapters; `/manifest`, `/assets?h=`, `/hc`; the same tests on workerd and Node | pending |
 | P4 | CLI: `publish` (export, hash, upload, compose, sign with a file, env or KMS key, lock, conditional pointer write, `createdAt` guard, asset key identity check), `rollback`, `republish`, `status`, `gc` | pending |
 | P5 | Bundle diffing: `register-build`, `BSDIFF40` generation with self-check, `/bundles/<hash>` patch negotiation | pending |
