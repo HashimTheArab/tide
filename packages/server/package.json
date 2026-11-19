@@ -9,8 +9,8 @@
   "scripts": {
     "dev:workers": "wrangler dev",
     "dev:node": "node src/node.ts",
-    "types": "wrangler types",
-    "typecheck": "wrangler types --check && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.workers.json",
+    "types": "wrangler types --strict-vars=false",
+    "typecheck": "wrangler types --strict-vars=false --check && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.workers.json",
     "test": "vitest run"
   },
   "dependencies": {

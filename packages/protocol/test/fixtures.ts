@@ -1,7 +1,7 @@
 // Shared by the tests and the fixture generator; Web APIs only, so it also runs on workerd.
-import type { Part, PartName, Signer } from "../src/index.ts";
+import type { Part, PartName, Signer, StoredReply } from "../src/index.ts";
 import { base64 } from "../src/hash.ts";
-import { encodeMultipart, expoSignature } from "../src/index.ts";
+import { encodeMultipart, encodeStoredReply, expoSignature } from "../src/index.ts";
 
 export const BOUNDARY = "tide_fixture_boundary";
 
@@ -54,6 +54,43 @@ export async function signedFixtures(
     out[file] = encodeMultipart(signed, BOUNDARY).body;
   }
   return out;
+}
+
+type Fields<R> = R extends unknown ? Omit<R, "body"> : never;
+
+/** Each stored reply golden: the multipart it wraps and its other fields, as the publisher derives them. */
+export const TIDE_REPLY_GOLDEN: Readonly<
+  Record<string, { readonly multipart: string; readonly reply: Fields<StoredReply> }>
+> = {
+  "manifest.reply.json": {
+    multipart: "manifest.multipart",
+    reply: {
+      kind: "manifest",
+      updateId: "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90", // manifest.json's id
+      boundary: BOUNDARY,
+      manifestFilters: 'branch="main"', // manifest.json's metadata
+    },
+  },
+  "rollback.reply.json": {
+    multipart: "rollback.multipart",
+    reply: { kind: "rollBackToEmbedded", boundary: BOUNDARY },
+  },
+  "no-update.reply.json": {
+    multipart: "no-update.multipart",
+    reply: { kind: "noUpdateAvailable", boundary: BOUNDARY },
+  },
+};
+
+/** Returns each stored reply golden's bytes, wrapping the multiparts `read` returns. */
+export function replyGoldens(
+  read: (file: string) => Uint8Array<ArrayBuffer>,
+): Record<string, Uint8Array<ArrayBuffer>> {
+  return Object.fromEntries(
+    Object.entries(TIDE_REPLY_GOLDEN).map(([file, { multipart, reply }]) => [
+      file,
+      encodeStoredReply({ ...reply, body: read(multipart) }),
+    ]),
+  );
 }
 
 export const RSA_SHA256 = {

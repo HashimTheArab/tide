@@ -38,8 +38,9 @@ export function s3Store(config: S3Config): Store {
   const credentials = { ...config, service: "s3" };
 
   return {
-    async get(key) {
-      const url = new URL(`/${config.bucket}/${key}`, endpoint);
+    async get(key, signal) {
+      // S3 reads a literal + in a path as a space, so each segment is sent in SigV4's encoding.
+      const url = new URL(`/${config.bucket}/${key.split("/").map(uriEncode).join("/")}`, endpoint);
       const signed = {
         host: url.host,
         "x-amz-content-sha256": EMPTY_SHA256,
@@ -55,8 +56,10 @@ export function s3Store(config: S3Config): Store {
       try {
         const res = await fetch(url, {
           headers: { ...headers, authorization },
-          redirect: "error",
-          signal: controller.signal,
+          redirect: "manual", // A redirect is a non-200, so an error; workerd has no "error" mode.
+          // The caller's signal also ends a body mid-read.
+          signal:
+            signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
         });
         if (res.status === 200) {
           clearTimeout(timer); // A long download must not be cut off.
