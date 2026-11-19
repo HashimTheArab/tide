@@ -5,6 +5,7 @@ import type { ManifestInput, Part, PartName, Signer } from "../src/index.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   ProtocolError,
+  assetContentType,
   assetHash,
   buildManifest,
   buildNoUpdateAvailable,
@@ -333,6 +334,75 @@ describe("manifest", () => {
     const d = draft();
     change(d);
     await rejects(() => build(d), field);
+  });
+});
+
+// Metro's default `assetExts`, then the ones `@expo/metro-config` adds (packages/@expo/metro-config/src/ExpoMetroConfig.ts).
+const METRO_ASSET_EXTS = [
+  "bmp",
+  "gif",
+  "jpg",
+  "jpeg",
+  "png",
+  "psd",
+  "svg",
+  "webp",
+  "xml",
+  "m4v",
+  "mov",
+  "mp4",
+]
+  .concat([
+    "mpeg",
+    "mpg",
+    "webm",
+    "aac",
+    "aiff",
+    "caf",
+    "m4a",
+    "mp3",
+    "wav",
+    "html",
+    "pdf",
+    "yaml",
+    "yml",
+  ])
+  .concat(["otf", "ttf", "zip"]);
+const EXPO_ASSET_EXTS = ["woff", "woff2", "heic", "avif", "db"];
+
+describe("assetContentType", () => {
+  test.each([
+    ["bundle", "application/javascript"],
+    ["hbc", "application/javascript"],
+    ["png", "image/png"],
+    ["PNG", "image/png"],
+    ["jpeg", "image/jpeg"],
+    ["heic", "image/heic"],
+    ["woff2", "font/woff2"],
+    ["db", "application/vnd.sqlite3"],
+  ])("%s is %s", (ext, type) => {
+    expect(assetContentType(ext)).toBe(type);
+  });
+
+  test.each(["", "zzz", ".png", "constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "%j falls back to application/octet-stream",
+    (ext) => {
+      expect(assetContentType(ext)).toBe("application/octet-stream");
+    },
+  );
+
+  test("every extension a default Expo project bundles has a known type", () => {
+    for (const ext of [...METRO_ASSET_EXTS, ...EXPO_ASSET_EXTS]) {
+      expect(assetContentType(ext), ext).not.toBe("application/octet-stream");
+    }
+  });
+
+  test("every type passes buildManifest as an asset contentType", () => {
+    for (const ext of [...METRO_ASSET_EXTS, ...EXPO_ASSET_EXTS, "bundle", "js", "hbc"]) {
+      const d = draft();
+      d.asset.contentType = assetContentType(ext);
+      expect(text(build(d))).toContain(`"contentType":"${assetContentType(ext)}"`);
+    }
   });
 });
 

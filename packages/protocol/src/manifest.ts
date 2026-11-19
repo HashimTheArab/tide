@@ -18,6 +18,53 @@ export interface Asset {
 /** The launch asset; the builder derives its key from `hash`, so the key cannot name other bytes. */
 export type LaunchAsset = Omit<Asset, "key">;
 
+// Every asset extension a default Expo project bundles (Metro's `assetExts` plus Expo's), and the launch bundle's.
+const CONTENT_TYPES = new Map(
+  Object.entries({
+    bundle: "application/javascript",
+    js: "application/javascript",
+    hbc: "application/javascript",
+    bmp: "image/bmp",
+    gif: "image/gif",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    psd: "image/vnd.adobe.photoshop",
+    svg: "image/svg+xml",
+    webp: "image/webp",
+    heic: "image/heic",
+    avif: "image/avif",
+    xml: "application/xml",
+    html: "text/html",
+    pdf: "application/pdf",
+    yaml: "application/yaml",
+    yml: "application/yaml",
+    zip: "application/zip",
+    db: "application/vnd.sqlite3",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mp4: "video/mp4",
+    mpeg: "video/mpeg",
+    mpg: "video/mpeg",
+    webm: "video/webm",
+    aac: "audio/aac",
+    aiff: "audio/x-aiff",
+    caf: "audio/x-caf",
+    m4a: "audio/mp4",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    otf: "font/otf",
+    ttf: "font/ttf",
+    woff: "font/woff",
+    woff2: "font/woff2",
+  }),
+);
+
+/** Returns the media type for a bare file extension (`png`, no dot); `application/octet-stream` when unknown. */
+export function assetContentType(ext: string): string {
+  return CONTENT_TYPES.get(ext.toLowerCase()) ?? "application/octet-stream";
+}
+
 export interface ManifestInput {
   readonly id: string;
   readonly createdAt: Date;
