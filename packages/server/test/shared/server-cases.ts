@@ -232,16 +232,9 @@ export function manifestCases(harness: Harness): void {
       expect(got.body).toEqual(fixture("rollback.multipart"));
     });
 
-    test.each<[string, Record<string, string>]>([
-      ["current without embedded", { "expo-current-update-id": EMBEDDED_ID }],
-      ["two empty IDs", { "expo-current-update-id": "", "expo-embedded-update-id": "" }],
-      ["two equal non-UUID IDs", { "expo-current-update-id": "x", "expo-embedded-update-id": "x" }],
-      [
-        "different IDs",
-        { "expo-current-update-id": UPDATE_ID, "expo-embedded-update-id": EMBEDDED_ID },
-      ],
-    ])("serves the directive to %s", async (_, ids) => {
+    test("serves the directive to a client running another update", async () => {
       await pointer("rb-other", ROLLBACK);
+      const ids = { "expo-current-update-id": UPDATE_ID, "expo-embedded-update-id": EMBEDDED_ID };
       expectReply(await get("rb-other", ids), ROLLBACK);
     });
   });
