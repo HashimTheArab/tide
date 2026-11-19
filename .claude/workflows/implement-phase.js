@@ -692,6 +692,25 @@ Report real problems only: correctness, security, data loss, races, idempotency,
       ),
       "deep review",
     ).findings;
+  // Always once, on the whole diff: the other reviews hunt bugs, this one asks whether the design and code are as small
+  // and clear as they can be.
+  const simplicityReview = async () =>
+    must(
+      await opus(
+        `You are a simplicity reviewer in fresh context, and read-only: never edit, commit or push, and leave git status clean. You did not build this slice; read the code, not anyone's account of it.
+Slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, in the worktree ${WT}; the change is git diff origin/main...HEAD.
+Scope: ${S.scope}
+The rules are AGENTS.md, docs/design.md and docs/decisions/. If the simplifying-overgrown-diffs skill is available, apply it.
+Ask whether this is the smallest, clearest design and code that meets the scope. Report:
+- P1 "Smaller design": a materially smaller design that removes a component, dependency, option or piece of state.
+- P2: duplication or parallel lists that must be kept in sync by hand, dead code, an abstraction or option with one user, needless indirection, unclear names, code a reader cannot follow, or a diff out of proportion to the behaviour.
+- P3: a nit.
+Do not report bugs, tests or style the formatter owns; other reviewers cover those. Each finding needs file, line and the concrete simpler replacement in scenario. Report only changes that make the code genuinely smaller or clearer, never churn.`,
+        "simplicity review",
+        DEEP,
+      ),
+      "simplicity review",
+    ).findings;
   const arbiter = (f, d) =>
     opus(
       `You are an independent arbiter in fresh context, and read-only: you may run tests, but never edit, commit or push, and leave git status clean.
@@ -721,9 +740,10 @@ Return closed false, with the reason, when the finding is not resolved, the test
   for (let r = 1; r <= MAX_ROUNDS; r++) {
     rounds = r;
     const why = deepWhy(r);
-    const [cx, dp] = await Promise.all([
+    const [cx, dp, sp] = await Promise.all([
       codexReview(r, base),
       why.length ? deepReview(r, base, why) : Promise.resolve(null),
+      r === 1 ? simplicityReview() : Promise.resolve(null),
     ]);
     const found = [
       ...carried,
@@ -734,12 +754,18 @@ Return closed false, with the reason, when the finding is not resolved, the test
         by: "deep review",
         before: head,
       })),
+      ...(sp || []).map((f, i) => ({
+        ...f,
+        id: `S${r}.${i + 1}`,
+        by: "simplicity review",
+        before: head,
+      })),
     ];
     open = found.filter((f) => f.mustFix || blocking(f, r));
     followUps.push(...found.filter((f) => !f.mustFix && !blocking(f, r)).map(brief));
     const entry = {
       text: "",
-      summary: `Round ${r} (${base.slice(0, 12)}..${head.slice(0, 12)}): Codex ${cx.length} findings; deep review ${dp ? `${dp.length} findings` : "not triggered"}; ${open.length} blocking.`,
+      summary: `Round ${r} (${base.slice(0, 12)}..${head.slice(0, 12)}): Codex ${cx.length} findings; deep review ${dp ? `${dp.length} findings` : "not triggered"}; simplicity review ${sp ? `${sp.length} findings` : "round 1 only"}; ${open.length} blocking.`,
     };
     history.push(entry);
     entry.text = `Round ${r}: ${found.map(brief).join("; ") || "no findings"}`;
