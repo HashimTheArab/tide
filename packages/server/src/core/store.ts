@@ -49,18 +49,23 @@ export async function readBounded(
   }
   const out = new Uint8Array(size);
   const reader = body.getReader();
-  // A cancelled read resolves done: true, so an abort must reject on its own rather than look like EOF.
-  const aborted = rejectOnAbort(signal);
-  let at = 0;
-  try {
+  const fill = async (): Promise<number> => {
+    let at = 0;
     for (;;) {
-      const { done, value } = await Promise.race([reader.read(), aborted.promise]);
-      if (done) break;
+      const { done, value } = await reader.read();
+      if (done) return at;
       // Checked before copying, so memory never passes `size` and an over-long stream need not end.
       if (value.length > size - at) throw new Error(`object is longer than its ${size} bytes`);
       out.set(value, at);
       at += value.length;
     }
+  };
+  // Raced once, not per chunk: each race leaves a reaction on the pending abort promise. A cancelled read resolves
+  // done: true, so an abort must reject on its own rather than look like EOF.
+  const aborted = rejectOnAbort(signal);
+  let at: number;
+  try {
+    at = await Promise.race([fill(), aborted.promise]);
   } catch (e) {
     discard(reader);
     throw e;
