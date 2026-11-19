@@ -1,9 +1,12 @@
 import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
-import type { ManifestInput, Part, PartName, Signer } from "../src/index.ts";
+import type { ManifestInput, Part, PartName, Signer, StoredReply } from "../src/index.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
+  MAX_FILTERS_BYTES,
+  MAX_REPLY_BYTES,
+  NO_UPDATE_KEY,
   ProtocolError,
   assetContentType,
   assetHash,
@@ -13,10 +16,14 @@ import {
   certificatePublicKey,
   contentKey,
   cryptoKeySigner,
+  decodeStoredReply,
+  diskPath,
   encodeMultipart,
   encodeSfvDictionary,
+  encodeStoredReply,
   expoSignature,
   parseMultipart,
+  replyKey,
   sha256Base64Url,
   verifyExpoSignature,
 } from "../src/index.ts";
@@ -26,9 +33,11 @@ import {
   EXPO_GOLDEN,
   RSA_SHA256,
   TIDE_GOLDEN,
+  TIDE_REPLY_GOLDEN,
   certificate,
   goldenParts,
   pem,
+  replyGoldens,
   signedFixtures,
 } from "./fixtures.ts";
 
@@ -1159,6 +1168,317 @@ describe(`properties (seed ${seed})`, () => {
         expect(contentKey(hash)).toBe(
           hex(new Uint8Array(await crypto.subtle.digest("SHA-256", copy))),
         );
+      }),
+      { seed },
+    );
+  });
+});
+
+describe("stored reply", () => {
+  const goldenReply = (file: string): StoredReply => {
+    const { multipart, reply } = TIDE_REPLY_GOLDEN[file]!;
+    return { ...reply, body: fixture(multipart) };
+  };
+  const manifestReply = () => goldenReply("manifest.reply.json");
+  const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
+  /** The manifest golden as a JSON object a case can break, then its UTF-8 bytes. */
+  const record = (change: (o: Record<string, unknown>) => void) => {
+    const o = JSON.parse(text(fixture("manifest.reply.json"))) as Record<string, unknown>;
+    change(o);
+    return utf8(JSON.stringify(o));
+  };
+  /** A manifest reply whose record is exactly `size` bytes, padding an ASCII body. */
+  const replyOfSize = (size: number): StoredReply => {
+    const overhead = encodeStoredReply({ ...manifestReply(), body: ascii("a") }).length - 1;
+    return { ...manifestReply(), body: ascii("a".repeat(size - overhead)) };
+  };
+
+  test.each(Object.keys(TIDE_REPLY_GOLDEN))("encoding %s's fields gives its bytes", (file) => {
+    expect(encodeStoredReply(goldenReply(file))).toEqual(fixture(file));
+  });
+
+  test.each(Object.keys(TIDE_REPLY_GOLDEN))(
+    "decoding %s gives its fields and the multipart's exact bytes",
+    (file) => {
+      const decoded = decodeStoredReply(fixture(file));
+      expect(decoded).toEqual(goldenReply(file));
+      expect(decoded.body).toEqual(fixture(TIDE_REPLY_GOLDEN[file]!.multipart));
+    },
+  );
+
+  test("the generator wraps the multiparts it is given", () => {
+    const files = replyGoldens(fixture);
+    for (const file of Object.keys(TIDE_REPLY_GOLDEN)) expect(files[file]).toEqual(fixture(file));
+  });
+
+  const directive = (change: (o: Record<string, unknown>) => void) => {
+    const o = JSON.parse(text(fixture("rollback.reply.json"))) as Record<string, unknown>;
+    change(o);
+    return utf8(JSON.stringify(o));
+  };
+  test.each<[string, () => Uint8Array, string, string]>([
+    ["malformed JSON", () => ascii('{"version":1,'), "record", "is not JSON"],
+    ["invalid UTF-8", () => new Uint8Array([0x7b, 0xff, 0x7d]), "record", "is not UTF-8"],
+    ["a JSON array", () => ascii("[]"), "record", "must be a JSON object"],
+    ["JSON null", () => ascii("null"), "record", "must be a JSON object"],
+    ["an empty object", () => ascii("{}"), "version", "is missing"],
+    ["a string version", () => record((o) => (o.version = "1")), "version", "must be an integer"],
+    ["version 1.5", () => record((o) => (o.version = 1.5)), "version", "must be an integer"],
+    [
+      "version 2 with every other field invalid",
+      () => ascii('{"version":2,"kind":5,"body":5}'),
+      "version",
+      "is not supported",
+    ],
+    ["a missing kind", () => record((o) => delete o.kind), "kind", "is missing"],
+    ["a missing updateId", () => record((o) => delete o.updateId), "updateId", "is missing"],
+    [
+      "a missing contentType",
+      () => record((o) => delete o.contentType),
+      "contentType",
+      "is missing",
+    ],
+    [
+      "missing manifestFilters",
+      () => record((o) => delete o.manifestFilters),
+      "manifestFilters",
+      "is missing",
+    ],
+    ["a missing body", () => record((o) => delete o.body), "body", "is missing"],
+    ["an unknown kind", () => record((o) => (o.kind = "patch")), "kind", "must be manifest"],
+    ["a numeric updateId", () => record((o) => (o.updateId = 5)), "updateId", "lowercase UUID"],
+    [
+      "an uppercase updateId",
+      () => record((o) => (o.updateId = String(o.updateId).toUpperCase())),
+      "updateId",
+      "lowercase UUID",
+    ],
+    [
+      "a contentType without a boundary",
+      () => record((o) => (o.contentType = "multipart/mixed")),
+      "contentType",
+      "must be multipart/mixed",
+    ],
+    [
+      "another contentType",
+      () => record((o) => (o.contentType = "application/json; boundary=b")),
+      "contentType",
+      "must be multipart/mixed",
+    ],
+    [
+      "a boundary with a space",
+      () => record((o) => (o.contentType = "multipart/mixed; boundary=a b")),
+      "contentType",
+      "must be multipart/mixed",
+    ],
+    [
+      "numeric manifestFilters",
+      () => record((o) => (o.manifestFilters = 1)),
+      "manifestFilters",
+      "must be a string",
+    ],
+    ["an empty body", () => record((o) => (o.body = "")), "body", "non-empty string"],
+    ["a numeric body", () => record((o) => (o.body = 5)), "body", "non-empty string"],
+    [
+      "a body with a lone surrogate",
+      () => ascii(text(record((o) => (o.body = "X"))).replace('"X"', '"\\ud800"')),
+      "body",
+      "is not well-formed Unicode",
+    ],
+    [
+      "updateId on a directive",
+      () => directive((o) => (o.updateId = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90")),
+      "updateId",
+      "is not a field of a rollBackToEmbedded reply",
+    ],
+    [
+      "an unknown field",
+      () => record((o) => (o.createdAt = "now")),
+      "createdAt",
+      "is not a field of a manifest reply",
+    ],
+    [
+      "a record one byte over the limit",
+      () => new Uint8Array(MAX_REPLY_BYTES + 1),
+      "record",
+      "is too large",
+    ],
+  ])("decode rejects %s", async (_, bytes, field, message) => {
+    await rejects(() => decodeStoredReply(bytes()), field, message);
+  });
+
+  test("decode keeps a leading U+FEFF in the body", () => {
+    const body = utf8("﻿--b\r\n");
+    const reply: StoredReply = { kind: "noUpdateAvailable", boundary: "b", body };
+    expect(decodeStoredReply(encodeStoredReply(reply)).body).toEqual(body);
+  });
+
+  const filtersAtLimit = `a="${"x".repeat(MAX_FILTERS_BYTES - 4)}"`;
+  test.each([
+    "branchname=",
+    "a=1",
+    "a=?1",
+    "a=tok",
+    'a="x";p=1',
+    'a=("x")',
+    "a=:AA==:",
+    'a="x", a="y"',
+    'a="x" ,b="y"',
+    'a="x",b="y"',
+    'a="x\r"',
+    `a="${"x".repeat(MAX_FILTERS_BYTES - 3)}"`,
+  ])("encode and decode reject the filters %j", async (filters) => {
+    const reply = { ...manifestReply(), manifestFilters: filters };
+    await rejects(() => encodeStoredReply(reply), "manifestFilters");
+    await rejects(
+      () => decodeStoredReply(record((o) => (o.manifestFilters = filters))),
+      "manifestFilters",
+    );
+  });
+
+  test.each(["", 'a="x"', 'a="x", b="y \\"z\\"", c*.d-e_f="\\\\"', filtersAtLimit])(
+    "encode and decode accept the filters %j",
+    (filters) => {
+      expect(filtersAtLimit.length).toBe(MAX_FILTERS_BYTES);
+      const reply = { ...manifestReply(), manifestFilters: filters };
+      expect(decodeStoredReply(encodeStoredReply(reply))).toEqual(reply);
+    },
+  );
+
+  const base = () => ({ ...manifestReply() }) as Record<string, unknown>;
+  test.each<[string, () => unknown, string]>([
+    ["a null reply", () => null, "reply"],
+    ["an unknown kind", () => ({ ...base(), kind: "patch" }), "kind"],
+    ["a missing updateId", () => ({ ...base(), updateId: undefined }), "updateId"],
+    [
+      "an uppercase updateId",
+      () => ({ ...base(), updateId: "0F6A9A3E-6C1B-4C4E-9D55-2B8F3F7C1A90" }),
+      "updateId",
+    ],
+    ["a boundary with a space", () => ({ ...base(), boundary: "a b" }), "boundary"],
+    ["a missing boundary", () => ({ ...base(), boundary: undefined }), "boundary"],
+    ["an empty body", () => ({ ...base(), body: new Uint8Array() }), "body"],
+    ["a string body", () => ({ ...base(), body: "--b" }), "body"],
+    ["a body that is not UTF-8", () => ({ ...base(), body: new Uint8Array([0xc3]) }), "body"],
+    ["an unknown field", () => ({ ...base(), extra: 1 }), "extra"],
+    [
+      "updateId on a directive",
+      () => ({ ...goldenReply("rollback.reply.json"), updateId: base().updateId }),
+      "updateId",
+    ],
+    ["a record one byte over the limit", () => replyOfSize(MAX_REPLY_BYTES + 1), "record"],
+  ])("encode rejects %s", async (_, reply, field) => {
+    const r = reply();
+    // An undefined field stands for a missing one.
+    if (typeof r === "object" && r !== null) {
+      for (const [k, v] of Object.entries(r)) if (v === undefined) Reflect.deleteProperty(r, k);
+    }
+    await rejects(() => encodeStoredReply(loose(r)), field);
+  });
+
+  test("encode accepts a record of exactly the limit", () => {
+    const bytes = encodeStoredReply(replyOfSize(MAX_REPLY_BYTES));
+    expect(bytes.length).toBe(MAX_REPLY_BYTES);
+    expect(decodeStoredReply(bytes)).toEqual(replyOfSize(MAX_REPLY_BYTES));
+  });
+
+  const ALL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-";
+  test.each<[string, string, string]>([
+    ["main", "1.0.0", "reply/main/1.0.0/ios"],
+    [ALL.slice(0, 64), ALL.slice(4), `reply/${ALL.slice(0, 64)}/${ALL.slice(4)}/ios`],
+    ["...", "a+b", "reply/.../a+b/ios"],
+  ])("replyKey accepts %s and %s", (channel, runtime, key) => {
+    expect(replyKey(channel, runtime, "ios")).toBe(key);
+    expect(replyKey(channel, runtime, "android")).toBe(key.replace(/ios$/, "android"));
+  });
+
+  test.each<[string, string, string, string]>([
+    ["an empty channel", "", "1", "channel"],
+    ["65 characters", "a".repeat(65), "1", "channel"],
+    ["a /", "a/b", "1", "channel"],
+    ["a . channel", ".", "1", "channel"],
+    ["a .. channel", "..", "1", "channel"],
+    ["a space", "a b", "1", "channel"],
+    ["a comma", "a,b", "1", "channel"],
+    ["a %", "a%2Fb", "1", "channel"],
+    ["non-ASCII", "café", "1", "channel"],
+    ["a .. runtime", "main", "..", "runtimeVersion"],
+    ["an empty runtime", "main", "", "runtimeVersion"],
+  ])("replyKey rejects %s", async (_, channel, runtime, field) => {
+    await rejects(() => replyKey(channel, runtime, "ios"), field);
+  });
+
+  test("replyKey rejects an unknown platform", async () => {
+    await rejects(() => replyKey("main", "1", "web"), "platform");
+    await rejects(() => replyKey("main", "1", "IOS"), "platform");
+  });
+
+  test.each<[string, string]>([
+    ["reply/main/1.0.0/ios", "reply/main/1_2e0_2e0/ios"],
+    ["reply/Main/1/android", "reply/_4dain/1/android"],
+    ["reply/no-update/1/ios", "reply/no_2dupdate/1/ios"],
+    ["reply/a_b/a+b/ios", "reply/a_5fb/a_2bb/ios"],
+    [NO_UPDATE_KEY, NO_UPDATE_KEY],
+    [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
+  ])("diskPath maps %s to %s", (key, path) => {
+    expect(diskPath(key)).toBe(path);
+  });
+
+  test.each([
+    "reply/../x/ios",
+    `reply/${"a".repeat(65)}/1/ios`,
+    "reply/a/b/web",
+    "reply/a/b/ios/x",
+    "reply/a/b",
+    "assets/../x",
+    `assets/${PNG_HEX.toUpperCase()}`,
+    "lock",
+    "",
+  ])("diskPath rejects %j", async (key) => {
+    await rejects(() => diskPath(key), "key");
+  });
+
+  const name = fc.stringMatching(/^[A-Za-z0-9._+-]{1,64}$/).filter((n) => n !== "." && n !== "..");
+
+  test(`diskPath names stay distinct after case folding (seed ${seed})`, () => {
+    fc.assert(
+      fc.property(name, name, (a, b) => {
+        fc.pre(a !== b);
+        const [pa, pb] = [diskPath(replyKey(a, "1", "ios")), diskPath(replyKey(b, "1", "ios"))];
+        expect(pa.toLowerCase()).not.toBe(pb.toLowerCase());
+        expect(pa.split("/")[1]).toMatch(/^[a-z0-9_]+$/);
+      }),
+      { seed },
+    );
+  });
+
+  test(`decode(encode(reply)) returns the same fields and body bytes (seed ${seed})`, () => {
+    const filters = fc
+      .dictionary(
+        fc.stringMatching(/^[a-z*][a-z0-9_.*-]{0,8}$/),
+        fc.stringMatching(/^[\x20-\x7E]{0,16}$/),
+        { maxKeys: 4 },
+      )
+      .map(encodeSfvDictionary);
+    const reply = fc.oneof(
+      fc.record({
+        kind: fc.constant("manifest" as const),
+        updateId: fc.uuid(),
+        boundary: fc.stringMatching(/^[0-9A-Za-z_-]{1,70}$/),
+        manifestFilters: filters,
+        body: fc.string({ unit: "binary", minLength: 1 }).map(utf8),
+      }),
+      fc.record({
+        kind: fc.constantFrom("rollBackToEmbedded" as const, "noUpdateAvailable" as const),
+        boundary: fc.stringMatching(/^[0-9A-Za-z_-]{1,70}$/),
+        body: fc.string({ unit: "binary", minLength: 1 }).map(utf8),
+      }),
+    );
+    fc.assert(
+      fc.property(reply, (r) => {
+        const decoded = decodeStoredReply(encodeStoredReply(r));
+        expect(decoded).toEqual(r);
+        expect(decoded.body).toEqual(r.body);
       }),
       { seed },
     );

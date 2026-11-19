@@ -2,8 +2,9 @@
 
 Tests compare these bytes exactly.
 
-Regenerate `certificate.pem` and the signed Tide multiparts with a fresh in-memory key:
-`node packages/protocol/test/generate-fixtures.ts [--out <dir>]`. Then check the certificate's code-signing profile
+Regenerate `certificate.pem`, the signed Tide multiparts and the `.reply.json` stored replies wrapping them with a
+fresh in-memory key: `node packages/protocol/test/generate-fixtures.ts [--out <dir>]`. `--replies-only` rewraps the
+committed multiparts without signing. Then check the certificate's code-signing profile
 once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.pem`.
 
 `expo-directive.json`, `expo-chain.pem` (leaf then intermediate) and the signature in `expo.multipart` come from

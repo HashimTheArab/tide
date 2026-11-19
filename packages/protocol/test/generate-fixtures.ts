@@ -1,22 +1,31 @@
-// Writes certificate.pem and the signed Tide multiparts with a fresh key that never leaves memory.
-// Usage: node packages/protocol/test/generate-fixtures.ts [--out <dir>]
+// Writes certificate.pem, the signed Tide multiparts and the stored replies wrapping them, with a fresh key that
+// never leaves memory. `--replies-only` rewraps the committed multiparts without signing.
+// Usage: node packages/protocol/test/generate-fixtures.ts [--out <dir>] [--replies-only]
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { cryptoKeySigner } from "../src/index.ts";
-import { RSA_SHA256, certificate, signedFixtures } from "./fixtures.ts";
+import { RSA_SHA256, certificate, replyGoldens, signedFixtures } from "./fixtures.ts";
 
 const fixtures = fileURLToPath(new URL("fixtures/", import.meta.url));
-const { values } = parseArgs({ options: { out: { type: "string" } } });
+const { values } = parseArgs({
+  options: { out: { type: "string" }, "replies-only": { type: "boolean" } },
+});
 const out = values.out === undefined ? fixtures : resolve(values.out);
-
-const keys = await crypto.subtle.generateKey(RSA_SHA256, false, ["sign", "verify"]);
-writeFileSync(
-  resolve(out, "certificate.pem"),
-  await certificate(keys.publicKey, keys.privateKey, new Date()),
-);
 const read = (file: string) => new Uint8Array(readFileSync(resolve(fixtures, file)));
-const files = await signedFixtures(read, cryptoKeySigner(keys.privateKey, "main"));
-for (const [file, bytes] of Object.entries(files)) writeFileSync(resolve(out, file), bytes);
+
+let multiparts: Record<string, Uint8Array<ArrayBuffer>> = {};
+if (values["replies-only"] !== true) {
+  const keys = await crypto.subtle.generateKey(RSA_SHA256, false, ["sign", "verify"]);
+  writeFileSync(
+    resolve(out, "certificate.pem"),
+    await certificate(keys.publicKey, keys.privateKey, new Date()),
+  );
+  multiparts = await signedFixtures(read, cryptoKeySigner(keys.privateKey, "main"));
+}
+// The replies wrap the multiparts this run signed, so a fresh certificate never leaves a reply over old bytes.
+const replies = replyGoldens((file) => multiparts[file] ?? read(file));
+for (const [file, bytes] of Object.entries({ ...multiparts, ...replies }))
+  writeFileSync(resolve(out, file), bytes);

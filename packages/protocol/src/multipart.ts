@@ -21,8 +21,9 @@ export interface Part {
 /** RFC 9110 token. */
 export const TOKEN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
 const HEADER_NAME = new RegExp(`^${TOKEN}$`);
-const HEADER_VALUE = /^[\x21-\x7E](?:[\t\x20-\x7E]*[\x21-\x7E])?$/;
-const BOUNDARY = /^[0-9A-Za-z_-]{1,70}$/;
+/** A header value as fetch delivers it: printable ASCII without edge whitespace. */
+export const HEADER_VALUE = /^[\x21-\x7E](?:[\t\x20-\x7E]*[\x21-\x7E])?$/;
+export const BOUNDARY = /^[0-9A-Za-z_-]{1,70}$/;
 const PART_HEADERS = new Set(["content-disposition", "content-type", "expo-signature"]);
 // Any other field is rejected, so a misshapen part cannot drop its signature unnoticed.
 const PART_FIELDS: Record<keyof Part, true> = { name: true, body: true, signature: true };
