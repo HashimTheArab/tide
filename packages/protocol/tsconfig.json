@@ -1,0 +1,5 @@
+{
+  // Protocol code compiles once against Web APIs only and once against Node, the two runtimes it runs on.
+  "files": [],
+  "references": [{ "path": "./tsconfig.web.json" }, { "path": "./tsconfig.node.json" }]
+}

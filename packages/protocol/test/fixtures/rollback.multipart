@@ -1,0 +1,6 @@
+--tide_fixture_boundary
+Content-Disposition: form-data; name="directive"
+Content-Type: application/json
+
+{"type":"rollBackToEmbedded","parameters":{"commitTime":"2026-11-19T08:09:10.123Z"}}
+--tide_fixture_boundary--

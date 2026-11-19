@@ -1,0 +1,6 @@
+--tide_fixture_boundary
+Content-Disposition: form-data; name="directive"
+Content-Type: application/json
+
+{"type":"noUpdateAvailable"}
+--tide_fixture_boundary--

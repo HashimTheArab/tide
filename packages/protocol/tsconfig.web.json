@@ -1,0 +1,10 @@
+{
+  // No Node types: Buffer and process do not compile here.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "WebWorker"],
+    "types": [],
+    "tsBuildInfoFile": "${configDir}/.cache/tsbuildinfo.web.json"
+  },
+  "include": ["src", "test"]
+}
