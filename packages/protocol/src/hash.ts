@@ -17,10 +17,13 @@ export async function sha256Base64Url(bytes: Uint8Array<ArrayBuffer>): Promise<s
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=$/, "");
 }
 
-/** Reports whether `s` is the canonical 43-character base64url encoding of a 32-byte digest. */
-export function isAssetHash(s: unknown): s is string {
+/** Returns `value` if it is the canonical 43-character base64url encoding of a 32-byte digest. */
+export function assetHash(value: unknown, field: string): string {
   // The last character carries 4 data bits and 2 zero bits.
-  return typeof s === "string" && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(s);
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value)) {
+    throw new ProtocolError(field, "must be 43 characters of base64url");
+  }
+  return value;
 }
 
 /**
@@ -28,8 +31,7 @@ export function isAssetHash(s: unknown): s is string {
  * Hex, not the hash itself, so keys stay distinct on case-insensitive disks.
  */
 export function contentKey(hash: string): string {
-  if (!isAssetHash(hash)) throw new ProtocolError("hash", "must be 43 characters of base64url");
-  const binary = atob(`${hash.replaceAll("-", "+").replaceAll("_", "/")}=`);
+  const binary = atob(`${assetHash(hash, "hash").replaceAll("-", "+").replaceAll("_", "/")}=`);
   let hex = "";
   for (let i = 0; i < binary.length; i++) hex += binary.charCodeAt(i).toString(16).padStart(2, "0");
   return hex;

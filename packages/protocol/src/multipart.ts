@@ -11,15 +11,8 @@ const CONTENT_TYPES = {
 export type PartName = keyof typeof CONTENT_TYPES;
 export type Header = readonly [name: string, value: string];
 
-/** A part to encode; `headers` are sent after Content-Disposition and Content-Type, which the encoder writes. */
+/** A part; encode writes Content-Disposition and Content-Type before `headers`, parse returns them in `headers`. */
 export interface Part {
-  readonly name: PartName;
-  readonly headers: readonly Header[];
-  readonly body: Uint8Array<ArrayBuffer>;
-}
-
-/** A parsed part; `headers` is every header line in wire order, Content-Disposition and Content-Type included. */
-export interface ParsedPart {
   readonly name: PartName;
   readonly headers: readonly Header[];
   readonly body: Uint8Array<ArrayBuffer>;
@@ -56,12 +49,11 @@ export function encodeMultipart(
     const headers: Header[] = [
       ["Content-Disposition", `form-data; name="${name}"`],
       ["Content-Type", CONTENT_TYPES[name]],
-      ...part.headers.map(([n, v]): Header => [n, v]),
+      ...part.headers,
     ];
     checkHeaders(headers, field);
     const head = encoder.encode(headers.map(([n, v]) => `${n}: ${v}\r\n`).join(""));
-    // A snapshot, so the bytes checked for the boundary are the bytes written.
-    return { field, head, body: new Uint8Array(part.body) };
+    return { field, head, body: part.body };
   });
 
   let chosen: string;
@@ -70,7 +62,11 @@ export function encodeMultipart(
     while (framed.some((p) => containsBoundary(p.head, p.body, encoder.encode(chosen))));
   } else {
     chosen = boundary;
-    for (const p of framed) checkNoBoundary(p.head, p.body, encoder.encode(chosen), p.field);
+    for (const p of framed) {
+      if (containsBoundary(p.head, p.body, encoder.encode(chosen))) {
+        throw new ProtocolError(p.field, "contains the boundary");
+      }
+    }
   }
 
   const chunks: Uint8Array[] = [];
@@ -84,7 +80,7 @@ export function encodeMultipart(
  * Returns the parts of a multipart/mixed body with their exact body bytes. Strict: no preamble or epilogue, known
  * part names only, each once, with their fixed Content-Type, and no occurrence of the boundary inside a part.
  */
-export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string): ParsedPart[] {
+export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string): Part[] {
   checkBoundary(boundary);
   const bytes = new Uint8Array(input);
   const token = encoder.encode(boundary);
@@ -94,7 +90,7 @@ export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string)
   if (!startsWith(bytes, open, 0)) {
     throw new ProtocolError("body", "must start with the boundary delimiter");
   }
-  const parts: ParsedPart[] = [];
+  const parts: Part[] = [];
   const names = new Set<PartName>();
   let pos = open.length;
   for (;;) {
@@ -117,7 +113,9 @@ export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string)
     const end = indexOf(bytes, delimiter, pos);
     if (end === -1) throw new ProtocolError("body", "is missing the closing boundary");
     const body = bytes.slice(pos, end);
-    checkNoBoundary(bytes.subarray(headStart, pos), body, token, field);
+    if (containsBoundary(bytes.subarray(headStart, pos), body, token)) {
+      throw new ProtocolError(field, "contains the boundary");
+    }
     parts.push({ name, headers, body });
 
     pos = end + delimiter.length;
@@ -162,9 +160,6 @@ function checkHeaders(headers: readonly Header[], field: string): void {
 }
 
 function parseHeaderLine(line: Uint8Array, field: string): Header {
-  for (const b of line) {
-    if ((b < 0x20 && b !== 0x09) || b > 0x7e) throw new ProtocolError(field, "must be ASCII");
-  }
   const text = decoder.decode(line);
   const colon = text.indexOf(":");
   if (colon === -1) throw new ProtocolError(field, "must be name: value");
@@ -183,15 +178,6 @@ function partName(headers: readonly Header[], field: string): PartName {
     throw new ProtocolError(field, `must have Content-Type ${CONTENT_TYPES[name]}`);
   }
   return name;
-}
-
-function checkNoBoundary(
-  head: Uint8Array,
-  body: Uint8Array,
-  token: Uint8Array,
-  field: string,
-): void {
-  if (containsBoundary(head, body, token)) throw new ProtocolError(field, "contains the boundary");
 }
 
 function containsBoundary(head: Uint8Array, body: Uint8Array, token: Uint8Array): boolean {

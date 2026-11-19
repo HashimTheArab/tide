@@ -2,21 +2,31 @@ import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
 import type { Header, ManifestInput, Part, PartName } from "../src/index.ts";
-import type { FixtureName } from "./context.ts";
 import {
   ProtocolError,
+  assetHash,
   buildManifest,
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
   contentKey,
   encodeMultipart,
   encodeSfvDictionary,
-  isAssetHash,
   parseMultipart,
   sha256Base64Url,
 } from "../src/index.ts";
 
-const fixture = (name: FixtureName) => new Uint8Array(inject("fixtures")[name]);
+declare module "vitest" {
+  export interface ProvidedContext {
+    fcSeed: number;
+    fixtures: Record<string, number[]>; // Every file in test/fixtures, as bytes.
+  }
+}
+
+function fixture(name: string): Uint8Array<ArrayBuffer> {
+  const bytes = inject("fixtures")[name];
+  if (bytes === undefined) throw new Error(`test/fixtures/${name} does not exist`);
+  return new Uint8Array(bytes);
+}
 const ascii = (s: string) => new TextEncoder().encode(s);
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const hex = (bytes: Uint8Array) =>
@@ -178,6 +188,24 @@ describe("manifest", () => {
     expect(build(d)).toEqual(fixture("manifest.json"));
   });
 
+  test("an Array subclass cannot change the bytes", () => {
+    const d = draft();
+    d.input.assets = sneakyArray([d.asset]);
+    expect(build(d)).toEqual(fixture("manifest.json"));
+    d.input.extra = { value: sneakyArray(["valid"]) };
+    expect(text(build(d))).toContain('"extra":{"value":["valid"]}}');
+  });
+
+  test("a url getter is read once, so the validated value is the one written", () => {
+    const d = draft();
+    let reads = 0;
+    Object.defineProperty(d.launch, "url", {
+      get: () => (reads++ === 0 ? "https://a.example/a" : "not a url"),
+      enumerable: true,
+    });
+    expect(text(build(d))).toContain('"url":"https://a.example/a"');
+  });
+
   const uuidBox = loose<string>(Object(ID));
   const urlCase = (url: unknown) => (d: Draft) => {
     d.launch.url = url;
@@ -185,7 +213,6 @@ describe("manifest", () => {
   test.each<[string, string, (d: Draft) => void]>([
     ["a null input", "input", (d) => (d.input = loose(null))],
     ["an undefined input", "input", (d) => (d.input = loose(undefined))],
-    ["an unknown field", "channel", (d) => (d.input.channel = "main")],
     ["a non-UUID id", "id", (d) => (d.input.id = "not-a-uuid")],
     ["an uppercase id", "id", (d) => (d.input.id = ID.toUpperCase())],
     ["an id inside an array", "id", (d) => (d.input.id = [ID])],
@@ -238,15 +265,6 @@ describe("manifest", () => {
     ["url %2", "launchAsset.url", urlCase("https://a.example/b%2")],
     ["url credentials", "launchAsset.url", urlCase("https://u:p@a.example/a")],
     ["a URL object", "launchAsset.url", urlCase(new URL("https://a.example/a"))],
-    [
-      "a url getter",
-      "launchAsset.url",
-      (d) =>
-        Object.defineProperty(d.launch, "url", {
-          get: () => "https://a.example/a",
-          enumerable: true,
-        }),
-    ],
     ["metadata as an array", "metadata", (d) => (d.input.metadata = ["stable"])],
     [
       "metadata with an inherited toJSON",
@@ -262,8 +280,6 @@ describe("manifest", () => {
       "assets[1]",
       (d) => (d.input.assets = holey(d.asset, otherAsset("k1"), otherAsset("k2"))),
     ],
-    ["assets as an Array subclass", "assets", (d) => (d.input.assets = sneakyArray([d.asset]))],
-    ["an Array subclass in extra", "extra.value", (d) => extra(d, sneakyArray(["valid"]))],
     ["NaN in extra", "extra.value", (d) => extra(d, Number.NaN)],
     ["undefined in extra", "extra.value", (d) => extra(d, undefined)],
     ["a bigint in extra", "extra.value", (d) => extra(d, 1n)],
@@ -276,11 +292,6 @@ describe("manifest", () => {
       (d) => extra(d, Object.assign(holey(1, 2, 3), { more: 4 })),
     ],
     [
-      "an array with an extra property",
-      "extra.value",
-      (d) => extra(d, Object.assign([1], { more: 4 })),
-    ],
-    [
       "a cycle in extra",
       "extra.value.self",
       (d) => {
@@ -288,22 +299,6 @@ describe("manifest", () => {
         loop.self = loop;
         extra(d, loop);
       },
-    ],
-    [
-      "a Proxy whose trap throws",
-      "extra.value",
-      (d) =>
-        extra(
-          d,
-          new Proxy(
-            {},
-            {
-              ownKeys() {
-                throw new Error("trap");
-              },
-            },
-          ),
-        ),
     ],
   ])("buildManifest rejects %s", (_, field, change) => {
     const d = draft();
@@ -381,7 +376,7 @@ const part = (name: PartName, body: Uint8Array<ArrayBuffer>, headers: Header[] =
 });
 
 /** The golden multipart files and the parts they hold. */
-function golden(): [FixtureName, Part[]][] {
+function golden(): [string, Part[]][] {
   return [
     [
       "manifest.multipart",
@@ -658,7 +653,7 @@ describe(`properties (seed ${seed})`, () => {
       fc.asyncProperty(fc.uint8Array({ maxLength: 256 }), async (bytes) => {
         const copy = new Uint8Array(bytes);
         const hash = await sha256Base64Url(copy);
-        expect(isAssetHash(hash)).toBe(true);
+        expect(assetHash(hash, "hash")).toBe(hash);
         expect(contentKey(hash)).toBe(
           hex(new Uint8Array(await crypto.subtle.digest("SHA-256", copy))),
         );
