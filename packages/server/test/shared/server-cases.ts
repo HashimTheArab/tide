@@ -283,6 +283,11 @@ export function manifestCases(harness: Harness): void {
     expectReply(await get(c), MANIFEST);
   });
 
+  test.each(["1.0.0(1)", "exposdk:57.0.0"])("runtime %s reaches its pointer", async (runtime) => {
+    await harness.put(replyKey("main", runtime, "ios"), MANIFEST);
+    expectReply(await get("main", { "expo-runtime-version": runtime }), MANIFEST);
+  });
+
   test.each<[string, Record<string, string | undefined>]>([
     ["a missing expo-platform", { "expo-platform": undefined }],
     ["an empty expo-platform", { "expo-platform": "" }],

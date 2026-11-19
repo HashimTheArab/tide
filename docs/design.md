@@ -50,9 +50,9 @@ read-only token.
 - **Keys** are a known prefix plus a hash (`assets/<64 lowercase hex>`) or a reply key. Objects are stored
   unencoded; an object with a `content-encoding` other than `identity` is an error, not an asset.
 - **Reply keys** come from protocol `replyKey`, shared by server and CLI. Channel and runtime version are each 1 to 64
-  of `A-Z a-z 0-9 . _ + -`, and neither is `.` or `..`, so no header value can name another key; platform is `ios` or
-  `android`. S3 receives each key segment percent-encoded (`+` as `%2B`). The `nativeVersion` runtime policy writes
-  `1.0.0(1)`, outside the grammar, so it is unsupported: such a client gets a 400 and keeps its current update.
+  of `A-Z a-z 0-9 . _ + - ( ) :`, and neither is `.` or `..`, so no header value can name another key; platform is `ios` or
+  `android`. S3 receives each key segment percent-encoded (`+` as `%2B`). The grammar covers every Expo runtime
+  policy: `appVersion` (`2.6.2`), `nativeVersion` (`1.0.0(1)`) and `sdkVersion` (`exposdk:57.0.0`).
 - **S3** (Node): path-style GetObject signed with SigV4. The credentials need `s3:GetObject` and `s3:ListBucket`;
   without ListBucket, S3 answers a missing key with 403, which the server must treat as an outage. Configured by
   `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`.

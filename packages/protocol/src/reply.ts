@@ -38,7 +38,8 @@ const RECORD_FIELDS: Record<Kind, readonly string[]> = {
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
-const NAME = /^[A-Za-z0-9._+-]{1,64}$/;
+// Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.
+const NAME = /^[A-Za-z0-9._+():-]{1,64}$/;
 
 const encoder = new TextEncoder();
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -159,7 +160,7 @@ function checkName(value: string, field: string): void {
   if (!NAME.test(value) || value === "." || value === "..") {
     throw new ProtocolError(
       field,
-      "must be 1 to 64 of A-Z, a-z, 0-9, ., _, + and -, and not . or ..",
+      "must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
     );
   }
 }

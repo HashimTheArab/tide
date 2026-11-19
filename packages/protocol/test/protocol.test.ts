@@ -1384,6 +1384,8 @@ describe("stored reply", () => {
     ["main", "1.0.0", "reply/main/1.0.0/ios"],
     [ALL.slice(0, 64), ALL.slice(4), `reply/${ALL.slice(0, 64)}/${ALL.slice(4)}/ios`],
     ["...", "a+b", "reply/.../a+b/ios"],
+    ["main", "1.0.0(1)", "reply/main/1.0.0(1)/ios"],
+    ["main", "exposdk:57.0.0", "reply/main/exposdk:57.0.0/ios"],
   ])("replyKey accepts %s and %s", (channel, runtime, key) => {
     expect(replyKey(channel, runtime, "ios")).toBe(key);
     expect(replyKey(channel, runtime, "android")).toBe(key.replace(/ios$/, "android"));
@@ -1415,6 +1417,8 @@ describe("stored reply", () => {
     ["reply/Main/1/android", "reply/_4dain/1/android"],
     ["reply/no-update/1/ios", "reply/no_2dupdate/1/ios"],
     ["reply/a_b/a+b/ios", "reply/a_5fb/a_2bb/ios"],
+    ["reply/main/1.0.0(1)/ios", "reply/main/1_2e0_2e0_281_29/ios"],
+    ["reply/main/exposdk:57.0.0/ios", "reply/main/exposdk_3a57_2e0_2e0/ios"],
     [NO_UPDATE_KEY, NO_UPDATE_KEY],
     [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
   ])("diskPath maps %s to %s", (key, path) => {
