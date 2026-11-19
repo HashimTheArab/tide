@@ -601,6 +601,13 @@ describe("multipart", () => {
       () => [[{ ...part("manifest", json), signature: loose({ sig: "a", keyid: "main" }) }]],
       "parts[0].signature",
     ],
+    [
+      "a signature header in a spread header list",
+      () => [
+        [loose({ ...part("manifest", json), headers: { ...[["expo-signature", SIGNATURE]] } })],
+      ],
+      "parts[0].headers",
+    ],
   ])("encode rejects %s", (_, args, field) => {
     const [parts, boundary] = args();
     rejects(() => encodeMultipart(parts, boundary), field);

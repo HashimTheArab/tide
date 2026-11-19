@@ -24,6 +24,8 @@ const HEADER_NAME = new RegExp(`^${TOKEN}$`);
 const HEADER_VALUE = /^[\x21-\x7E](?:[\t\x20-\x7E]*[\x21-\x7E])?$/;
 const BOUNDARY = /^[0-9A-Za-z_-]{1,70}$/;
 const PART_HEADERS = new Set(["content-disposition", "content-type", "expo-signature"]);
+// Any other field is rejected, so a misshapen part cannot drop its signature unnoticed.
+const PART_FIELDS: Record<keyof Part, true> = { name: true, body: true, signature: true };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -43,6 +45,10 @@ export function encodeMultipart(
   const names = new Set<PartName>();
   const framed = parts.map((part, i) => {
     const field = `parts[${i}]`;
+    for (const key of Object.keys(part)) {
+      if (!Object.hasOwn(PART_FIELDS, key))
+        throw new ProtocolError(`${field}.${key}`, "is not a part field");
+    }
     const name: unknown = part.name;
     if (!isPartName(name)) throw new ProtocolError(`${field}.name`, "is not a known part name");
     if (names.has(name)) throw new ProtocolError(`${field}.name`, "duplicates another part");
