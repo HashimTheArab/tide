@@ -161,8 +161,15 @@ const sev = { P0: 0, P1: 1, P2: 2, P3: 3 };
 const blocking = (f, r) => sev[f.severity] <= 1 || (f.severity === "P2" && r <= 2);
 const brief = (f) => `${f.id} ${f.severity} ${f.file}${f.line ? `:${f.line}` : ""}: ${f.title}`;
 const bullets = (xs, none) => (xs.length ? xs.map((x) => `- ${x}`).join("\n") : none);
+// A dropped connection returns no result; one retry absorbs it, and a second empty result still hands back.
+const call = async (prompt, opts) => {
+  const r = await agent(prompt, opts);
+  if (r != null) return r;
+  log(`${opts.label}: no result, retrying once`);
+  return agent(prompt, opts);
+};
 const opus = (prompt, label, schema) =>
-  agent(prompt, { label, model: "opus", effort: "high", schema });
+  call(prompt, { label, model: "opus", effort: "high", schema });
 
 const fileBlocks = (files) =>
   Object.entries(files)
@@ -173,7 +180,7 @@ const fileBlocks = (files) =>
 async function sh(label, cmd, files = {}) {
   const writes = fileBlocks(files);
   return must(
-    await agent(
+    await call(
       `You run one step of a scripted workflow. Do exactly this and nothing else; never retry, fix or interpret anything.
 ${writes ? `1. With the Write tool, write each file below with exactly the text between its markers, not the markers:\n${writes}\n2. ` : ""}Run this command with the Bash tool and a 600000 ms timeout:
 ${cmd}
@@ -193,7 +200,7 @@ async function ok(label, cmd, files) {
 async function detached(label, name, cmd, { clear = [], files = {} } = {}) {
   const b = `${SDIR}/runs/${name}`;
   return must(
-    await agent(
+    await call(
       `You run one long step of a scripted workflow and wait for it. Do exactly this and nothing else; never do the step's work yourself.
 1. Run: mkdir -p ${SDIR}/runs && rm -f ${b}.sh ${b}.log ${b}.exit ${clear.join(" ")}
    Stale files would be read as this run's.
@@ -290,7 +297,7 @@ async function planSet(patch) {
 // Converts a saved Codex review into findings; a missing or unreadable review fails.
 async function convert(file, label, finalOnly = false) {
   const c = must(
-    await agent(
+    await call(
       `${file} is the saved output of a Codex review. Convert its final review into structured findings. Do not judge, add, merge or drop any.
 ${
   finalOnly
