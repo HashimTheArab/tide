@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -183,6 +184,29 @@ describe("disk bucket", () => {
       expect(await rejection(op)).toMatchObject({ message: `disk bucket ${root} unavailable` });
     }
     expect(existsSync(root)).toBe(false);
+  });
+
+  test("an unreadable directory fails only the listings that can reach it", async () => {
+    const root = tempRoot();
+    const bucket = diskBucket(root);
+    await bucket.put(KEY, utf8("x"));
+    const assets = join(root, "assets");
+    mkdirSync(assets);
+    chmodSync(assets, 0);
+    try {
+      expect(() => readdirSync(assets)).toThrow(); // Holds only without a permission bypass such as root.
+      expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
+      expect(await rejection(bucket.list(""))).toMatchObject({
+        message: `disk bucket ${root} failed: EACCES`,
+      });
+      chmodSync(join(root, "reply"), 0);
+      expect(await rejection(bucket.list("reply/"))).toMatchObject({
+        message: `disk bucket ${root} failed: EACCES`,
+      });
+    } finally {
+      chmodSync(assets, 0o755);
+      chmodSync(join(root, "reply"), 0o755);
+    }
   });
 
   test("a listing never leaves the root", async () => {

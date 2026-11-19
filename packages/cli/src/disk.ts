@@ -17,7 +17,7 @@ import {
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { diskKey, diskPath } from "@tide/protocol";
+import { diskKey, diskPath, unescapeDiskPath } from "@tide/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError, byteOrder, checkEtag, checkKey } from "./bucket.ts";
@@ -254,6 +254,8 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
 
   function listSync(prefix: string): ListEntry[] {
     const entries: ListEntry[] = [];
+    const reaches = (name: string) =>
+      `${name}/`.startsWith(prefix) || prefix.startsWith(`${name}/`);
     const walk = (rel: string) => {
       let dirents;
       try {
@@ -267,8 +269,10 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
         const name = rel === "" ? d.name : `${rel}/${d.name}`;
         const key = diskKey(name);
         if (key !== undefined) entries.push({ key });
-        else if (d.isDirectory()) walk(name);
-        else entries.push({ unknown: name });
+        // A subtree that cannot hold a match is skipped, so its failures cannot fail this listing.
+        else if (d.isDirectory()) {
+          if (reaches(name) || reaches(unescapeDiskPath(name))) walk(name);
+        } else entries.push({ unknown: name });
       }
     };
     walk("");
