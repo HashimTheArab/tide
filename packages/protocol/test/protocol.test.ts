@@ -154,7 +154,7 @@ function sneakyArray(items: unknown[]): unknown[] {
 
 /** An array whose iterator yields nothing, so iterating it would drop every entry. */
 function emptyIterator(items: unknown[]): unknown[] {
-  return Object.assign([...items], { *[Symbol.iterator]() {} });
+  return Object.assign([...items], { [Symbol.iterator]: () => [][Symbol.iterator]() });
 }
 
 class LyingDate extends Date {
