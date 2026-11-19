@@ -11,6 +11,9 @@ in [0001](decisions/0001-architecture.md).
 
 ## Client rules the design follows
 
+Tide requires code signing. Apps must ship a code-signing certificate (`updates.codeSigningCertificate`), and the
+CLI refuses to publish without a key. Without it, anyone who can write the bucket could make apps run their code.
+
 - A client checks on launch (and, depending on the app, on foreground) and never needs the server to start.
 - It applies a manifest only if its `createdAt` is newer than the update it runs, after filtering by
   `expo-manifest-filters`. So a rollback is a new, newer publish: a pointer can never move back in time.
