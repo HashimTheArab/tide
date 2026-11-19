@@ -4,6 +4,7 @@ import { describe, expect, inject, test } from "vitest";
 import type { ManifestInput, Part, PartName, Signer, StoredReply } from "../src/index.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
+  EMPTY_SHA256,
   MAX_FILTERS_BYTES,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
@@ -16,15 +17,25 @@ import {
   certificatePublicKey,
   contentKey,
   cryptoKeySigner,
+  S3Error,
+  childElements,
   decodeStoredReply,
+  diskKey,
   diskPath,
   encodeMultipart,
   encodeSfvDictionary,
   encodeStoredReply,
   expoSignature,
   parseMultipart,
+  parseS3Xml,
   replyKey,
+  s3BodyProblem,
+  s3ErrorCode,
+  s3Target,
   sha256Base64Url,
+  signV4,
+  storageFromEnv,
+  textOf,
   verifyExpoSignature,
 } from "../src/index.ts";
 import { parseSfvDictionary } from "../src/sfv.ts";
@@ -1288,14 +1299,14 @@ describe("stored reply", () => {
     [
       "updateId on a directive",
       () => directive((o) => (o.updateId = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90")),
-      "updateId",
-      "is not a field of a rollBackToEmbedded reply",
+      "record",
+      "has a field that is not part of a rollBackToEmbedded reply",
     ],
     [
       "an unknown field",
       () => record((o) => (o.createdAt = "now")),
-      "createdAt",
-      "is not a field of a manifest reply",
+      "record",
+      "has a field that is not part of a manifest reply",
     ],
     [
       "a record one byte over the limit",
@@ -1482,6 +1493,260 @@ describe("stored reply", () => {
         expect(decoded.body).toEqual(r.body);
       }),
       { seed },
+    );
+  });
+});
+
+describe("s3", () => {
+  // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html, "Examples: Signature Calculations".
+  const AWS_EXAMPLE = {
+    accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+    secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    region: "us-east-1",
+    service: "s3",
+  };
+  const host = "examplebucket.s3.amazonaws.com";
+  const signed = (headers: string, signature: string) =>
+    `AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,` +
+    `SignedHeaders=${headers},Signature=${signature}`;
+  const emptyGet = {
+    Host: host,
+    "x-amz-content-sha256": EMPTY_SHA256,
+    "x-amz-date": "20130524T000000Z",
+  };
+
+  test.each<[string, string, string, Record<string, string>, string]>([
+    [
+      "GET Object",
+      "GET",
+      "/test.txt",
+      { ...emptyGet, Range: "bytes=0-9" },
+      signed(
+        "host;range;x-amz-content-sha256;x-amz-date",
+        "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+      ),
+    ],
+    [
+      "PUT Object",
+      "PUT",
+      "/test$file.text",
+      {
+        Host: host,
+        Date: "Fri, 24 May 2013 00:00:00 GMT",
+        "x-amz-storage-class": "REDUCED_REDUNDANCY",
+        "x-amz-content-sha256": "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072",
+        "x-amz-date": "20130524T000000Z",
+      },
+      signed(
+        "date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class",
+        "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd",
+      ),
+    ],
+    [
+      "GET Bucket Lifecycle",
+      "GET",
+      "/?lifecycle",
+      emptyGet,
+      signed(
+        "host;x-amz-content-sha256;x-amz-date",
+        "fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+      ),
+    ],
+    ...["/?max-keys=2&prefix=J", "/?prefix=J&max-keys=2"].map(
+      (path) =>
+        [
+          `GET Bucket (List Objects) as ${path}`,
+          "GET",
+          path,
+          emptyGet,
+          signed(
+            "host;x-amz-content-sha256;x-amz-date",
+            "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7",
+          ),
+        ] as [string, string, string, Record<string, string>, string],
+    ),
+  ])("signV4 reproduces AWS's %s example", async (_, method, path, headers, expected) => {
+    const url = new URL(`https://${host}${path}`);
+    expect(await signV4({ method, url, headers }, AWS_EXAMPLE)).toBe(expected);
+  });
+
+  const valid = {
+    endpoint: "https://s3.example.com",
+    region: "auto",
+    bucket: "tide",
+    accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+    secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  };
+
+  test.each<[string, Partial<typeof valid>, string]>([
+    ...["a/b", "..", "x", "//evil.example", "b?x=1", "b#f", "B%2Fc", "Tide"].map(
+      (bucket) =>
+        [`the bucket ${bucket}`, { bucket }, "bucket"] as [string, Partial<typeof valid>, string],
+    ),
+    ["a region with /", { region: "us/east" }, "region"],
+    ["an access key ID with ,", { accessKeyId: "AKIAIOSFODNN7EX,MPLE" }, "accessKeyId"],
+    ["an access key ID of 15 characters", { accessKeyId: "A".repeat(15) }, "accessKeyId"],
+    ["a secret of 15 characters", { secretAccessKey: "s".repeat(15) }, "secretAccessKey"],
+    ["a secret with a space", { secretAccessKey: "secret with a space" }, "secretAccessKey"],
+    [
+      "an access key ID inside an error code",
+      { accessKeyId: "SignatureDoesNotMatch" },
+      "accessKeyId",
+    ],
+    [
+      "a secret inside a message word",
+      { secretAccessKey: "ContentSHA256Mismatch" },
+      "secretAccessKey",
+    ],
+    ["the endpoint ftp://s3.test", { endpoint: "ftp://s3.test" }, "endpoint"],
+  ])("s3Target rejects %s without echoing it", async (_, change, field) => {
+    await rejects(() => s3Target({ ...valid, ...change }), field);
+    const value = Object.values(change)[0] ?? "";
+    let message = "";
+    try {
+      s3Target({ ...valid, ...change });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).not.toContain(value);
+  });
+
+  test("storageFromEnv names the variable of a rejected field and never its value", () => {
+    const env = {
+      TIDE_S3_ENDPOINT: valid.endpoint,
+      TIDE_S3_REGION: valid.region,
+      TIDE_S3_BUCKET: "a/b",
+      TIDE_S3_ACCESS_KEY_ID: valid.accessKeyId,
+      TIDE_S3_SECRET_ACCESS_KEY: valid.secretAccessKey,
+    };
+    expect(() => storageFromEnv(env)).toThrow(/^TIDE_S3_BUCKET: bucket must be/);
+    expect(storageFromEnv({ ...env, TIDE_S3_BUCKET: "tide" })).toEqual({ s3: valid });
+    expect(storageFromEnv({ TIDE_DISK_DIR: "/srv/tide", TIDE_S3_REGION: "" })).toEqual({
+      disk: "/srv/tide",
+    });
+  });
+
+  test("an S3 error names only an allowlisted code", () => {
+    expect(new S3Error("GetObject", { status: 403, code: "AccessDenied" }).message).toBe(
+      "S3 GetObject failed: 403 AccessDenied",
+    );
+    expect(new S3Error("PutObject", { status: 403, code: valid.secretAccessKey }).message).toBe(
+      "S3 PutObject failed: 403 with an unrecognised error code",
+    );
+    expect(new S3Error("ListObjectsV2", "network")).toMatchObject({
+      message: "S3 ListObjectsV2 failed: network error",
+      status: undefined,
+    });
+  });
+
+  test.each<[string, string]>([
+    ["reply/no-update", NO_UPDATE_KEY],
+    [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
+    ["reply/_4dain/1_2e0_2e0/ios", "reply/Main/1.0.0/ios"],
+    ["reply/main/exposdk_3a57_2e0_2e0/android", "reply/main/exposdk:57.0.0/android"],
+    ["reply/no_2dupdate/1/ios", "reply/no-update/1/ios"],
+  ])("diskKey maps %s back to %s", (path, key) => {
+    expect(diskKey(path)).toBe(key);
+    expect(diskPath(key)).toBe(path);
+  });
+
+  test.each([
+    "reply/_61/1/ios", // `a` escaped although it needs no escape
+    "reply/_4Dain/1/ios", // uppercase hex
+    "reply/main/1/web",
+    "reply/main",
+    "reply",
+    ".tide/mutex.sqlite",
+    "updates/x.json",
+    "reply/Main/1/ios", // the key, not its path
+  ])("diskKey rejects %j", (path) => {
+    expect(diskKey(path)).toBeUndefined();
+  });
+
+  test("parseS3Xml reads an empty-element tag as an empty element, and entities as text", () => {
+    const doc = (prefix: string) =>
+      parseS3Xml(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${prefix}<ETag>&quot;a&amp;b&#x21;&#33;&quot;</ETag></ListBucketResult>`,
+      );
+    for (const spelling of ["<Prefix/>", "<Prefix></Prefix>", "<Prefix />"]) {
+      const root = doc(spelling);
+      expect(root?.name).toBe("ListBucketResult");
+      const [prefix] = childElements(root!, "Prefix");
+      expect(textOf(prefix!)).toBe("");
+      expect(textOf(childElements(root!, "ETag")[0]!)).toBe('"a&b!!"');
+    }
+  });
+
+  test.each([
+    ["a comment", "<Error><!-- x --><Code>A</Code></Error>"],
+    ["CDATA", "<Error><Code><![CDATA[A]]></Code></Error>"],
+    ["a DOCTYPE", "<!DOCTYPE Error><Error><Code>A</Code></Error>"],
+    ["an unknown attribute", '<Error a="1"><Code>A</Code></Error>'],
+    ["another namespace", '<Error xmlns="urn:x"><Code>A</Code></Error>'],
+    [
+      "a namespace on a child",
+      '<Error><Code xmlns="http://s3.amazonaws.com/doc/2006-03-01/">A</Code></Error>',
+    ],
+    ["a prefixed name", "<s3:Error><Code>A</Code></s3:Error>"],
+    ["trailing content", "<Error><Code>A</Code></Error><Error/>"],
+    ["an unclosed element", "<Error><Code>A</Error>"],
+    ["a bare &", "<Error><Code>A&B</Code></Error>"],
+    ["an unknown entity", "<Error><Code>&nbsp;</Code></Error>"],
+    ["a reference to NUL", "<Error><Code>&#0;</Code></Error>"],
+    ["a processing instruction", "<Error><?x y?><Code>A</Code></Error>"],
+  ])("parseS3Xml rejects %s", (_, text) => {
+    expect(parseS3Xml(text)).toBeUndefined();
+  });
+
+  test("parseS3Xml does not recurse, so deep nesting cannot exhaust the stack", () => {
+    const depth = 200_000;
+    expect(parseS3Xml(`${"<a>".repeat(depth)}${"</a>".repeat(depth)}`)?.name).toBe("a");
+  });
+
+  const errorResponse = (body: string) => new Response(body, { status: 404 });
+
+  test.each<[string, string, string | undefined]>([
+    [
+      "a NoSuchKey document",
+      '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>NoSuchKey</Code><Message>m</Message></Error>',
+      "NoSuchKey",
+    ],
+    ["a nested Code", "<Error><Detail><Code>NoSuchKey</Code></Detail></Error>", undefined],
+    ["two Code children", "<Error><Code>NoSuchKey</Code><Code>NoSuchKey</Code></Error>", undefined],
+    ["a Code holding an element", "<Error><Code><b>NoSuchKey</b></Code></Error>", undefined],
+    ["a truncated document", "<Error><Code>NoSuchKey</Code>", undefined],
+    ["another root", "<Result><Code>NoSuchKey</Code></Result>", undefined],
+    ["HTML", "<h1>Not Found</h1>", undefined],
+    [
+      "more than 4 KiB",
+      `<Error><Code>NoSuchKey</Code><Message>${"m".repeat(4096)}</Message></Error>`,
+      undefined,
+    ],
+  ])("s3ErrorCode of %s", async (_, body, code) => {
+    expect(await s3ErrorCode(errorResponse(body))).toBe(code);
+  });
+
+  test("s3BodyProblem never echoes a header value", () => {
+    const res = (headers: Record<string, string>) => new Response("x", { headers });
+    expect(s3BodyProblem(res({ "content-length": "1" }))).toBeUndefined();
+    expect(
+      s3BodyProblem(res({ "content-length": "1", "content-encoding": "identity" })),
+    ).toBeUndefined();
+    const problem = s3BodyProblem(
+      res({ "content-length": "1", "content-encoding": valid.accessKeyId }),
+    );
+    expect(problem).toBe("encoding");
+    const message = new S3Error("GetObject", { problem: problem! }).message;
+    expect(message).toBe("S3 GetObject returned 200 with an unsupported content-encoding");
+    expect(s3BodyProblem(res({ "content-length": "x1" }))).toBe("length");
+  });
+
+  test("decoding a record never echoes a field name it holds", async () => {
+    const o = JSON.parse(text(fixture("manifest.reply.json"))) as Record<string, unknown>;
+    o[valid.secretAccessKey] = 1;
+    await rejects(() => decodeStoredReply(ascii(JSON.stringify(o))), "record");
+    expect(() => decodeStoredReply(ascii(JSON.stringify(o)))).toThrow(
+      "record has a field that is not part of a manifest reply",
     );
   });
 });

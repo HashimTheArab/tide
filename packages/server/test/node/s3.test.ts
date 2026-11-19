@@ -1,44 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
+import type { S3Config } from "@tide/protocol";
 import { contentKey, sha256Base64Url } from "@tide/protocol";
 
-import type { S3Config } from "../../src/core/s3.ts";
 import type { FakeS3 } from "../fakes/s3.ts";
 import type { Behaviour } from "../shared/fake-s3.ts";
-import { s3Store, signV4 } from "../../src/core/s3.ts";
+import { s3Store } from "../../src/core/s3.ts";
 import { startFakeS3 } from "../fakes/s3.ts";
-import { FAKE_S3 } from "../shared/fake-s3.ts";
+import { FAKE_S3, WRONG_SECRET } from "../shared/fake-s3.ts";
 import { runEntry } from "./entry.ts";
 
 /** The key the fake serves `behaviour` at from the start. */
 const scripted = (behaviour: Behaviour) => `script/${behaviour}`;
-
-test("signV4 reproduces AWS's published GET Object example", async () => {
-  // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html, "Example: GET Object".
-  const authorization = await signV4(
-    {
-      method: "GET",
-      url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"),
-      headers: {
-        Host: "examplebucket.s3.amazonaws.com",
-        Range: "bytes=0-9",
-        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "x-amz-date": "20130524T000000Z",
-      },
-    },
-    {
-      accessKeyId: "AKIAIOSFODNN7EXAMPLE",
-      secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      region: "us-east-1",
-      service: "s3",
-    },
-  );
-  expect(authorization).toBe(
-    "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request," +
-      "SignedHeaders=host;range;x-amz-content-sha256;x-amz-date," +
-      "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
-  );
-});
 
 test.each([
   "ftp://s3.test",
@@ -47,7 +20,7 @@ test.each([
   "http://u:p@s3.test",
   "not a url",
 ])("s3Store rejects the endpoint %s", (endpoint) => {
-  expect(() => s3Store({ ...FAKE_S3, endpoint })).toThrow("S3 endpoint must be");
+  expect(() => s3Store({ ...FAKE_S3, endpoint })).toThrow("endpoint must be");
 });
 
 test("a rejected TIDE_S3_ENDPOINT stops the node entry without echoing its secrets", async () => {
@@ -65,7 +38,7 @@ test("a rejected TIDE_S3_ENDPOINT stops the node entry without echoing its secre
   expect(code).not.toBe(0);
   expect(stdout).not.toContain("listening");
   expect(stderr).not.toContain(mark);
-  expect(stderr).toContain("TIDE_S3_ENDPOINT: S3 endpoint must be");
+  expect(stderr).toContain("TIDE_S3_ENDPOINT: endpoint must be");
 });
 
 describe("s3Store against a local S3-compatible endpoint", () => {
@@ -91,8 +64,16 @@ describe("s3Store against a local S3-compatible endpoint", () => {
   });
 
   test("a wrong secret is refused by the fake's signature check", async () => {
-    const store = s3Store({ ...config, secretAccessKey: "wrong" });
-    await expect(store.get("assets/missing")).rejects.toThrow("403 SignatureDoesNotMatch");
+    const store = s3Store({ ...config, secretAccessKey: WRONG_SECRET });
+    const before = fake.requests;
+    await expect(store.get("assets/missing")).rejects.toThrow(
+      "S3 GetObject failed: 403 SignatureDoesNotMatch",
+    );
+    expect(fake.requests).toBe(before + 1);
+  });
+
+  test("an invalid bucket fails construction", () => {
+    expect(() => s3Store({ ...config, bucket: "a/b" })).toThrow("bucket must be");
   });
 
   test.each([
@@ -101,10 +82,11 @@ describe("s3Store against a local S3-compatible endpoint", () => {
     ["404 NoSuchBucket", "assets/any", "other"],
     ["404 without an S3 error document", scripted("html-404"), FAKE_S3.bucket],
     ["301 without an S3 error document", scripted("redirect"), FAKE_S3.bucket],
+    ["404 without an S3 error document", scripted("nested-404"), FAKE_S3.bucket],
+    ["404 without an S3 error document", scripted("duplicate-404"), FAKE_S3.bucket],
   ])("%s is an error, not absence", async (message, key, bucket) => {
-    await expect(s3Store({ ...config, bucket }).get(key)).rejects.toThrow(
-      `S3 GetObject ${key} failed: ${message}`,
-    );
+    const get = s3Store({ ...config, bucket }).get(key);
+    await expect(get).rejects.toMatchObject({ message: `S3 GetObject failed: ${message}` });
     await fake.arrived(key);
   });
 
@@ -115,13 +97,29 @@ describe("s3Store against a local S3-compatible endpoint", () => {
     expect(new Uint8Array(await new Response(object?.body).arrayBuffer())).toEqual(bytes);
   });
 
+  test.each([scripted("encoding-access-key"), scripted("encoding-secret")])(
+    "a 200 for %s names neither credential",
+    async (key) => {
+      const error = await s3Store(config)
+        .get(key)
+        .then(
+          () => undefined,
+          (e: unknown) => e as Error,
+        );
+      expect(error?.message).toBe("S3 GetObject returned 200 with an unsupported content-encoding");
+      expect(error?.message).not.toContain(FAKE_S3.accessKeyId);
+      expect(error?.message).not.toContain(FAKE_S3.secretAccessKey);
+      expect(error?.cause).toBeUndefined();
+    },
+  );
+
   test("a NoSuchKey document cut off mid-body is an error, not absence", async () => {
     await expect(s3Store(config).get(scripted("truncated-404"))).rejects.toThrow();
   });
 
   test.each([
-    [scripted("gzip"), "returned 200 with content-encoding gzip"],
-    [scripted("no-length"), "returned 200 with content-length missing"],
+    [scripted("gzip"), "returned 200 with an unsupported content-encoding"],
+    [scripted("no-length"), "returned 200 with a missing or invalid content-length"],
   ])("a 200 for %s is rejected and its body cancelled", async (key, message) => {
     await expect(s3Store(config).get(key)).rejects.toThrow(message);
     await fake.abandoned(key);
@@ -133,7 +131,7 @@ describe("s3Store against a local S3-compatible endpoint", () => {
       const get = s3Store({ ...config, timeoutMs: 250 }).get(key);
       await fake.arrived(key);
       if (key === scripted("stall")) await fake.flushed(key);
-      await expect(get).rejects.toThrow(`S3 GetObject ${key} timed out after 250 ms`);
+      await expect(get).rejects.toMatchObject({ message: "S3 GetObject timed out after 250 ms" });
     },
   );
 

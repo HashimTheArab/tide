@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./core": "./src/core/app.ts"
+    "./core": "./src/core/app.ts",
+    "./test/fake-s3": "./test/fakes/s3.ts"
   },
   "scripts": {
     "dev:workers": "wrangler dev",

@@ -98,7 +98,8 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   const kind = checkKind(present(r, "kind"));
   for (const key of Object.keys(r)) {
     if (!RECORD_FIELDS[kind].includes(key)) {
-      throw new ProtocolError(key, `is not a field of a ${kind} reply`);
+      // The field name is stored data, so it is never echoed.
+      throw new ProtocolError("record", `has a field that is not part of a ${kind} reply`);
     }
   }
   const contentType = present(r, "contentType");
@@ -151,6 +152,18 @@ export function diskPath(key: string): string {
   return `reply/${escapeName(channel)}/${escapeName(runtime)}/${platform}`;
 }
 
+/** Returns the key whose `diskPath` is `path`, or undefined when no key maps there. */
+export function diskKey(path: string): string | undefined {
+  const key = path.replace(/_([0-9a-f]{2})/g, (_, h: string) =>
+    String.fromCharCode(parseInt(h, 16)),
+  );
+  try {
+    return diskPath(key) === path ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function escapeName(name: string): string {
   return name.replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
@@ -188,7 +201,7 @@ function checkFilters(value: unknown): string {
   const members = new Map<string, string>();
   for (const [key, member] of parseSfvDictionary(value, "manifestFilters")) {
     if (member.kind !== "string") {
-      throw new ProtocolError("manifestFilters", `${key} must be a string`);
+      throw new ProtocolError("manifestFilters", "members must be strings");
     }
     members.set(key, member.text);
   }
