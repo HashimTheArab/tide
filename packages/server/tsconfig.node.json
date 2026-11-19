@@ -4,5 +4,12 @@
     "types": ["node"],
     "tsBuildInfoFile": "${configDir}/.cache/tsbuildinfo.node.json"
   },
-  "include": ["src/core", "src/node.ts", "test/node", "vitest.config.ts"]
+  "include": [
+    "src/core",
+    "src/node.ts",
+    "test/node",
+    "test/shared",
+    "test/fakes",
+    "vitest.config.ts"
+  ]
 }

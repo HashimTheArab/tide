@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@hono/node-server": "catalog:",
+    "@tide/protocol": "workspace:*",
     "hono": "catalog:"
   },
   "devDependencies": {

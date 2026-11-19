@@ -247,6 +247,9 @@ importers:
       '@hono/node-server':
         specifier: 'catalog:'
         version: 2.1.8(hono@4.13.19)
+      '@tide/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       hono:
         specifier: 'catalog:'
         version: 4.13.19

@@ -3,4 +3,6 @@
   "name": "tide",
   "main": "src/workers.ts",
   "compatibility_date": "2026-11-01",
+  // A binding cannot be read-only; the Worker only calls get (see docs/design.md, Storage).
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tide" }],
 }
