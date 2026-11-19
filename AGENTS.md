@@ -11,6 +11,9 @@ AI agents write most of the code.
   is no release yet, so there is no compatibility to keep inside this repo.
 - The server is read-only. Only the CLI writes, and only the CLI signs. The one exception is the Workers R2 binding,
   which cannot be made read-only; the Worker only calls `get` (`docs/design.md`, Storage).
+- Defend at the trust boundary, not twice. The bucket is trusted: only the CLI writes it, after validating and
+  signing. Clients verify every signature and asset hash. So the server validates request input and what it routes
+  on, and does not re-check signatures, framing or hashes of what it stores.
 
 ## Working with the owner
 
