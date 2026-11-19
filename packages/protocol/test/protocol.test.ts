@@ -602,10 +602,8 @@ describe("multipart", () => {
       "parts[0].signature",
     ],
     [
-      "a signature header in a spread header list",
-      () => [
-        [loose({ ...part("manifest", json), headers: { ...[["expo-signature", SIGNATURE]] } })],
-      ],
+      "a header list spread into an object",
+      () => [[loose({ ...part("manifest", json), headers: { 0: ["expo-signature", SIGNATURE] } })]],
       "parts[0].headers",
     ],
   ])("encode rejects %s", (_, args, field) => {
