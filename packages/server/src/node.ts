@@ -7,13 +7,12 @@ import type { FileHandle } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
+import { diskPath } from "@tide/protocol";
+
 import type { S3Config } from "./core/s3.ts";
 import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";
 import { s3Store } from "./core/s3.ts";
-
-// The fixed shapes the publisher writes: a known prefix and a hex SHA-256.
-const KEY = /^assets\/[0-9a-f]{64}$/;
 
 /**
  * Returns a store over a directory, for tests and single-host development. The root is trusted (only the publisher
@@ -25,10 +24,15 @@ export function diskStore(root: string): Store {
   }
   return {
     async get(key) {
-      if (!KEY.test(key)) throw new Error(`invalid store key ${JSON.stringify(key)}`);
+      let path: string;
+      try {
+        path = diskPath(key);
+      } catch {
+        throw new Error(`invalid store key ${JSON.stringify(key)}`);
+      }
       let fh: FileHandle;
       try {
-        fh = await open(join(root, key), "r");
+        fh = await open(join(root, path), "r");
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
         // A root gone after startup is an outage, not a miss for every key.
@@ -80,11 +84,14 @@ export function storeFromEnv(env: Readonly<Record<string, string | undefined>>):
 }
 
 /** Starts the app on Node; port 0 picks a free port. */
-export function startServer(options: { port: number; store: Store }): Promise<ServerType> {
+export function startServer(options: {
+  port: number;
+  store: Store;
+  appId?: string | undefined;
+}): Promise<ServerType> {
+  const app = createApp(options.store, { appId: options.appId });
   return new Promise((resolve) => {
-    const server = serve({ fetch: createApp(options.store).fetch, port: options.port }, () =>
-      resolve(server),
-    );
+    const server = serve({ fetch: app.fetch, port: options.port }, () => resolve(server));
   });
 }
 
@@ -96,6 +103,10 @@ if (import.meta.main) {
     console.error(`tide: ${(e as Error).message}`);
     process.exit(1);
   }
-  const server = await startServer({ port: Number(process.env.PORT ?? 8787), store });
+  const server = await startServer({
+    port: Number(process.env.PORT ?? 8787),
+    store,
+    appId: process.env.TIDE_APP_ID === "" ? undefined : process.env.TIDE_APP_ID, // Empty is unset.
+  });
   console.log(`tide listening on port ${(server.address() as AddressInfo).port}`);
 }

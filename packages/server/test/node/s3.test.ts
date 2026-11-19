@@ -5,7 +5,8 @@ import { contentKey, sha256Base64Url } from "@tide/protocol";
 import type { S3Config } from "../../src/core/s3.ts";
 import type { FakeS3 } from "../fakes/s3.ts";
 import { s3Store, signV4 } from "../../src/core/s3.ts";
-import { FAKE_S3, SCRIPTED, startFakeS3 } from "../fakes/s3.ts";
+import { SCRIPTED, startFakeS3 } from "../fakes/s3.ts";
+import { FAKE_S3 } from "../shared/fake-s3.ts";
 import { runEntry } from "./entry.ts";
 
 test("signV4 reproduces AWS's published GET Object example", async () => {
@@ -95,11 +96,19 @@ describe("s3Store against a local S3-compatible endpoint", () => {
     ["500 InternalError", SCRIPTED.internalError, FAKE_S3.bucket],
     ["404 NoSuchBucket", "assets/any", "other"],
     ["404 without an S3 error document", SCRIPTED.htmlNotFound, FAKE_S3.bucket],
+    ["301 without an S3 error document", SCRIPTED.redirect, FAKE_S3.bucket],
   ])("%s is an error, not absence", async (message, key, bucket) => {
     await expect(s3Store({ ...config, bucket }).get(key)).rejects.toThrow(
       `S3 GetObject ${key} failed: ${message}`,
     );
     await fake.arrived(key);
+  });
+
+  test("a key with + reaches its object, which S3 would read as a space if sent literally", async () => {
+    const bytes = new TextEncoder().encode("plus");
+    fake.objects.set("reply/a+b/1+2/ios", bytes);
+    const object = await s3Store(config).get("reply/a+b/1+2/ios");
+    expect(new Uint8Array(await new Response(object?.body).arrayBuffer())).toEqual(bytes);
   });
 
   test("a NoSuchKey document cut off mid-body is an error, not absence", async () => {

@@ -3,26 +3,23 @@ import { gzipSync } from "node:zlib";
 import type { ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { MAX_REPLY_BYTES } from "@tide/protocol";
+
+import type { Behaviour, FakeEvent } from "../shared/fake-s3.ts";
 import { signV4 } from "../../src/core/s3.ts";
+import { FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";
 
-/** The credentials the fake accepts; any other signature gets 403 SignatureDoesNotMatch. */
-export const FAKE_S3 = {
-  bucket: "tide",
-  region: "auto",
-  accessKeyId: "TIDEFAKEACCESSKEY",
-  secretAccessKey: "tide-fake-secret",
-};
-
-/** Keys with a scripted reply instead of a stored object. */
+/** Keys scripted from the start, for the adapter tests. */
 export const SCRIPTED = {
-  internalError: "script/internal-error", // 500 InternalError
-  accessDenied: "script/access-denied", // 403 AccessDenied
-  htmlNotFound: "script/html-404", // A 404 that is not an S3 error document
-  truncatedNoSuchKey: "script/truncated-404", // NoSuchKey, then the connection drops mid-document
-  gzip: "script/gzip", // 200 gzip: a valid unfinished prefix of its declared length, never ended
-  noLength: "script/no-length", // 200 chunked: one chunk, never ended
-  hang: "script/hang", // Never answers
-  stall: "script/stall", // 500 headers flushed, then no body
+  internalError: "script/internal-error",
+  accessDenied: "script/access-denied",
+  htmlNotFound: "script/html-404",
+  redirect: "script/redirect",
+  truncatedNoSuchKey: "script/truncated-404",
+  gzip: "script/gzip",
+  noLength: "script/no-length",
+  hang: "script/hang",
+  stall: "script/stall",
 };
 
 const SIGNED_HEADERS = "host;x-amz-content-sha256;x-amz-date";
@@ -30,65 +27,96 @@ const SIGNED_HEADERS = "host;x-amz-content-sha256;x-amz-date";
 export interface FakeS3 {
   readonly endpoint: string;
   readonly objects: Map<string, Uint8Array>;
-  /** Resolves when a correctly signed request for `key` has arrived. */
   arrived(key: string): Promise<void>;
-  /** Resolves when the stall reply's headers have been sent. */
   flushed(key: string): Promise<void>;
-  /** Resolves when the reply for `key` closed before it finished, which only the client can cause. */
   abandoned(key: string): Promise<void>;
   close(): Promise<void>;
 }
 
-/** Starts the one fake of the S3 GetObject API on a free port. */
+/**
+ * Starts a fake of the S3 GetObject API on a free port. Behaviours are set per key at run time, in process or
+ * through the control API under `/_fake/`, which needs no signature.
+ */
 export async function startFakeS3(): Promise<FakeS3> {
   const objects = new Map<string, Uint8Array>();
+  const behaviours = new Map<string, Behaviour>(
+    Object.values(SCRIPTED).map((key) => [key, key.slice("script/".length) as Behaviour]),
+  );
   const events = new Map<string, PromiseWithResolvers<void>>();
-  const event = (name: string) => {
-    let e = events.get(name);
-    if (e === undefined) events.set(name, (e = Promise.withResolvers<void>()));
+  const event = (name: FakeEvent, key: string) => {
+    let e = events.get(`${name} ${key}`);
+    if (e === undefined) events.set(`${name} ${key}`, (e = Promise.withResolvers<void>()));
     return e;
   };
 
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? ""}`);
-      const [bucket = "", ...rest] = url.pathname.slice(1).split("/").map(decodeURIComponent);
+      const control = /^\/_fake\/(script|event\/(arrived|flushed|abandoned))\/([^/]+)$/.exec(
+        url.pathname,
+      );
+      if (control !== null) {
+        const key = decodeURIComponent(control[3] ?? "");
+        if (control[2] !== undefined) await event(control[2] as FakeEvent, key).promise;
+        else {
+          let behaviour = "";
+          for await (const chunk of req) behaviour += String(chunk);
+          behaviours.set(key, behaviour as Behaviour);
+        }
+        return res.writeHead(204).end();
+      }
+      // As S3 does, a literal + in the path is a space.
+      const [bucket = "", ...rest] = url.pathname
+        .slice(1)
+        .split("/")
+        .map((s) => decodeURIComponent(s.replaceAll("+", " ")));
       const key = rest.join("/");
       if (!(await signedCorrectly(req.method ?? "", url, req.headers))) {
         return s3Error(res, 403, "SignatureDoesNotMatch");
       }
-      event(`arrived ${key}`).resolve();
+      event("arrived", key).resolve();
       res.on("close", () => {
-        if (!res.writableFinished) event(`abandoned ${key}`).resolve();
+        if (!res.writableFinished) event("abandoned", key).resolve();
       });
 
       if (bucket !== FAKE_S3.bucket) return s3Error(res, 404, "NoSuchBucket");
-      switch (key) {
-        case SCRIPTED.internalError:
+      switch (behaviours.get(key)) {
+        case "internal-error":
           return s3Error(res, 500, "InternalError");
-        case SCRIPTED.accessDenied:
+        case "access-denied":
           return s3Error(res, 403, "AccessDenied");
-        case SCRIPTED.htmlNotFound:
+        case "html-404":
           return res.writeHead(404, { "content-type": "text/html" }).end("<h1>Not Found</h1>");
-        case SCRIPTED.truncatedNoSuchKey: {
+        case "redirect":
+          return res.writeHead(301, { location: `/${FAKE_S3.bucket}/assets/elsewhere` }).end();
+        case "truncated-404": {
           const doc = errorDocument("NoSuchKey");
           res.writeHead(404, { "content-type": "application/xml", "content-length": doc.length });
           return res.write(doc.slice(0, doc.indexOf("</Code>") + 7), () => res.destroy());
         }
-        case SCRIPTED.gzip: {
+        case "gzip": {
           const gz = gzipSync(new Uint8Array(65536).map((_, i) => (i * 7919) % 251));
           res.writeHead(200, { "content-encoding": "gzip", "content-length": gz.length });
           return res.write(gz.subarray(0, gz.length >> 1));
         }
-        case SCRIPTED.noLength:
+        case "no-length":
           res.writeHead(200);
           return res.write("one chunk");
-        case SCRIPTED.hang:
+        case "hang":
           return;
-        case SCRIPTED.stall:
+        case "stall":
           res.writeHead(500, { "content-type": "application/xml" });
           res.flushHeaders();
-          return event(`flushed ${key}`).resolve();
+          return event("flushed", key).resolve();
+        case "stall-body":
+          res.writeHead(200, { "content-length": STALL_BODY.size });
+          return res.write(new Uint8Array(STALL_BODY.sent), () => event("flushed", key).resolve());
+        case "oversize":
+          res.writeHead(200, { "content-length": MAX_REPLY_BYTES + 1 });
+          res.flushHeaders();
+          return event("flushed", key).resolve();
+        case undefined:
+          break;
       }
       const object = objects.get(key);
       if (object === undefined) return s3Error(res, 404, "NoSuchKey");
@@ -101,9 +129,9 @@ export async function startFakeS3(): Promise<FakeS3> {
   return {
     endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     objects,
-    arrived: (key) => event(`arrived ${key}`).promise,
-    flushed: (key) => event(`flushed ${key}`).promise,
-    abandoned: (key) => event(`abandoned ${key}`).promise,
+    arrived: (key) => event("arrived", key).promise,
+    flushed: (key) => event("flushed", key).promise,
+    abandoned: (key) => event("abandoned", key).promise,
     close: () => {
       server.closeAllConnections();
       return new Promise((resolve) => server.close(() => resolve()));

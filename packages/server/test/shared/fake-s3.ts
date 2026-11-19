@@ -1,0 +1,52 @@
+// The fake S3's credentials and its control API, through fetch only, so workerd tests can drive it too.
+
+/** The credentials the fake accepts; any other signature gets 403 SignatureDoesNotMatch. */
+export const FAKE_S3 = {
+  bucket: "tide",
+  region: "auto",
+  accessKeyId: "TIDEFAKEACCESSKEY",
+  secretAccessKey: "tide-fake-secret",
+};
+
+/** What `stall-body` declares and what it sends before it stops. */
+export const STALL_BODY = { size: 64, sent: 32 };
+
+/** A scripted reply in place of a stored object. */
+export type Behaviour =
+  | "internal-error" // 500 InternalError
+  | "access-denied" // 403 AccessDenied
+  | "html-404" // A 404 that is not an S3 error document
+  | "redirect" // 301 to another path
+  | "truncated-404" // NoSuchKey, then the connection drops mid-document
+  | "gzip" // 200 gzip: a valid unfinished prefix of its declared length, never ended
+  | "no-length" // 200 chunked: one chunk, never ended
+  | "hang" // Never answers
+  | "stall" // 500 headers flushed, then no body
+  | "stall-body" // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
+  | "oversize"; // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
+
+/** Points in a request's life a test can wait for. */
+export type FakeEvent =
+  | "arrived" // A correctly signed request reached the fake.
+  | "flushed" // A stalling reply's headers, and any partial body, were sent.
+  | "abandoned"; // The reply closed before it finished, which only the client can cause.
+
+/** Returns a client for the control API of the fake at `endpoint`. */
+export function fakeS3Control(endpoint: string) {
+  const call = async (method: string, path: string, body?: string) => {
+    const res = await fetch(
+      `${endpoint}/_fake/${path}`,
+      body === undefined ? { method } : { method, body },
+    );
+    await res.body?.cancel();
+    if (res.status !== 204) throw new Error(`fake S3 ${method} ${path} answered ${res.status}`);
+  };
+  return {
+    /** Makes every later request for `key` get `behaviour`. */
+    script: (key: string, behaviour: Behaviour) =>
+      call("PUT", `script/${encodeURIComponent(key)}`, behaviour),
+    /** Resolves once `event` has happened for `key`. */
+    event: (event: FakeEvent, key: string) =>
+      call("GET", `event/${event}/${encodeURIComponent(key)}`),
+  };
+}
