@@ -43,7 +43,9 @@ Always start a fresh run; never use `resumeFromRunId`, which replays stale evide
    manual update.
 2. **Design note (risky slices only).** The implementer writes `design.md`: approach, data model, invariants,
    failure and concurrency cases, and planned tests. Codex reviews it read-only and is asked whether a materially
-   smaller design exists. One revision is allowed; a P0 or P1 left after it hands back.
+   smaller design exists. One revision is allowed; the second review only checks whether each
+   finding's own failure scenario is gone (broader or new scenarios are P2 instructions unless P0), and a P0 or P1
+   left after it hands back.
 3. **Build (Opus).** The slice is built in its own worktree, `.worktrees/<slice>`, on branch `phase/<slice>` off
    `origin/main`, under a fixed brief: AGENTS.md, the testing standard, the dependency rules, a test for every
    behaviour change, and a test seen failing on the old code for every fix. Then the full gate runs on a clean
