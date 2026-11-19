@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
-import type { Header, ManifestInput, Part, PartName } from "../src/index.ts";
+import type { ManifestInput, Part, PartName } from "../src/index.ts";
 import {
   ProtocolError,
   assetHash,
@@ -372,21 +372,8 @@ describe("sfv", () => {
 });
 
 const B = "tide_fixture_boundary";
-const TYPES: Record<PartName, string> = {
-  manifest: "application/json",
-  directive: "application/json",
-  extensions: "application/json",
-  certificate_chain: "application/x-pem-file",
-};
-const fixedHeaders = (name: PartName): Header[] => [
-  ["Content-Disposition", `form-data; name="${name}"`],
-  ["Content-Type", TYPES[name]],
-];
-const part = (name: PartName, body: Uint8Array<ArrayBuffer>, headers: Header[] = []): Part => ({
-  name,
-  headers,
-  body,
-});
+const part = (name: PartName, body: Uint8Array<ArrayBuffer>): Part => ({ name, body });
+const SIGNATURE = 'sig="a", keyid="main"';
 
 /** The golden multipart files and the parts they hold. */
 function golden(): [string, Part[]][] {
@@ -418,6 +405,10 @@ const DIRECTIVE = [
   'Content-Disposition: form-data; name="directive"',
   "Content-Type: application/json",
 ];
+const MANIFEST = [
+  'Content-Disposition: form-data; name="manifest"',
+  "Content-Type: application/json",
+];
 
 /** A Uint8Array whose slice is a view, as Node's Buffer.slice is. */
 class AliasingBytes extends Uint8Array<ArrayBuffer> {
@@ -431,26 +422,22 @@ describe("multipart", () => {
     expect(encodeMultipart(parts, B)).toEqual({ boundary: B, body: fixture(file) });
   });
 
-  test.each(golden())("parsing %s gives its headers and bodies", (file, parts) => {
+  test.each(golden())("parsing %s gives its parts and exact bodies", (file, parts) => {
     const parsed = parseMultipart(fixture(file), B);
-    expect(parsed.map((p) => p.name)).toEqual(parts.map((p) => p.name));
-    expect(parsed.map((p) => p.headers)).toEqual(parts.map((p) => fixedHeaders(p.name)));
-    parsed.forEach((p, i) => expect(p.body).toEqual(parts[i]!.body));
+    expect(parsed).toEqual(parts);
   });
 
   test("the noUpdateAvailable response carries the builder's directive bytes", () => {
     const [directive] = parseMultipart(fixture("no-update.multipart"), B);
-    expect(directive!.headers).toEqual([
-      ["Content-Disposition", 'form-data; name="directive"'],
-      ["Content-Type", "application/json"],
-    ]);
-    expect(directive!.body).toEqual(buildNoUpdateAvailable());
+    expect(directive).toEqual({ name: "directive", body: buildNoUpdateAvailable() });
   });
 
   test("the certificate chain part is sent as a PEM file", () => {
     const parsed = parseMultipart(fixture("certificate.multipart"), B);
-    expect(parsed[1]!.headers[1]).toEqual(["Content-Type", "application/x-pem-file"]);
-    expect(parsed[1]!.body).toEqual(fixture("chain.pem"));
+    expect(text(fixture("certificate.multipart"))).toContain(
+      'name="certificate_chain"\r\nContent-Type: application/x-pem-file\r\n',
+    );
+    expect(parsed[1]).toEqual({ name: "certificate_chain", body: fixture("chain.pem") });
   });
 
   test("parsed bodies do not alias the input", () => {
@@ -462,30 +449,16 @@ describe("multipart", () => {
     expect(parsed[0]!.body).toEqual(fixture("manifest.json"));
   });
 
-  test("caller header names are written in lowercase, the case stock iOS clients look up", () => {
-    const parts = [part("manifest", ascii("{}"), [["Expo-Signature", 'sig="a", keyid="main"']])];
-    expect(encodeMultipart(parts, B).body).toEqual(
-      frame([
-        [
-          'Content-Disposition: form-data; name="manifest"',
-          "Content-Type: application/json",
-          'expo-signature: sig="a", keyid="main"',
-        ],
-        "{}",
-      ]),
-    );
+  test("a signature is written as the lowercase expo-signature line stock iOS clients look up", () => {
+    const signed: Part = { name: "manifest", body: ascii("{}"), signature: SIGNATURE };
+    const encoded = encodeMultipart([signed], B).body;
+    expect(encoded).toEqual(frame([[...MANIFEST, `expo-signature: ${SIGNATURE}`], "{}"]));
+    expect(parseMultipart(encoded, B)).toEqual([signed]);
   });
 
-  test("a headers getter is read once, so the checked headers are the ones written", () => {
-    let reads = 0;
-    const lying = {
-      name: "directive" as const,
-      body: ascii("{}"),
-      get headers(): Header[] {
-        return reads++ === 0 ? [["x-a", "b"]] : [["x-a", "b\r\nx-injected: 1"]];
-      },
-    };
-    expect(encodeMultipart([lying], B).body).toEqual(frame([[...DIRECTIVE, "x-a: b"], "{}"]));
+  test("parse reads the signature header in any case", () => {
+    const parsed = parseMultipart(frame([[...MANIFEST, `Expo-Signature: ${SIGNATURE}`], "{}"]), B);
+    expect(parsed).toEqual([{ name: "manifest", body: ascii("{}"), signature: SIGNATURE }]);
   });
 
   test("a drawn boundary is 32 hex characters and round-trips", () => {
@@ -540,9 +513,27 @@ describe("multipart", () => {
     ],
     [
       "a non-ASCII header value",
-      () => frame([[...DIRECTIVE, "x-note: café"], "{}"]),
+      () => frame([[...DIRECTIVE, "expo-signature: café"], "{}"]),
       "parts[0].headers[2]",
       "ASCII",
+    ],
+    [
+      "a header that is not a part header",
+      () => frame([[...DIRECTIVE, "x-note: a"], "{}"]),
+      "parts[0].headers[2]",
+      "is not a part header",
+    ],
+    [
+      "a header line without a colon",
+      () => frame([[...DIRECTIVE, "expo-signature"], "{}"]),
+      "parts[0].headers[2]",
+      "name: value",
+    ],
+    [
+      "a header name that is not a token",
+      () => frame([[...DIRECTIVE, "expo signature: a"], "{}"]),
+      "parts[0].headers[2]",
+      "RFC 9110 token",
     ],
     [
       "header names differing only in case",
@@ -558,7 +549,7 @@ describe("multipart", () => {
     ],
     [
       "the boundary in a header value",
-      () => frame([[...DIRECTIVE, `x-note: ${B}`], "{}"]),
+      () => frame([[...DIRECTIVE, `expo-signature: ${B}`], "{}"]),
       "parts[0]",
       "contains the boundary",
     ],
@@ -586,36 +577,29 @@ describe("multipart", () => {
     ["a boundary with a space", () => [[part("manifest", json)], "a b"], "boundary"],
     ["the boundary in a body", () => [[part("manifest", ascii(`{"a":"${B}"}`))], B], "parts[0]"],
     [
-      "the boundary only in a header value",
-      () => [[part("manifest", json, [["x-note", `a${B}`]])], B],
+      "the boundary only in the signature",
+      () => [[{ ...part("manifest", json), signature: `a${B}` }], B],
       "parts[0]",
     ],
     [
-      "CRLF in a header value",
-      () => [[part("manifest", json, [["x-a", "a\r\nb"]])]],
-      "parts[0].headers[2]",
+      "CRLF in the signature",
+      () => [[{ ...part("manifest", json), signature: "a\r\nx-injected: 1" }]],
+      "parts[0].signature",
     ],
     [
-      "a reserved header name",
-      () => [[part("manifest", json, [["content-type", "text/plain"]])]],
-      "parts[0].headers[2]",
+      "a non-ASCII signature",
+      () => [[{ ...part("manifest", json), signature: "café" }]],
+      "parts[0].signature",
     ],
     [
-      "a non-ASCII header value",
-      () => [[part("manifest", json, [["x-note", "café"]])]],
-      "parts[0].headers[2]",
+      "an empty signature",
+      () => [[{ ...part("manifest", json), signature: "" }]],
+      "parts[0].signature",
     ],
     [
-      "header names differing only in case",
-      () => [
-        [
-          part("manifest", json, [
-            ["expo-signature", "a"],
-            ["Expo-Signature", "b"],
-          ]),
-        ],
-      ],
-      "parts[0].headers[3]",
+      "a signature that is not a string",
+      () => [[{ ...part("manifest", json), signature: loose({ sig: "a", keyid: "main" }) }]],
+      "parts[0].signature",
     ],
   ])("encode rejects %s", (_, args, field) => {
     const [parts, boundary] = args();
@@ -641,21 +625,15 @@ describe(`properties (seed ${seed})`, () => {
   const body = fc
     .array(fc.oneof(fc.uint8Array({ maxLength: 32 }), fc.constantFrom(...tricky)), { maxLength: 8 })
     .map(join);
-  const headers = fc
-    .uniqueArray(
-      fc.tuple(
-        fc.stringMatching(/^[A-Za-z][A-Za-z0-9-]{0,11}$/),
-        fc.stringMatching(/^[!-~](?:[ !-~]{0,20}[!-~])?$/),
-      ),
-      { selector: ([name]) => name.toLowerCase(), maxLength: 3 },
-    )
-    .filter((hs) => hs.every(([n]) => !/^content-(type|disposition)$/i.test(n)));
   const parts = fc.uniqueArray(
-    fc.record({
-      name: fc.constantFrom<PartName>("manifest", "directive", "extensions", "certificate_chain"),
-      headers,
-      body,
-    }),
+    fc.record(
+      {
+        name: fc.constantFrom<PartName>("manifest", "directive", "extensions", "certificate_chain"),
+        body,
+        signature: fc.stringMatching(/^[!-~](?:[ !-~]{0,40}[!-~])?$/),
+      },
+      { requiredKeys: ["name", "body"] },
+    ),
     { selector: (p) => p.name, minLength: 1, maxLength: 4 },
   );
   const boundary = fc.option(
@@ -663,17 +641,19 @@ describe(`properties (seed ${seed})`, () => {
     { nil: undefined },
   );
 
-  const written = (p: Part): Header[] => [
-    ...fixedHeaders(p.name),
-    ...p.headers.map(([n, v]): Header => [n.toLowerCase(), v]),
-  ];
+  const TYPES: Record<PartName, string> = {
+    manifest: "application/json",
+    directive: "application/json",
+    extensions: "application/json",
+    certificate_chain: "application/x-pem-file",
+  };
   /** Everything the encoder writes for a part apart from delimiters. */
   const wire = (p: Part) =>
-    written(p)
-      .map(([n, v]) => `${n}: ${v}\r\n`)
-      .join("") + latin1(p.body);
+    `Content-Disposition: form-data; name="${p.name}"\r\nContent-Type: ${TYPES[p.name]}\r\n` +
+    (p.signature === undefined ? "" : `expo-signature: ${p.signature}\r\n`) +
+    latin1(p.body);
 
-  test("parse(encode(parts)) returns the same names, headers and body bytes", () => {
+  test("parse(encode(parts)) returns the same names, signatures and body bytes", () => {
     fc.assert(
       fc.property(parts, boundary, (ps, b) => {
         if (b !== undefined && ps.some((p) => wire(p).includes(b))) {
@@ -682,9 +662,7 @@ describe(`properties (seed ${seed})`, () => {
         }
         const encoded = encodeMultipart(ps, b);
         const parsed = parseMultipart(encoded.body, encoded.boundary);
-        expect(parsed.map((p) => p.name)).toEqual(ps.map((p) => p.name));
-        expect(parsed.map((p) => p.headers)).toEqual(ps.map(written));
-        parsed.forEach((p, i) => expect(p.body).toEqual(ps[i]!.body));
+        expect(parsed).toEqual(ps);
       }),
       { seed },
     );

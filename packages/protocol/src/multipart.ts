@@ -9,16 +9,13 @@ const CONTENT_TYPES = {
 } as const;
 
 export type PartName = keyof typeof CONTENT_TYPES;
-export type Header = readonly [name: string, value: string];
+type Header = readonly [name: string, value: string];
 
-/**
- * A part; encode writes Content-Disposition and Content-Type before `headers`, whose names it lowercases, and parse
- * returns every header as written.
- */
+/** A part; its Content-Disposition and Content-Type follow from `name`, so the encoder writes every header line. */
 export interface Part {
   readonly name: PartName;
-  readonly headers: readonly Header[];
   readonly body: Uint8Array<ArrayBuffer>;
+  readonly signature?: string; // The expo-signature value, such as sig="…", keyid="…".
 }
 
 /** RFC 9110 token. */
@@ -26,6 +23,7 @@ export const TOKEN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
 const HEADER_NAME = new RegExp(`^${TOKEN}$`);
 const HEADER_VALUE = /^[\x21-\x7E](?:[\t\x20-\x7E]*[\x21-\x7E])?$/;
 const BOUNDARY = /^[0-9A-Za-z_-]{1,70}$/;
+const PART_HEADERS = new Set(["content-disposition", "content-type", "expo-signature"]);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -49,15 +47,23 @@ export function encodeMultipart(
     if (!isPartName(name)) throw new ProtocolError(`${field}.name`, "is not a known part name");
     if (names.has(name)) throw new ProtocolError(`${field}.name`, "duplicates another part");
     names.add(name);
-    const fixed: Header[] = [
-      ["Content-Disposition", `form-data; name="${name}"`],
-      ["Content-Type", CONTENT_TYPES[name]],
+    const signature: unknown = part.signature;
+    if (
+      signature !== undefined &&
+      (typeof signature !== "string" || !HEADER_VALUE.test(signature))
+    ) {
+      throw new ProtocolError(
+        `${field}.signature`,
+        "must be printable ASCII without edge whitespace",
+      );
+    }
+    // Stock iOS clients look the signature up by its exact lowercase name.
+    const lines = [
+      `Content-Disposition: form-data; name="${name}"`,
+      `Content-Type: ${CONTENT_TYPES[name]}`,
     ];
-    const given = Array.from(part.headers, ([n, v]): Header => [n, v]); // Read once, so the checked value is written.
-    checkHeaders([...fixed, ...given], field);
-    // Stock iOS clients look part headers up by exact lowercase name, such as `expo-signature`.
-    const headers = [...fixed, ...given.map(([n, v]): Header => [n.toLowerCase(), v])];
-    const head = encoder.encode(headers.map(([n, v]) => `${n}: ${v}\r\n`).join(""));
+    if (signature !== undefined) lines.push(`expo-signature: ${signature}`);
+    const head = encoder.encode(lines.map((l) => `${l}\r\n`).join(""));
     return { field, head, body: part.body };
   });
 
@@ -83,7 +89,8 @@ export function encodeMultipart(
 
 /**
  * Returns the parts of a multipart/mixed body with their exact body bytes. Strict: no preamble or epilogue, known
- * part names only, each once, with their fixed Content-Type, and no occurrence of the boundary inside a part.
+ * part names only, each once, with their fixed Content-Type, no header beyond the three Expo defines, and no
+ * occurrence of the boundary inside a part.
  */
 export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string): Part[] {
   checkBoundary(boundary);
@@ -114,6 +121,7 @@ export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string)
     const name = partName(headers, field);
     if (names.has(name)) throw new ProtocolError(field, "duplicates another part name");
     names.add(name);
+    const signature = headers.find(([n]) => n.toLowerCase() === "expo-signature")?.[1];
 
     const end = indexOf(bytes, delimiter, pos);
     if (end === -1) throw new ProtocolError("body", "is missing the closing boundary");
@@ -121,7 +129,7 @@ export function parseMultipart(input: Uint8Array<ArrayBuffer>, boundary: string)
     if (containsBoundary(bytes.subarray(headStart, pos), body, token)) {
       throw new ProtocolError(field, "contains the boundary");
     }
-    parts.push({ name, headers, body });
+    parts.push(signature === undefined ? { name, body } : { name, body, signature });
 
     pos = end + delimiter.length;
     if (startsWith(bytes, CRLF, pos)) {
@@ -148,19 +156,18 @@ function checkBoundary(boundary: unknown): void {
   }
 }
 
-/** Header rules shared by encoder and parser, so each accepts exactly what the other writes. */
 function checkHeaders(headers: readonly Header[], field: string): void {
   const seen = new Set<string>();
-  headers.forEach(([name, value]: readonly unknown[], i) => {
+  headers.forEach(([name, value], i) => {
     const at = `${field}.headers[${i}]`;
-    if (typeof name !== "string" || !HEADER_NAME.test(name)) {
-      throw new ProtocolError(at, "name must be an RFC 9110 token");
-    }
-    if (typeof value !== "string" || !HEADER_VALUE.test(value)) {
+    if (!HEADER_NAME.test(name)) throw new ProtocolError(at, "name must be an RFC 9110 token");
+    if (!HEADER_VALUE.test(value)) {
       throw new ProtocolError(at, "value must be printable ASCII without edge whitespace");
     }
-    if (seen.has(name.toLowerCase())) throw new ProtocolError(at, "duplicates another header");
-    seen.add(name.toLowerCase());
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) throw new ProtocolError(at, "duplicates another header");
+    if (!PART_HEADERS.has(lower)) throw new ProtocolError(at, "is not a part header");
+    seen.add(lower);
   });
 }
 
