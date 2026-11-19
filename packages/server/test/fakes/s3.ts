@@ -237,7 +237,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       issued.set(next, page.at(-1) ?? "");
     }
     const pageFault = token === null ? undefined : fault;
-    if (pageFault === "repeat-token") next = tokens[0] ?? next;
+    if (pageFault === "repeat-token" && token !== null) next = token;
     const isTruncated =
       pageFault === "missing-field"
         ? ""
