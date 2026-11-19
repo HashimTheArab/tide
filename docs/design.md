@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-19
+updated: 2026-11-20
 ---
 
 # Design
@@ -56,9 +56,19 @@ read-only token.
 - **S3** (Node): path-style GetObject signed with SigV4. The credentials need `s3:GetObject` and `s3:ListBucket`;
   without ListBucket, S3 answers a missing key with 403, which the server must treat as an outage. Configured by
   `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`.
+  The bucket name is 3 to 63 of `a-z 0-9 . -`, starting and ending alphanumeric; the region is 1 to 32 of
+  `a-z 0-9 -` (`auto` on R2). The access key ID is 16 to 128 alphanumerics and the secret 16 to 256 printable ASCII
+  characters, so neither can occur inside an error message.
+- **S3 errors** name the operation, the HTTP status and the S3 error code only when it is on a fixed list of
+  documented codes (`AccessDenied`, `NoSuchKey`, `PreconditionFailed`, `SlowDown`, `InternalError` and a few more);
+  any other code is "unrecognised". A network failure, a timeout and an unusable 200 each have fixed text. No
+  message holds a key, a header value, the provider's `<Message>` or fetch's cause, so no credential reaches a log.
+  A 404 is absence only when the body is an S3 error document with one direct `Code` of `NoSuchKey`.
+  SigV4 and these rules live in protocol `s3.ts`, shared by the server and the CLI.
 - **Disk** (Node, tests and single-host development): `TIDE_DISK_DIR`. The root is trusted: only the publisher
   writes it. Containment is the key grammar alone, checked before any filesystem call; there are no symlink,
-  realpath or volume checks and no metadata files. A root missing after startup is an outage (503), not a miss.
+  realpath or volume checks and no metadata files except `.tide/`, which holds the CLI's writer mutex and staged
+  files and which no key can name. A root missing after startup is an outage (503), not a miss.
   Protocol `diskPath` maps a key to its file: in a reply key, every character of channel and runtime outside
   `a-z 0-9` becomes `_` and two hex digits (`Main` is `_4dain`), so names differing only in case stay distinct on a
   case-insensitive filesystem and no channel collides with the `reply/no-update` file.
@@ -153,6 +163,30 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
+
+### Bucket configuration
+
+The CLI reads the same variables as the Node server: `TIDE_DISK_DIR`, or all five `TIDE_S3_*` (exactly one store;
+empty counts as unset). A configuration error exits before any request.
+
+- **Write credentials.** The CLI's S3 key needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and
+  `s3:ListBucket`; on R2, an Object Read & Write token scoped to the bucket. Keep it a protected CI secret; the server
+  keeps its read-only key. The secret is only used to derive signatures: it is never sent, put in a URL or printed.
+- **Writes.** Every request is signed (SigV4, with the payload hash). A pointer write is `PutObject` with
+  `If-Match: <etag>`, or `If-None-Match: *` for a first publish; a 412 is a lost race, and every other answer is an
+  error. ETags are opaque strings, compared exactly. A write that got no answer, a 5xx, or a 200 without a valid ETag
+  has an unknown outcome: the writer stops, exits non-zero, and the next run starts from what the bucket holds,
+  since S3 and R2 may still commit it. A later `gc` must prove that no delete can remove an object that a committed
+  or still-pending pointer write references.
+- **Disk.** Writers on one host serialise on a SQLite lock in `.tide/mutex.sqlite` (an `fcntl` lock the OS frees
+  when its holder dies). Each conditional write reads, compares and renames a staged file inside it. Readers take no
+  lock. Network filesystems are not supported.
+- **Clock.** The bucket's time is S3's `Date` header, or the local clock on disk.
+
+`tide status` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
+read from the stored signed part without re-serialising it) and whether `reply/no-update` is present, unreadable or
+missing. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. Diagnostics are fixed
+text: a stored name or field is never printed.
 
 `publish`:
 
