@@ -49,23 +49,26 @@ Always start a fresh run; never use `resumeFromRunId`, which replays stale evide
    behaviour change, and a test seen failing on the old code for every fix. Then the full gate runs on a clean
    tree, with two fix attempts before handing back. The workflow pushes and opens the PR, whose body covers what
    was built, the decisions, one line per new dependency, the tests and the gate result.
-4. **Review rounds.** Each round runs `codex review` against `origin/main` in round 1, and against the previous
+4. **Simplify (fresh Opus).** Before any bug review, a read-only Opus reviews the whole diff for the smallest,
+   clearest design: a materially smaller design (fewer components, dependencies, options or state) is the only
+   blocking finding; duplication, a new helper where one exists, leftover replaced code, single-use abstractions,
+   misplaced code, long comments and unclear names go to a fresh Opus simplifier as instructions. A smaller design
+   it rejects goes to the arbiter and, if upheld, must be fixed in round 1. The gate runs again before review.
+5. **Review rounds.** Each round runs `codex review` against `origin/main` in round 1, and against the previous
    round's head afterwards, saving the output as `codex-review-<round>.md`. A fresh, read-only Opus deep review
    runs alongside it on a risky slice's first round, or when the slice has more than `deepReviewLines` changed
    lines, touches risky files or any server or CLI source, or the gate reports test signals
-   (skips, retries, mocks, sleeps). In round 1 a fresh, read-only Opus simplicity review also checks the whole diff for a materially smaller
-   design (P1) and for duplication, dead code, single-use abstractions, needless indirection or unclear code (P2).
-   A missing or empty review hands back; it never counts as clean.
-5. **Fix (fresh Opus).** It checks every blocking finding against the code, fixes the real ones with a test it
+   (skips, retries, mocks, sleeps). A missing or empty review hands back; it never counts as clean.
+6. **Fix (fresh Opus).** It checks every blocking finding against the code, fixes the real ones with a test it
    has seen fail on the old code, and rejects the rest with evidence. The gate runs again, with the same two fix
    attempts, and the workflow pushes. A fresh Opus then checks each claimed fix: its test must pass now and fail
    on the commit the finding was raised on, on the reported behaviour rather than on setup. A fresh Opus
    arbiter, whose default is that the finding stands, judges each rejection. A fix that fails its check, or an
    upheld finding, must be fixed next round whatever its severity, and cannot be rejected again.
-6. **Convergence.** P0 and P1 findings always block, P2 blocks in rounds 1 and 2, and P3 never blocks. If round 2
+7. **Convergence.** P0 and P1 findings always block, P2 blocks in rounds 1 and 2, and P3 never blocks. If round 2
    still has blocking findings, a fresh Opus asks whether a materially smaller design would remove those bug
    classes; if so, the next fix implements that design instead of patching.
-7. **Merge.** If the branch is behind `main`, the workflow merges `origin/main` into it in the slice's worktree
+8. **Merge.** If the branch is behind `main`, the workflow merges `origin/main` into it in the slice's worktree
    (never a rebase, force push or `gh pr update-branch`), re-runs the trusted gate on the merged head and pushes
    only if it passes; a conflict or a failing gate hands back. Auto-merge is paused before that push and
    re-enabled on the new head, so nothing reaches `main` without passing both the trusted gate and CI. It updates the PR body with the review history and sets auto-merge on the exact head
