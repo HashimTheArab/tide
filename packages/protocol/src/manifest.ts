@@ -160,10 +160,13 @@ function object(value: unknown, field: string): Readonly<Record<string, unknown>
   return value as Readonly<Record<string, unknown>>;
 }
 
-/** Copies through Array.from, so a subclass cannot pick the result type and a hole reads as undefined. */
+/** Copies own indexed entries, so neither a subclass nor an iterator can change them; a hole reads as undefined. */
 function array<T>(value: unknown, field: string, item: (v: unknown, field: string) => T): T[] {
   if (!Array.isArray(value)) throw new ProtocolError(field, "must be an array");
-  return Array.from(value as unknown[], (v, i) => item(v, `${field}[${i}]`));
+  const own = value as unknown[];
+  return Array.from({ length: own.length }, (_, i) =>
+    item(Object.hasOwn(own, i) ? own[i] : undefined, `${field}[${i}]`),
+  );
 }
 
 function jsonObject(value: unknown, field: string, ancestors: Set<unknown>): JsonObject {

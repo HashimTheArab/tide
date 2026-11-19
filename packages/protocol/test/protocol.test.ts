@@ -152,6 +152,11 @@ function sneakyArray(items: unknown[]): unknown[] {
   return a;
 }
 
+/** An array whose iterator yields nothing, so iterating it would drop every entry. */
+function emptyIterator(items: unknown[]): unknown[] {
+  return Object.assign([...items], { *[Symbol.iterator]() {} });
+}
+
 class LyingDate extends Date {
   override toISOString() {
     return "1970-01-01T00:00:00.000Z";
@@ -193,6 +198,14 @@ describe("manifest", () => {
     d.input.assets = sneakyArray([d.asset]);
     expect(build(d)).toEqual(fixture("manifest.json"));
     d.input.extra = { value: sneakyArray(["valid"]) };
+    expect(text(build(d))).toContain('"extra":{"value":["valid"]}}');
+  });
+
+  test("an array's own iterator cannot hide its entries", () => {
+    const d = draft();
+    d.input.assets = emptyIterator([d.asset]);
+    expect(build(d)).toEqual(fixture("manifest.json"));
+    d.input.extra = { value: emptyIterator(["valid"]) };
     expect(text(build(d))).toContain('"extra":{"value":["valid"]}}');
   });
 
@@ -449,6 +462,20 @@ describe("multipart", () => {
     expect(parsed[0]!.body).toEqual(fixture("manifest.json"));
   });
 
+  test("caller header names are written in lowercase, the case stock iOS clients look up", () => {
+    const parts = [part("manifest", ascii("{}"), [["Expo-Signature", 'sig="a", keyid="main"']])];
+    expect(encodeMultipart(parts, B).body).toEqual(
+      frame([
+        [
+          'Content-Disposition: form-data; name="manifest"',
+          "Content-Type: application/json",
+          'expo-signature: sig="a", keyid="main"',
+        ],
+        "{}",
+      ]),
+    );
+  });
+
   test("a drawn boundary is 32 hex characters and round-trips", () => {
     const { boundary, body } = encodeMultipart([part("directive", buildNoUpdateAvailable())]);
     expect(boundary).toMatch(/^[0-9a-f]{32}$/);
@@ -624,10 +651,15 @@ describe(`properties (seed ${seed})`, () => {
     { nil: undefined },
   );
 
+  const written = (p: Part): Header[] => [
+    ...fixedHeaders(p.name),
+    ...p.headers.map(([n, v]): Header => [n.toLowerCase(), v]),
+  ];
   /** Everything the encoder writes for a part apart from delimiters. */
   const wire = (p: Part) =>
-    [...fixedHeaders(p.name), ...p.headers].map(([n, v]) => `${n}: ${v}\r\n`).join("") +
-    latin1(p.body);
+    written(p)
+      .map(([n, v]) => `${n}: ${v}\r\n`)
+      .join("") + latin1(p.body);
 
   test("parse(encode(parts)) returns the same names, headers and body bytes", () => {
     fc.assert(
@@ -639,9 +671,7 @@ describe(`properties (seed ${seed})`, () => {
         const encoded = encodeMultipart(ps, b);
         const parsed = parseMultipart(encoded.body, encoded.boundary);
         expect(parsed.map((p) => p.name)).toEqual(ps.map((p) => p.name));
-        expect(parsed.map((p) => p.headers)).toEqual(
-          ps.map((p) => [...fixedHeaders(p.name), ...p.headers]),
-        );
+        expect(parsed.map((p) => p.headers)).toEqual(ps.map(written));
         parsed.forEach((p, i) => expect(p.body).toEqual(ps[i]!.body));
       }),
       { seed },

@@ -11,7 +11,10 @@ const CONTENT_TYPES = {
 export type PartName = keyof typeof CONTENT_TYPES;
 export type Header = readonly [name: string, value: string];
 
-/** A part; encode writes Content-Disposition and Content-Type before `headers`, parse returns them in `headers`. */
+/**
+ * A part; encode writes Content-Disposition and Content-Type before `headers`, whose names it lowercases, and parse
+ * returns every header as written.
+ */
 export interface Part {
   readonly name: PartName;
   readonly headers: readonly Header[];
@@ -46,12 +49,13 @@ export function encodeMultipart(
     if (!isPartName(name)) throw new ProtocolError(`${field}.name`, "is not a known part name");
     if (names.has(name)) throw new ProtocolError(`${field}.name`, "duplicates another part");
     names.add(name);
-    const headers: Header[] = [
+    const fixed: Header[] = [
       ["Content-Disposition", `form-data; name="${name}"`],
       ["Content-Type", CONTENT_TYPES[name]],
-      ...part.headers,
     ];
-    checkHeaders(headers, field);
+    checkHeaders([...fixed, ...part.headers], field);
+    // Stock iOS clients look part headers up by exact lowercase name, such as `expo-signature`.
+    const headers = [...fixed, ...part.headers.map(([n, v]) => [n.toLowerCase(), v] as const)];
     const head = encoder.encode(headers.map(([n, v]) => `${n}: ${v}\r\n`).join(""));
     return { field, head, body: part.body };
   });
