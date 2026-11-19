@@ -29,8 +29,8 @@ What agents must test, how, and what reviewers reject.
 
 ## Concurrency
 
-Anything two publishers or a publisher and `gc` can race on needs a test: lock contention, a pointer write against a
-stale ETag, `gc` during an upload.
+Writers run one at a time from CI (`docs/design.md`, CLI), so tests cover the backstops: a pointer write against a
+stale ETag fails cleanly, and `gc` keeps an object that a publish reused between its two passes.
 
 ## Conformance
 
