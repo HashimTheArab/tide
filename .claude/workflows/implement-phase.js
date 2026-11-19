@@ -16,7 +16,7 @@ export const meta = {
     },
     {
       title: "Review",
-      detail: "Codex review, a fresh Opus deep review when triggered, and a fresh Opus fixer",
+      detail: "an Opus simplicity pass, then Codex review, a fresh Opus deep review when triggered, and a fresh Opus fixer",
     },
     { title: "Merge", detail: "catch up with main, then auto-merge or label for the owner" },
   ],
@@ -692,8 +692,7 @@ Report real problems only: correctness, security, data loss, races, idempotency,
       ),
       "deep review",
     ).findings;
-  // Always once, on the whole diff: the other reviews hunt bugs, this one asks whether the design and code are as small
-  // and clear as they can be.
+  // Once per slice, before any bug review: the bug reviewers then read the simpler code.
   const simplicityReview = async () =>
     must(
       await opus(
@@ -702,8 +701,8 @@ Slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, in the worktree ${WT
 Scope: ${S.scope}
 The rules are AGENTS.md, docs/design.md and docs/decisions/. If the simplifying-overgrown-diffs skill is available, apply it.
 Ask whether this is the smallest, clearest design and code that meets the scope. Report:
-- P1 "Smaller design": a materially smaller design that removes a component, dependency, option or piece of state.
-- P2: duplication or parallel lists that must be kept in sync by hand, dead code, an abstraction or option with one user, needless indirection, unclear names, code a reader cannot follow, or a diff out of proportion to the behaviour.
+- P1 "Smaller design": a materially smaller design that removes a component, dependency, option or piece of state. Only this blocks.
+- P2, applied as instructions: duplication or parallel lists kept in sync by hand; a new helper where an existing one would do; code the change replaces but leaves behind; dead code; an abstraction or option with one user; needless indirection; code in a file that does not own what it depends on; comments that restate the code or run past two lines; unclear names; a diff out of proportion to the behaviour.
 - P3: a nit.
 Do not report bugs, tests or style the formatter owns; other reviewers cover those. Each finding needs file, line and the concrete simpler replacement in scenario. Report only changes that make the code genuinely smaller or clearer, never churn.`,
         "simplicity review",
@@ -733,17 +732,61 @@ Return closed false, with the reason, when the finding is not resolved, the test
       CLOSURE,
     );
 
+  // ---- Simplify: a smaller design must be built or refuted; every other point reaches the simplifier as an instruction.
+  let carried = [];
+  const sp = must(await simplicityReview(), "simplicity review").map((f, i) => ({
+    ...f,
+    id: `S.${i + 1}`,
+    by: "simplicity review",
+    before: g.headSha,
+  }));
+  if (sp.length) {
+    const sx = done(
+      await opus(
+        `${rules()}
+A simplicity review of the whole slice found the points below. Apply them now, before the bug reviews start.
+- P1 "Smaller design": implement it, or reject it with concrete evidence that it is wrong or not smaller.
+- P2 and P3: apply each one that makes the code smaller or clearer; reject one only with a one-line reason.
+Behaviour must not change: every existing test still passes, and a removed test is replaced by one covering the same behaviour. Commit your changes. Return exactly one disposition per id.
+${JSON.stringify(sp, null, 1)}`,
+        "simplify",
+        FIXED,
+      ),
+      "simplifier",
+    );
+    collect(sx);
+    const by = new Map(sx.dispositions.map((d) => [d.id, d]));
+    const missed = sp.filter((f) => !by.has(f.id));
+    if (missed.length) fail(`the simplifier did not answer ${missed.map((f) => f.id).join(", ")}`);
+    if (sp.some((f) => by.get(f.id).action === "fixed")) {
+      g = await greenGate("simplify");
+      await push(g);
+    }
+    for (const f of sp) {
+      const d = by.get(f.id);
+      if (d.action === "fixed") fixed.push(`${brief(f)} (simplified)`);
+      else if (f.severity !== "P1") followUps.push(`${brief(f)}: not applied, ${d.reason}`);
+      else {
+        const v = must(await arbiter(f, d), `arbiter ${f.id}`);
+        if (v.verdict === "finding-stands") carried.push({ ...f, mustFix: true, arbiter: v.reason });
+        else rejected.push(`${brief(f)}: ${d.reason} (arbiter agreed: ${v.reason})`);
+      }
+    }
+    history.push({
+      summary: `Simplify: ${sp.length} findings; ${sp.filter((f) => by.get(f.id).action === "fixed").length} applied.`,
+      text: `Simplify: ${sp.map((f) => `${brief(f)} ${by.get(f.id).action}: ${by.get(f.id).reason}`).join("; ")}`,
+    });
+  } else history.push({ summary: "Simplify: no findings.", text: "Simplify: no findings" });
+
   let base = "origin/main";
   let head = g.headSha;
-  let carried = [];
   let simpler = "";
   for (let r = 1; r <= MAX_ROUNDS; r++) {
     rounds = r;
     const why = deepWhy(r);
-    const [cx, dp, sp] = await Promise.all([
+    const [cx, dp] = await Promise.all([
       codexReview(r, base),
       why.length ? deepReview(r, base, why) : Promise.resolve(null),
-      r === 1 ? simplicityReview() : Promise.resolve(null),
     ]);
     const found = [
       ...carried,
@@ -754,18 +797,12 @@ Return closed false, with the reason, when the finding is not resolved, the test
         by: "deep review",
         before: head,
       })),
-      ...(sp || []).map((f, i) => ({
-        ...f,
-        id: `S${r}.${i + 1}`,
-        by: "simplicity review",
-        before: head,
-      })),
     ];
     open = found.filter((f) => f.mustFix || blocking(f, r));
     followUps.push(...found.filter((f) => !f.mustFix && !blocking(f, r)).map(brief));
     const entry = {
       text: "",
-      summary: `Round ${r} (${base.slice(0, 12)}..${head.slice(0, 12)}): Codex ${cx.length} findings; deep review ${dp ? `${dp.length} findings` : "not triggered"}; simplicity review ${sp ? `${sp.length} findings` : "round 1 only"}; ${open.length} blocking.`,
+      summary: `Round ${r} (${base.slice(0, 12)}..${head.slice(0, 12)}): Codex ${cx.length} findings; deep review ${dp ? `${dp.length} findings` : "not triggered"}; ${open.length} blocking.`,
     };
     history.push(entry);
     entry.text = `Round ${r}: ${found.map(brief).join("; ") || "no findings"}`;
