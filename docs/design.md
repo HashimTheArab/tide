@@ -20,6 +20,8 @@ in [0001](decisions/0001-architecture.md).
   It accepts a patch only with `im: bsdiff` or status 226 and `expo-base-update-id` equal to its current ID, applies
   `BSDIFF40`, checks the hash, and refetches the full file on any failure.
 - Asset URLs are inside signed manifests, so a published URL must work for as long as any device can request it.
+- A client reuses a cached asset whose manifest `key` it already has, without downloading or hashing it again. So a
+  key must never name different bytes in two updates, embedded builds included.
 
 ## Storage
 
@@ -77,7 +79,9 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 `publish` (in CI):
 
 1. Take `lock` with a conditional create.
-2. Run `expo export`; hash every file (SHA-256, base64url); upload missing `assets/` and `bundles/`.
+2. Run `expo export`; hash every file (SHA-256, base64url); upload missing `assets/` and `bundles/`. Keep Metro's
+   asset keys, which the bundle references, and refuse to publish a key already recorded for a different SHA-256 in
+   any retained update or registered build.
 3. Compose the manifest with `createdAt = max(now, previous pointer and any rollback commitTime + 1 ms)`; refuse if
    the clock differs from the bucket's `Date` by more than a minute.
 4. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through a KMS or a protected CI secret.
