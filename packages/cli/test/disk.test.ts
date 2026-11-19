@@ -16,7 +16,7 @@ import { diskPath } from "@tide/protocol";
 
 import { BucketError } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";
-import { child, listAll, rejection, tempRoot, utf8 } from "./helpers.ts";
+import { child, rejection, tempRoot, utf8 } from "./helpers.ts";
 
 const WRITER = fileURLToPath(new URL("disk-writer.ts", import.meta.url));
 const KEY = "reply/main/1.0.0/ios";
@@ -115,7 +115,7 @@ describe("disk bucket", () => {
     const root = tempRoot();
     const bucket = diskBucket(root);
     mkdirSync(path(root), { recursive: true });
-    expect(await listAll(bucket, "reply/")).toEqual([{ key: KEY }]);
+    expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
     expect(await rejection(bucket.get(KEY, 100))).toMatchObject({
       message: `disk bucket ${root} not a regular file`,
     });
@@ -138,7 +138,7 @@ describe("disk bucket", () => {
   ])("%s at reply/ fails the listing rather than hiding every pointer", async (_, plant) => {
     const root = tempRoot();
     plant(root);
-    expect(await rejection(listAll(diskBucket(root), "reply/"))).toMatchObject({
+    expect(await rejection(diskBucket(root).list("reply/"))).toMatchObject({
       message: `disk bucket ${root} failed: ENOTDIR`,
     });
   });
@@ -172,12 +172,12 @@ describe("disk bucket", () => {
     const root = tempRoot();
     const bucket = diskBucket(root);
     expect(await bucket.get(KEY, 100)).toBeUndefined();
-    expect(await listAll(bucket, "reply/")).toEqual([]);
+    expect(await bucket.list("reply/")).toEqual([]);
     rmSync(root, { recursive: true });
     for (const op of [
       bucket.get(KEY, 100),
       bucket.delete(KEY),
-      listAll(bucket, "reply/"),
+      bucket.list("reply/"),
       bucket.put(KEY, utf8("x")),
     ]) {
       expect(await rejection(op)).toMatchObject({ message: `disk bucket ${root} unavailable` });
@@ -191,15 +191,15 @@ describe("disk bucket", () => {
     mkdirSync(root);
     mkdirSync(join(parent, "reply"));
     writeFileSync(join(parent, "reply", "no-update"), "outside");
-    expect(await listAll(diskBucket(root), "../")).toEqual([]);
-    expect(await listAll(diskBucket(root), "")).toEqual([]);
+    expect(await diskBucket(root).list("../")).toEqual([]);
+    expect(await diskBucket(root).list("")).toEqual([]);
   });
 
   test("reads write nothing", async () => {
     const root = tempRoot();
     const bucket = diskBucket(root);
     await bucket.get(KEY, 100);
-    await listAll(bucket, "");
+    await bucket.list("");
     await bucket.time();
     expect(readdirSync(root)).toEqual([]);
   });

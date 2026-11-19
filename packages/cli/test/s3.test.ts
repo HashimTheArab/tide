@@ -6,7 +6,7 @@ import { FAKE_S3, WRONG_SECRET, startFakeS3 } from "@tide/server/test/fake-s3";
 import type { Bucket } from "../src/bucket.ts";
 import { BucketError } from "../src/bucket.ts";
 import { s3Bucket } from "../src/s3.ts";
-import { listAll, rejection, utf8 } from "./helpers.ts";
+import { rejection, utf8 } from "./helpers.ts";
 
 const KEY = "reply/main/1.0.0/ios";
 
@@ -30,7 +30,7 @@ const operations = (b: Bucket, key = KEY): Record<string, () => Promise<unknown>
   putIfAbsent: () => b.putIfAbsent(key, utf8("x")),
   putIfMatch: () => b.putIfMatch(key, utf8("x"), fake.etag(key) ?? '"none"'),
   delete: () => b.delete(key),
-  list: () => listAll(b, "reply/"),
+  list: () => b.list("reply/"),
   time: () => b.time(),
 });
 const MUTATIONS = new Set(["put", "putIfAbsent", "putIfMatch", "delete"]);
@@ -143,28 +143,25 @@ test("putIfMatch on an absent key is AWS's 404, an error rather than a lost race
 });
 
 test.each(["malformed", "missing-field", "common-prefixes", "repeat-token"] as const)(
-  "a second listing page that is %s rejects after the first page's entries",
+  "a second listing page that is %s rejects the whole listing",
   async (fault) => {
     for (const n of [1, 2, 3, 4, 5]) fake.objects.set(`reply/c${n}/1/ios`, utf8("x"));
     fake.listFault(fault);
-    const seen: unknown[] = [];
-    const error = await rejection(
-      (async () => {
-        for await (const entry of bucket.list("reply/")) seen.push(entry);
-      })(),
-    );
+    const before = fake.tokens.length;
+    const error = await rejection(bucket.list("reply/"));
     expect(error).toMatchObject({
       message: "S3 ListObjectsV2 returned 200 with an invalid listing page",
       outcome: "failed",
     });
-    expect(seen).toEqual([1, 2, 3].map((n) => ({ key: `reply/c${n}/1/ios` })));
+    // The fake faults only pages after the first, so exactly one continuation was requested.
+    expect(fake.tokens.slice(before)).toHaveLength(1);
   },
 );
 
 test("a clean listing sends each continuation token back byte for byte", async () => {
   const before = fake.tokens.length;
   for (const n of [1, 2, 3, 4, 5, 6, 7]) fake.objects.set(`reply/t${n}/1/ios`, utf8("x"));
-  expect(await listAll(bucket, "reply/")).toHaveLength(7);
+  expect(await bucket.list("reply/")).toHaveLength(7);
   const sent = fake.tokens.slice(before);
   expect(sent).toHaveLength(2);
   for (const token of sent) expect(token).toMatch(/^t\d+\+\/=$/);

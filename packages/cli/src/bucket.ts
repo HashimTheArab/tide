@@ -28,7 +28,7 @@ export interface Bucket {
   /** Absent is success. */
   delete(key: string): Promise<void>;
   /** Every entry whose name starts with `prefix`, in ascending UTF-8 byte order, across all pages. */
-  list(prefix: string): AsyncIterable<ListEntry>;
+  list(prefix: string): Promise<ListEntry[]>;
   /** Epoch milliseconds by the bucket's clock. */
   time(): Promise<number>;
 }
@@ -50,13 +50,19 @@ export class BucketError extends Error {
 /** One strong RFC 9110 entity-tag: no `W/`, no `*`, no list. */
 export const STRONG_ETAG = /^"[\x21\x23-\x2B\x2D-\x7E]{1,256}"$/;
 
-/** Rejects a key outside the store grammar before any I/O. */
-export function checkKey(key: string): void {
+/** True when `key` is in the store key grammar. */
+export function isKey(key: string): boolean {
   try {
     diskPath(key);
+    return true;
   } catch {
-    throw new BucketError("invalid store key", "failed");
+    return false;
   }
+}
+
+/** Rejects a key outside the store grammar before any I/O. */
+export function checkKey(key: string): void {
+  if (!isKey(key)) throw new BucketError("invalid store key", "failed");
 }
 
 /** Rejects an ETag that is not one strong entity-tag before any I/O. */

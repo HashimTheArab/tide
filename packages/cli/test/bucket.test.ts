@@ -10,7 +10,7 @@ import type { Bucket } from "../src/bucket.ts";
 import { BucketError } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";
 import { s3Bucket } from "../src/s3.ts";
-import { listAll, rejection, tempRoot, utf8 } from "./helpers.ts";
+import { rejection, tempRoot, utf8 } from "./helpers.ts";
 
 // A whole second far from the local clock, so a test cannot pass by reading the wrong clock.
 const BUCKET_TIME = Date.UTC(2031, 0, 2, 3, 4, 5);
@@ -100,7 +100,7 @@ describe.each(backends)("%s bucket", (_, open) => {
     const key = `reply/${"C".repeat(64)}/${"exposdk:57.0.0(1)".padEnd(64, "+")}/android`;
     await bucket.put(key, utf8("long"));
     expect((await bucket.get(key, 100))?.bytes).toEqual(utf8("long"));
-    expect(await listAll(bucket, "reply/")).toEqual([{ key }]);
+    expect(await bucket.list("reply/")).toEqual([{ key }]);
   });
 
   test("get rejects an object over maxBytes", async () => {
@@ -124,18 +124,18 @@ describe.each(backends)("%s bucket", (_, open) => {
   test("list returns every key under a prefix, across pages, in byte order", async () => {
     for (const key of [...KEYS, ASSET].reverse()) await bucket.put(key, utf8(key));
     const keys = (entries: unknown[]) => entries.map((e) => (e as { key: string }).key);
-    expect(keys(await listAll(bucket, "reply/"))).toEqual(KEYS);
-    expect(keys(await listAll(bucket, "reply/a+b/"))).toEqual(KEYS.slice(2, 6));
-    expect(keys(await listAll(bucket, "reply/Ma"))).toEqual(KEYS.slice(0, 2));
-    expect(keys(await listAll(bucket, "reply/Main/"))).toEqual(KEYS.slice(0, 2));
-    expect(keys(await listAll(bucket, ""))).toEqual([ASSET, ...KEYS]);
-    expect(await listAll(bucket, "reply/zz")).toEqual([]);
+    expect(keys(await bucket.list("reply/"))).toEqual(KEYS);
+    expect(keys(await bucket.list("reply/a+b/"))).toEqual(KEYS.slice(2, 6));
+    expect(keys(await bucket.list("reply/Ma"))).toEqual(KEYS.slice(0, 2));
+    expect(keys(await bucket.list("reply/Main/"))).toEqual(KEYS.slice(0, 2));
+    expect(keys(await bucket.list(""))).toEqual([ASSET, ...KEYS]);
+    expect(await bucket.list("reply/zz")).toEqual([]);
   });
 
   test("a stored name outside the grammar is listed as unknown, and later keys still are", async () => {
     await bucket.put("reply/zz/1/ios", utf8("z"));
     b.plantUnknown();
-    const entries = await listAll(bucket, "reply/");
+    const entries = await bucket.list("reply/");
     expect(entries).toHaveLength(2);
     expect(entries.filter((e) => "unknown" in e)).toHaveLength(1);
     expect(entries).toContainEqual({ key: "reply/zz/1/ios" });

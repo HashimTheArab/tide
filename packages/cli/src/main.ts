@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { parseArgs } from "node:util";
-
 import { storageFromEnv } from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
@@ -19,14 +17,7 @@ function bucketFromEnv(env: Readonly<Record<string, string | undefined>>): Bucke
 
 /** Runs one command; 0 is success, 1 an unreadable record, 2 a usage, configuration or bucket error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
-  let positionals: string[];
-  try {
-    ({ positionals } = parseArgs({ args, allowPositionals: true, options: {} }));
-  } catch {
-    console.error(USAGE);
-    return 2;
-  }
-  if (positionals.length !== 1 || positionals[0] !== "status") {
+  if (args.length !== 1 || args[0] !== "status") {
     console.error(USAGE);
     return 2;
   }

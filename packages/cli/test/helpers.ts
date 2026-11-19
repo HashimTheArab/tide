@@ -6,8 +6,6 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { onTestFinished } from "vitest";
 
-import type { Bucket, ListEntry } from "../src/bucket.ts";
-
 /** Returns the bytes of a protocol golden fixture. */
 export function fixture(name: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(
@@ -24,13 +22,6 @@ export function tempRoot(): string {
     rmSync(root, { recursive: true, force: true });
   });
   return root;
-}
-
-/** Collects a whole listing. */
-export async function listAll(bucket: Bucket, prefix: string): Promise<ListEntry[]> {
-  const entries: ListEntry[] = [];
-  for await (const entry of bucket.list(prefix)) entries.push(entry);
-  return entries;
 }
 
 /** Returns the rejection of `promise`, failing the test if it resolves. */

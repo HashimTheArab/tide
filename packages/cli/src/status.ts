@@ -21,12 +21,9 @@ export async function status(
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<0 | 1> {
-  const entries = [];
-  for await (const entry of bucket.list("reply/")) entries.push(entry);
-
   let unreadable = false;
   let noUpdate: "present" | "unreadable" | "missing" = "missing";
-  for (const entry of entries) {
+  for (const entry of await bucket.list("reply/")) {
     if (!("key" in entry)) {
       // The name is stored data, so it is not printed.
       err("reply/: unreadable: an object name outside the key grammar");

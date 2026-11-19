@@ -1,9 +1,10 @@
-import type { S3Config, S3Request } from "@tide/protocol";
+import type { S3Config, S3Operation, S3Request } from "@tide/protocol";
 import {
   S3Error,
   childElements,
-  diskPath,
   parseS3Xml,
+  readS3Text,
+  s3Absent,
   s3BodyProblem,
   s3ErrorCode,
   s3Fetch,
@@ -12,9 +13,7 @@ import {
 } from "@tide/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
-import { BucketError, STRONG_ETAG, byteOrder, checkEtag, checkKey } from "./bucket.ts";
-
-type Operation = "GetObject" | "PutObject" | "DeleteObject" | "ListObjectsV2";
+import { BucketError, STRONG_ETAG, byteOrder, checkEtag, checkKey, isKey } from "./bucket.ts";
 
 const LIST_PAGE_LIMIT = 8 * 1024 * 1024;
 const IMF_FIXDATE = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
@@ -29,7 +28,7 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
 
   /** Sends one request and runs `handle` on its response, both under one deadline. */
   async function call<T>(
-    operation: Operation,
+    operation: S3Operation,
     request: S3Request,
     handle: (res: Response) => Promise<T>,
   ): Promise<T> {
@@ -43,7 +42,7 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
       const error =
         e instanceof S3Error
           ? e
-          : new S3Error(operation, controller.signal.aborted ? { timeoutMs } : "network");
+          : S3Error.unanswered(operation, controller.signal.aborted, timeoutMs);
       // A mutation that got no answer, a 5xx, or a 200 it cannot read may still have committed.
       const status = error.status;
       const unknown =
@@ -55,7 +54,7 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
   }
 
   /** Reads an error response's code once and throws the one error it gives. */
-  const failure = async (operation: Operation, res: Response): Promise<never> => {
+  const failure = async (operation: S3Operation, res: Response): Promise<never> => {
     throw new S3Error(operation, { status: res.status, code: await s3ErrorCode(res) });
   };
 
@@ -90,24 +89,24 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
     );
   }
 
-  /** Fetches and validates one listing page. */
-  const listPage = (query: Record<string, string>, prefix: string) =>
+  /** Sends one listing request and runs `handle` on its validated page. */
+  const listPage = <T>(
+    query: Readonly<Record<string, string>> & { readonly prefix: string },
+    handle: (page: Page, res: Response) => T,
+  ): Promise<T> =>
     call("ListObjectsV2", { method: "GET", query }, async (res) => {
       if (res.status !== 200) return failure("ListObjectsV2", res);
-      const page = parsePage(await readText(res), prefix);
-      if (page === undefined) throw new S3Error("ListObjectsV2", { problem: "listing" });
-      return { page, date: res.headers.get("date") };
+      const text = await readS3Text(res, LIST_PAGE_LIMIT);
+      const page = text === undefined ? undefined : parsePage(text, query.prefix);
+      if (page === undefined) throw invalidListing();
+      return handle(page, res);
     });
 
   return {
     async get(key, maxBytes) {
       checkKey(key);
       return await call("GetObject", { method: "GET", key }, async (res) => {
-        if (res.status !== 200) {
-          const code = await s3ErrorCode(res);
-          if (res.status === 404 && code === "NoSuchKey") return undefined;
-          throw new S3Error("GetObject", { status: res.status, code });
-        }
+        if (res.status !== 200) return s3Absent("GetObject", res);
         const etag = res.headers.get("etag");
         const size = Number(res.headers.get("content-length"));
         const problem =
@@ -142,45 +141,46 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
       });
     },
 
-    async *list(prefix) {
+    async list(prefix) {
+      const entries: ListEntry[] = [];
       const sent = new Set<string>();
-      let token: string | undefined;
       let last: string | undefined;
-      const invalid = () =>
-        new BucketError(new S3Error("ListObjectsV2", { problem: "listing" }).message, "failed");
-      for (;;) {
-        const query: Record<string, string> = { "list-type": "2", "encoding-type": "url", prefix };
-        if (token !== undefined) query["continuation-token"] = token;
-        const { page } = await listPage(query, prefix);
-        // The whole page is checked before any of it is yielded.
-        for (const entry of page.entries) {
-          if (!("key" in entry)) continue;
-          if (last !== undefined && byteOrder(entry.key, last) <= 0) throw invalid();
-          last = entry.key;
-        }
-        if (page.next !== undefined && sent.has(page.next)) throw invalid();
-        yield* page.entries;
-        if (page.next === undefined) return;
-        sent.add((token = page.next));
+      for (let token: string | undefined; ;) {
+        const query = {
+          "list-type": "2",
+          "encoding-type": "url",
+          prefix,
+          ...(token !== undefined && { "continuation-token": token }),
+        };
+        token = await listPage(query, (page) => {
+          for (const entry of page.entries) {
+            if (!("key" in entry)) continue;
+            if (last !== undefined && byteOrder(entry.key, last) <= 0) throw invalidListing();
+            last = entry.key;
+          }
+          if (page.next !== undefined && sent.has(page.next)) throw invalidListing();
+          entries.push(...page.entries);
+          return page.next;
+        });
+        if (token === undefined) return entries;
+        sent.add(token);
       }
     },
 
-    async time() {
-      const query = {
-        "list-type": "2",
-        "encoding-type": "url",
-        "max-keys": "1",
-        prefix: "reply/no-update",
-      };
-      const { date } = await listPage(query, query.prefix);
-      const ms = date !== null && IMF_FIXDATE.test(date) ? Date.parse(date) : NaN;
-      if (Number.isNaN(ms)) {
-        throw new BucketError(new S3Error("ListObjectsV2", { problem: "date" }).message, "failed");
-      }
-      return ms;
-    },
+    time: () =>
+      listPage(
+        { "list-type": "2", "encoding-type": "url", "max-keys": "1", prefix: "reply/no-update" },
+        (_, res) => {
+          const date = res.headers.get("date");
+          const ms = date !== null && IMF_FIXDATE.test(date) ? Date.parse(date) : NaN;
+          if (Number.isNaN(ms)) throw new S3Error("ListObjectsV2", { problem: "date" });
+          return ms;
+        },
+      ),
   };
 }
+
+const invalidListing = () => new S3Error("ListObjectsV2", { problem: "listing" });
 
 /** Returns exactly `size` bytes, or throws when the body is longer or shorter. */
 async function readExactly(
@@ -203,32 +203,6 @@ async function readExactly(
   }
   if (at !== size) throw new S3Error("GetObject", { problem: "body" });
   return out;
-}
-
-/** Returns a listing page's text: at most 8 MiB of valid UTF-8, checked before it is all buffered. */
-async function readText(res: Response): Promise<string> {
-  const invalid = new S3Error("ListObjectsV2", { problem: "listing" });
-  if (res.body === null) throw invalid;
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const reader: ReadableStreamDefaultReader<Uint8Array> = res.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > LIST_PAGE_LIMIT) {
-      await reader.cancel();
-      throw invalid;
-    }
-    chunks.push(value);
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
-      Buffer.concat(chunks),
-    );
-  } catch {
-    throw invalid;
-  }
 }
 
 interface Page {
@@ -272,7 +246,7 @@ function parsePage(text: string, prefix: string): Page | undefined {
     if (raw === undefined) return undefined;
     const name = decodeName(raw);
     if (name !== undefined && !name.startsWith(prefix)) return undefined;
-    entries.push(name !== undefined && inGrammar(name) ? { key: name } : { unknown: raw });
+    entries.push(name !== undefined && isKey(name) ? { key: name } : { unknown: raw });
   }
   let next: string | undefined;
   if (truncated === "true") {
@@ -288,14 +262,5 @@ function decodeName(raw: string): string | undefined {
     return decodeURIComponent(raw.replaceAll("+", " "));
   } catch {
     return undefined;
-  }
-}
-
-function inGrammar(key: string): boolean {
-  try {
-    diskPath(key);
-    return true;
-  } catch {
-    return false;
   }
 }

@@ -1,5 +1,5 @@
 import type { S3Config } from "@tide/protocol";
-import { S3Error, s3BodyProblem, s3ErrorCode, s3Fetch, s3Target } from "@tide/protocol";
+import { S3Error, s3Absent, s3BodyProblem, s3Fetch, s3Target } from "@tide/protocol";
 
 import type { Store } from "./store.ts";
 
@@ -34,14 +34,12 @@ export function s3Store(config: S3Config & { readonly timeoutMs?: number }): Sto
           }
           return { body: res.body, size: Number(res.headers.get("content-length")) };
         }
-        const code = await s3ErrorCode(res);
-        if (res.status === 404 && code === "NoSuchKey") return undefined;
-        throw new S3Error(operation, { status: res.status, code });
+        return await s3Absent(operation, res);
       } catch (e) {
         if (e instanceof S3Error) throw e;
-        if (controller.signal.aborted) throw new S3Error(operation, { timeoutMs });
-        if (signal?.aborted) throw signal.reason as Error;
-        throw new S3Error(operation, "network"); // fetch's own text is not ours to log.
+        if (!controller.signal.aborted && signal?.aborted) throw signal.reason as Error;
+        // fetch's own text is not ours to log.
+        throw S3Error.unanswered(operation, controller.signal.aborted, timeoutMs);
       } finally {
         clearTimeout(timer);
       }

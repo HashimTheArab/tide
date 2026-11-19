@@ -32,6 +32,7 @@ const META = ".tide";
 const HASH_CHUNK = 64 * 1024;
 // O_NONBLOCK: opening a FIFO with no writer must fail the regular-file check, not block.
 const READ_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK;
+const etagOf = (bytes: Uint8Array) => `"${createHash("sha256").update(bytes).digest("hex")}"`;
 
 /**
  * Returns a bucket over a directory, for tests and single-host development. Writers serialise on a SQLite lock
@@ -173,7 +174,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
       rmSync(staged, { force: true });
       throw fail(`failed: ${code(e)}`);
     }
-    return { staged, etag: `"${createHash("sha256").update(bytes).digest("hex")}"` };
+    return { staged, etag: etagOf(bytes) };
   };
 
   function write(key: string, bytes: Uint8Array): string;
@@ -213,7 +214,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
         }
         try {
           const bytes = readOpen(fd, maxBytes);
-          return { bytes, etag: `"${createHash("sha256").update(bytes).digest("hex")}"` };
+          return { bytes, etag: etagOf(bytes) };
         } finally {
           closeSync(fd);
         }
@@ -246,9 +247,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
         });
       }),
 
-    async *list(prefix) {
-      yield* await settle(() => listSync(prefix));
-    },
+    list: (prefix) => settle(() => listSync(prefix)),
 
     time: () => settle(now),
   };

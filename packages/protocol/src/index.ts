@@ -19,21 +19,20 @@ export {
   encodeStoredReply,
   replyKey,
 } from "./reply.ts";
-export type { S3Config, S3Problem, S3Request, S3Target, XmlElement } from "./s3.ts";
+export type { S3Config, S3Operation, S3Request } from "./s3.ts";
 export {
-  EMPTY_SHA256,
   S3Error,
   childElements,
   parseS3Xml,
+  readS3Text,
+  s3Absent,
   s3BodyProblem,
   s3ErrorCode,
   s3Fetch,
   s3Target,
-  sha256Hex,
   signV4,
   storageFromEnv,
   textOf,
-  uriEncode,
 } from "./s3.ts";
 export { encodeSfvDictionary } from "./sfv.ts";
 export type { Signer } from "./signature.ts";

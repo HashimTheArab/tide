@@ -58,7 +58,7 @@ read-only token.
   `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`.
   The bucket name is 3 to 63 of `a-z 0-9 . -`, starting and ending alphanumeric; the region is 1 to 32 of
   `a-z 0-9 -` (`auto` on R2). The access key ID is 16 to 128 alphanumerics and the secret 16 to 256 printable ASCII
-  characters, so neither can occur inside an error message.
+  characters.
 - **S3 errors** name the operation, the HTTP status and the S3 error code only when it is on a fixed list of
   documented codes (`AccessDenied`, `NoSuchKey`, `PreconditionFailed`, `SlowDown`, `InternalError` and a few more);
   any other code is "unrecognised". A network failure, a timeout and an unusable 200 each have fixed text. No

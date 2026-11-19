@@ -31,7 +31,7 @@ export interface S3Request {
   readonly body?: Uint8Array<ArrayBuffer>;
 }
 
-type S3Operation = "GetObject" | "PutObject" | "DeleteObject" | "ListObjectsV2";
+export type S3Operation = "GetObject" | "PutObject" | "DeleteObject" | "ListObjectsV2";
 
 /** Error codes a message may name; S3 defines many more, and any other is reported as unrecognised. */
 const S3_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -86,6 +86,11 @@ export class S3Error extends Error {
           ? 200
           : failure.status;
   }
+
+  /** The error for a request that got no response: a timeout when the deadline aborted it, else a network failure. */
+  static unanswered(operation: S3Operation, aborted: boolean, timeoutMs: number): S3Error {
+    return new S3Error(operation, aborted ? { timeoutMs } : "network");
+  }
 }
 
 function s3Message(operation: S3Operation, failure: S3Failure): string {
@@ -98,18 +103,6 @@ function s3Message(operation: S3Operation, failure: S3Failure): string {
   if (S3_ERROR_CODES.has(code)) return `${what} failed: ${status} ${code}`;
   return `${what} failed: ${status} with an unrecognised error code`;
 }
-
-// Every message form; a whitespace-free credential that occurs in a message lies within one of their words.
-const MESSAGE_SAMPLES = (["GetObject", "PutObject", "DeleteObject", "ListObjectsV2"] as const)
-  .flatMap((op) => [
-    s3Message(op, "network"),
-    s3Message(op, { timeoutMs: 0 }),
-    s3Message(op, { status: 0, code: undefined }),
-    s3Message(op, { status: 0, code: "" }),
-    ...[...S3_ERROR_CODES].map((code) => s3Message(op, { status: 0, code })),
-    ...Object.keys(PROBLEMS).map((problem) => s3Message(op, { problem: problem as S3Problem })),
-  ])
-  .join(" ");
 
 export const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const ERROR_BODY_LIMIT = 4096;
@@ -138,17 +131,11 @@ export function s3Target(config: S3Config): S3Target {
   if (!/^[a-z0-9-]{1,32}$/.test(config.region)) {
     throw new ProtocolError("region", "must be 1 to 32 of a-z, 0-9 and -");
   }
-  // Credentials have no whitespace and are not inside any message word, so no S3 error can contain one.
-  if (
-    !/^[A-Za-z0-9]{16,128}$/.test(config.accessKeyId) ||
-    MESSAGE_SAMPLES.includes(config.accessKeyId)
-  ) {
+  // Header-safe: printable ASCII with no whitespace.
+  if (!/^[A-Za-z0-9]{16,128}$/.test(config.accessKeyId)) {
     throw new ProtocolError("accessKeyId", "must be 16 to 128 of A-Z, a-z and 0-9");
   }
-  if (
-    !/^[\x21-\x7E]{16,256}$/.test(config.secretAccessKey) ||
-    MESSAGE_SAMPLES.includes(config.secretAccessKey)
-  ) {
+  if (!/^[\x21-\x7E]{16,256}$/.test(config.secretAccessKey)) {
     throw new ProtocolError("secretAccessKey", "must be 16 to 256 printable ASCII characters");
   }
   return {
@@ -273,6 +260,25 @@ export function s3BodyProblem(res: Response): S3Problem | undefined {
  * text-only `Code` child. Anything else is undefined; a body that fails mid-read rejects.
  */
 export async function s3ErrorCode(res: Response): Promise<string | undefined> {
+  const root = parseS3Xml((await readS3Text(res, ERROR_BODY_LIMIT)) ?? "");
+  if (root?.name !== "Error") return undefined;
+  const codes = childElements(root, "Code");
+  const code = codes.length === 1 && codes[0] !== undefined ? textOf(codes[0]) : undefined;
+  return code === "" ? undefined : code;
+}
+
+/** Returns undefined for a 404 `NoSuchKey`, the one non-200 that means absence; any other response throws. */
+export async function s3Absent(operation: S3Operation, res: Response): Promise<undefined> {
+  const code = await s3ErrorCode(res);
+  if (res.status === 404 && code === "NoSuchKey") return undefined;
+  throw new S3Error(operation, { status: res.status, code });
+}
+
+/**
+ * Returns a body of at most `limit` bytes as text, or undefined when it is absent, longer, or not valid UTF-8; the
+ * read stops at the limit. A body that fails mid-read rejects.
+ */
+export async function readS3Text(res: Response, limit: number): Promise<string | undefined> {
   if (res.body === null) return undefined;
   const reader: ReadableStreamDefaultReader<Uint8Array> = res.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -281,7 +287,7 @@ export async function s3ErrorCode(res: Response): Promise<string | undefined> {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > ERROR_BODY_LIMIT) {
+    if (size > limit) {
       await reader.cancel();
       return undefined;
     }
@@ -293,17 +299,11 @@ export async function s3ErrorCode(res: Response): Promise<string | undefined> {
     bytes.set(c, at);
     at += c.byteLength;
   }
-  let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
     return undefined;
   }
-  const root = parseS3Xml(text);
-  if (root?.name !== "Error") return undefined;
-  const codes = childElements(root, "Code");
-  const code = codes.length === 1 && codes[0] !== undefined ? textOf(codes[0]) : undefined;
-  return code === "" ? undefined : code;
 }
 
 export interface XmlElement {
@@ -454,14 +454,14 @@ export function storageFromEnv(
 }
 
 /** RFC 3986 encoding, as SigV4 requires: everything but unreserved characters. */
-export const uriEncode = (s: string): string =>
+const uriEncode = (s: string): string =>
   encodeURIComponent(s).replace(
     /[!'()*]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
 
 /** Returns the lowercase hex SHA-256 of `bytes`. */
-export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return hex(await crypto.subtle.digest("SHA-256", bytes));
 }
 

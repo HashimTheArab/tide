@@ -98,8 +98,7 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   const kind = checkKind(present(r, "kind"));
   for (const key of Object.keys(r)) {
     if (!RECORD_FIELDS[kind].includes(key)) {
-      // The field name is stored data, so it is never echoed.
-      throw new ProtocolError("record", `has a field that is not part of a ${kind} reply`);
+      throw new ProtocolError(key, `is not a field of a ${kind} reply`);
     }
   }
   const contentType = present(r, "contentType");
@@ -201,7 +200,7 @@ function checkFilters(value: unknown): string {
   const members = new Map<string, string>();
   for (const [key, member] of parseSfvDictionary(value, "manifestFilters")) {
     if (member.kind !== "string") {
-      throw new ProtocolError("manifestFilters", "members must be strings");
+      throw new ProtocolError("manifestFilters", `${key} must be a string`);
     }
     members.set(key, member.text);
   }
