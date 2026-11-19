@@ -59,7 +59,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
     try {
       mkdirSync(path);
     } catch (e) {
-      if (code(e) !== "EEXIST" || !lstatSync(path).isDirectory()) throw fail("unavailable");
+      if (code(e) !== "EEXIST" || !isRealDirectory(path)) throw fail("unavailable");
     }
   };
   const ensureParents = (rel: string) => {
@@ -281,6 +281,15 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
     return entries
       .filter((e) => name(e).startsWith(prefix))
       .sort((a, b) => byteOrder(name(a), name(b)));
+  }
+}
+
+/** True for a directory, false for anything else, a symlink to a directory included. */
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
   }
 }
 
