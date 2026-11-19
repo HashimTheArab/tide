@@ -38,12 +38,28 @@ patches/<fromHash>/<toHash>              BSDIFF40 patch
 lock                                     publish and gc lock
 ```
 
-The server's credentials are read-only.
+The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
+Worker holds write access it never uses. Its store type admits only `get`, and only `src/workers.ts` touches the
+binding. Code running inside the Worker could delete objects; it could not make a write pass the client's signature
+and hash checks. An operator who needs a strictly read-only Worker can point the S3 adapter at R2's S3 API with a
+read-only token.
+
+- **Keys** are a known prefix plus a hash (today only `assets/<64 lowercase hex>`). Objects are stored unencoded; an
+  object with a `content-encoding` other than `identity` is an error, not an asset.
+- **S3** (Node): path-style GetObject signed with SigV4. The credentials need `s3:GetObject` and `s3:ListBucket`;
+  without ListBucket, S3 answers a missing key with 403, which the server must treat as an outage. Configured by
+  `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`.
+- **Disk** (Node, tests and single-host development): `TIDE_DISK_DIR`. The root is trusted: only the publisher
+  writes it. Containment is the key grammar alone, checked before any filesystem call; there are no symlink,
+  realpath or volume checks and no metadata files. A root missing after startup is an outage (503), not a miss.
+- The Node entry needs exactly one of the two and exits before listening otherwise.
 
 ## Server
 
 A Hono app in `packages/server/src/core` that uses only web-standard APIs and one `Store.get(key)` interface.
-Entry points: `workers.ts` (R2 binding) and `node.ts` (S3 API; local disk in tests). No application cache.
+Entry points: `workers.ts` (R2 binding) and `node.ts` (S3 API, or a local disk for tests and single-host
+development). No application cache. `Store.get` resolves undefined only for an object that does not exist; every
+other failure is a non-cacheable 5xx, never a 404.
 
 ### `GET /manifest`
 
@@ -70,8 +86,14 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 ### Other routes
 
 - Non-launch assets are served from the bucket's public domain with a one-year immutable cache.
-- `GET /assets?h=<sha256>` streams by hash, for URLs published by earlier servers. A frozen map can cover other
-  legacy URL shapes.
+- `GET /assets?h=<hash>&ext=<ext>` streams `assets/<hex>`, for URLs published by earlier servers. `h` must be one
+  canonical unpadded base64url SHA-256 (43 characters, zero trailing bits: protocol `assetHash`), else 400. The
+  `content-type` comes from `ext`, a bare extension, through protocol `assetContentType`, the table the publisher
+  also uses; no or an unknown `ext` gives `application/octet-stream`. A 200 is `public, max-age=31536000,
+  immutable`; every other reply is `no-store` (404 when absent, 503 when the store fails). Earlier servers also
+  served launch bundles this way, so the legacy import stores every object a legacy `?h=` URL names under
+  `assets/`, launch bundles included, and records each key in the legacy map `gc` honours. These URLs get no
+  patches. A frozen map can cover other legacy URL shapes.
 - `GET /hc`.
 
 ## CLI

@@ -9,7 +9,8 @@ AI agents write most of the code.
 - A wrong byte on the wire stops updates for every installed app. Correctness beats features.
 - Prefer the smallest design that makes correct behaviour unsurprising. Delete what a better design replaces; there
   is no release yet, so there is no compatibility to keep inside this repo.
-- The server is read-only. Only the CLI writes, and only the CLI signs.
+- The server is read-only. Only the CLI writes, and only the CLI signs. The one exception is the Workers R2 binding,
+  which cannot be made read-only; the Worker only calls `get` (`docs/design.md`, Storage).
 
 ## Working with the owner
 
@@ -41,7 +42,8 @@ AI agents write most of the code.
   parse and re-stringify them.
 - **Changing a published URL.** Asset and bundle URLs are inside signed manifests on devices. Once published, a URL
   shape must keep working forever.
-- **Putting a key on a server.** Signing happens in the CLI only. The server's storage credentials are read-only.
+- **Putting a key on a server.** Signing happens in the CLI only. The server's storage credentials are read-only,
+  except the R2 binding, which cannot be; never call anything but `get` on it.
 - **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide/server types`; the gate fails
   when it is stale.
 - **Committing secrets.** Never commit `.env`, keys or credentials.
