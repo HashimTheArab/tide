@@ -3,7 +3,8 @@
   "printWidth": 100,
   "sortPackageJson": false,
   "ignorePatterns": [
-    "**/worker-configuration.d.ts"
+    "**/worker-configuration.d.ts",
+    "packages/protocol/test/fixtures/**"
   ],
   "sortImports": {
     "newlinesBetween": false,
