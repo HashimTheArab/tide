@@ -6,5 +6,7 @@
     "types": [],
     "tsBuildInfoFile": "${configDir}/.cache/tsbuildinfo.web.json"
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // The generator and its test run on Node only.
+  "exclude": ["test/generate-fixtures.ts", "test/generate-fixtures.test.ts"]
 }
