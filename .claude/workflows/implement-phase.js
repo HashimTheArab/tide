@@ -37,6 +37,10 @@ const DEEP_LINES = bounded(a.deepReviewLines, 400, 50, 5000);
 const SLICE_LINES = bounded(a.sliceLines, 400, 100, 3000);
 const AUTO_MERGE = a.autoMerge !== false;
 const NOTES = a.notes ? `\nOwner's notes for this run: ${a.notes}` : "";
+// Reviewers and the arbiter get the same notes as fixed decisions, so they do not re-raise what the owner settled.
+const DECISIONS = a.notes
+  ? `\nThe owner's notes for this run are fixed decisions: do not report them as findings unless one contradicts the Expo Updates protocol spec or loses correctness, and then say which. Notes: ${a.notes}`
+  : "";
 
 // ---- Constants
 const OUT = `${REPO}/.agent-output/phases/${PHASE.toLowerCase()}`;
@@ -596,7 +600,7 @@ cd ${WT} && pnpm install --frozen-lockfile`,
             [prompt]: `Review the design note ${SDIR}/design.md for slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, before any code is written. Do not edit anything.
 Scope: ${S.scope}
 Done when: ${S.done.join("; ")}
-The rules are AGENTS.md, docs/design.md, docs/decisions/ and docs/testing.md in this repository; the phase is in docs/roadmap.md. Read the code the design touches.
+The rules are AGENTS.md, docs/design.md, docs/decisions/ and docs/testing.md in this repository; the phase is in docs/roadmap.md. Read the code the design touches.${DECISIONS}
 Report real problems only: a wrong or unsafe approach, missed invariants, failure or concurrency cases, missing tests, decision-record violations, or a dependency that fails the AGENTS.md rules. Severity: P0 builds the wrong thing or loses data; P1 a design-level gap the slice would ship (wrong approach, missing requirement or test case, broken invariant, decision-record or dependency-rule violation); P2 a concrete weakness, including any code-level detail the build and gate will exercise (import paths, call forms, test plumbing, fixture data, cleanup order), which the builder receives as instructions; P3 a nit.
 Also answer: is there a materially smaller design? Report it as a P1 titled "Smaller design" only if it removes a component, dependency or piece of state; a rearrangement of tests or code within the same design is a P2.${prior.length ? `\nThis is a closure check of a revised note. Keep the severity of each finding below that the note leaves unresolved. Report anything new as P2 unless it is a P0.\n${prior.map((f) => `- [${f.severity}] ${f.title}: ${f.scenario}`).join("\n")}` : ""}
 End your final message with the line "Full review comments:" followed by one line per finding, "- [P1] <title> — <detail>", or the line "No findings." if there are none.`,
@@ -693,7 +697,7 @@ Slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, in the worktree ${WT
 Scope: ${S.scope}
 Done when: ${S.done.join("; ")}
 Review git diff ${base}...HEAD${r > 1 ? " (the fixes since the last review), reading git diff origin/main...HEAD for context" : ""}. You were triggered by: ${why.join("; ")}.
-The rules are AGENTS.md, docs/design.md, docs/decisions/ and docs/testing.md.${history.length ? `\nEarlier rounds and how each finding was settled:\n${history.map((h) => h.text).join("\n")}\nRaise a rejected finding again only with new evidence.` : ""}
+The rules are AGENTS.md, docs/design.md, docs/decisions/ and docs/testing.md.${DECISIONS}${history.length ? `\nEarlier rounds and how each finding was settled:\n${history.map((h) => h.text).join("\n")}\nRaise a rejected finding again only with new evidence.` : ""}
 Report real problems only: correctness, security, data loss, races, idempotency, failure handling, decision-record violations, tests the testing standard rejects, dependency rule failures, needless complexity. Each finding needs file, line and a concrete failure scenario. Severity: P1 a real bug, security gap or data risk; P2 a concrete correctness, test or design problem; P3 a nit. An empty list is a valid answer.`,
         `deep review r${r}`,
         DEEP,
@@ -707,7 +711,7 @@ Report real problems only: correctness, security, data loss, races, idempotency,
         `You are a simplicity reviewer in fresh context, and read-only: never edit, commit or push, and leave git status clean. You did not build this slice; read the code, not anyone's account of it.
 Slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, in the worktree ${WT}; the change is git diff origin/main...HEAD.
 Scope: ${S.scope}
-The rules are AGENTS.md, docs/design.md and docs/decisions/. If the simplifying-overgrown-diffs skill is available, apply it.
+The rules are AGENTS.md, docs/design.md and docs/decisions/. If the simplifying-overgrown-diffs skill is available, apply it.${DECISIONS}
 Ask whether this is the smallest, clearest design and code that meets the scope. Report:
 - P1 "Smaller design": a materially smaller design that removes a component, dependency, option or piece of state. Only this blocks.
 - P2, applied as instructions: duplication or parallel lists kept in sync by hand; a new helper where an existing one would do; code the change replaces but leaves behind; dead code; an abstraction or option with one user; needless indirection; code in a file that does not own what it depends on; comments that restate the code or run past two lines; unclear names; a diff out of proportion to the behaviour.
@@ -724,6 +728,7 @@ Do not report bugs, tests or style the formatter owns; other reviewers cover tho
 Slice ${S.id} of roadmap phase ${PHASE}, in the worktree ${WT}.
 A reviewer raised: ${JSON.stringify(f)}
 The implementer rejected it: ${d.reason}
+${DECISIONS}
 Check the code yourself. Your default is "finding-stands"; return "rejection-valid" only if the code shows the rejection is right.`,
       `arbiter ${f.id}`,
       VERDICT,
