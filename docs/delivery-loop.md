@@ -5,7 +5,7 @@ updated: 2026-11-19
 
 # Delivery loop
 
-How a roadmap phase becomes merged PRs, one slice per run, with as little owner time as possible. The loop is the
+How a roadmap phase becomes merged PRs, one slice per run, with no owner approval: the owner opted out of reviewing slices. The loop is the
 named workflow `.claude/workflows/implement-phase.js`. Opus plans, builds and fixes; Codex (`gpt-6.2-sol`, high
 effort) and fresh Opus agents review. Plain code in the script decides every branch; agents only do the steps.
 
@@ -28,14 +28,15 @@ Always start a fresh run; never use `resumeFromRunId`, which replays stale evide
 | `notes` | none | Extra instructions for this run's agents |
 | `maxRounds` | 3 | Review rounds before handing back (1 to 5) |
 | `deepReviewLines` | 400 | Changed lines that trigger the deep review (50 to 5000) |
-| `autoMerge` | true | Auto-merge a clean, non-risky slice through GitHub |
+| `sliceLines` | 400 | Target size of a planned slice (100 to 3000) |
+| `autoMerge` | true | Auto-merge a clean slice through GitHub |
 
 ## What runs
 
 1. **Plan (Opus).** On the first run it reads the roadmap phase, its decision records and the code, and writes
-   `plan.json`: ordered slices of about 400 lines or fewer, each with a scope, done criteria, a line estimate
+   `plan.json`: ordered slices of about `sliceLines` lines or fewer, each with a scope, done criteria, a line estimate
    and a `risky` flag. A slice is risky when it touches the wire format, signing or keys, the pointer, lock or gc, patches, or storage
-   credentials, and every slice of P2 to P6 is risky. Later runs only mark slices whose PRs merged.
+   credentials, and every slice of P2 to P5 is risky. Later runs only mark slices whose PRs merged.
    Slices run in order: if the first unmerged slice is still waiting on its PR, the run stops and reports the
    PR's state. If that PR is set to auto-merge but has fallen behind `main`, conflicts with it, or had auto-merge
    paused by an interrupted catch-up, the run catches it up as in step 7 instead, so parallel streams need no
@@ -65,13 +66,12 @@ Always start a fresh run; never use `resumeFromRunId`, which replays stale evide
 7. **Merge.** If the branch is behind `main`, the workflow merges `origin/main` into it in the slice's worktree
    (never a rebase, force push or `gh pr update-branch`), re-runs the trusted gate on the merged head and pushes
    only if it passes; a conflict or a failing gate hands back. Auto-merge is paused before that push and
-   re-enabled on the new head, so nothing reaches `main` without passing both the trusted gate and CI. It updates the PR body with the review history. A risky slice, or one whose
-   diff touches the gate's risky files, gets the `needs-owner` label and stops for the owner. Any other slice is
-   set to auto-merge on its exact head commit, unless `autoMerge` is false.
+   re-enabled on the new head, so nothing reaches `main` without passing both the trusted gate and CI. It updates the PR body with the review history and sets auto-merge on the exact head
+   commit, unless `autoMerge` is false. Risky slices merge the same way; their extra safety is the design note and
+   deep review.
 
-## When it stops for the owner
+## When it stops
 
-- A risky slice is ready: the PR carries `needs-owner`. Merge it in GitHub, then run the next slice.
 - A slice is handed back: the design review left a P0 or P1, the gate still fails after two fixes, findings are
   still blocking after `maxRounds`, the fixer rejects a finding the arbiter upheld or it already claimed fixed, the branch conflicts with
   `main`, or any step crashed or returned no evidence. The reason is in `plan.json`; if the PR exists it gets

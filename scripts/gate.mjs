@@ -35,7 +35,7 @@ const CHECKS = {
 /** @type {string[]} */
 const SECRETS_IGNORE = [];
 
-// A slice touching any of these waits for the owner even when every check and review is clean.
+// A slice touching any of these always gets the deep review.
 const RISKY = [
   /^packages\/protocol\//,
   /^packages\/cli\/src\/(sign|keys|publish|pointer|lock|gc)/,
@@ -56,7 +56,7 @@ const RISKY = [
   /^docs\/decisions\//,
   /^docs\/(design|testing|delivery-loop)\.md$/,
 ];
-// Changes here always get the deep review, without needing the owner.
+// Changes here also always get the deep review.
 const DEEP = [/^packages\/server\/src\//, /^packages\/cli\/src\//];
 
 const TEST_FILE = /(__tests__\/|(^|\/)tests?\/|\.test\.|\.spec\.|\.e2e\.|maestro\/)/;

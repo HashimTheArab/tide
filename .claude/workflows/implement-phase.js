@@ -1,9 +1,9 @@
 export const meta = {
   name: "implement-phase",
   description:
-    "Deliver the next slice of a roadmap phase as one reviewed PR; auto-merge it or hand it to the owner",
+    "Deliver the next slice of a roadmap phase as one reviewed PR and auto-merge it, or hand it back",
   whenToUse:
-    'Run the next slice of a roadmap phase, one slice per run. args: {phase: "P12", slice?: "P12.3", notes?: string, maxRounds?: 3, deepReviewLines?: 400, autoMerge?: true}',
+    'Run the next slice of a roadmap phase, one slice per run. args: {phase: "P12", slice?: "P12.3", notes?: string, maxRounds?: 3, deepReviewLines?: 400, sliceLines?: 400, autoMerge?: true}',
   phases: [
     { title: "Plan", detail: "Opus plans the phase into slices, or refreshes the plan" },
     {
@@ -34,6 +34,7 @@ const bounded = (v, d, lo, hi) =>
   Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : d;
 const MAX_ROUNDS = bounded(a.maxRounds, 3, 1, 5);
 const DEEP_LINES = bounded(a.deepReviewLines, 400, 50, 5000);
+const SLICE_LINES = bounded(a.sliceLines, 400, 100, 3000);
 const AUTO_MERGE = a.autoMerge !== false;
 const NOTES = a.notes ? `\nOwner's notes for this run: ${a.notes}` : "";
 
@@ -41,7 +42,7 @@ const NOTES = a.notes ? `\nOwner's notes for this run: ${a.notes}` : "";
 const OUT = `${REPO}/.agent-output/phases/${PHASE.toLowerCase()}`;
 const PLAN = `${OUT}/plan.json`;
 const GATE = `${OUT}/trusted/gate.mjs`; // copied from origin/main before every run, so a branch cannot grade itself
-const RISKY_PHASES = ["P2", "P3", "P4", "P5", "P6"];
+const RISKY_PHASES = ["P2", "P3", "P4", "P5"];
 const SOL = '-m gpt-6.2-sol -c model_reasoning_effort="high"';
 const FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 const LABEL =
@@ -318,7 +319,7 @@ If ${PLAN} exists, only refresh it: for each slice with a pr and a state other t
 
 Otherwise, plan:
 1. Read the phase in docs/roadmap.md, the decision records it touches and the current code. Return status "blocked" with the reason, and write nothing, if a phase it depends on has not shipped or a owner answer it needs is still open.
-2. Split it into ordered slices, each independently green and building on merged predecessors, of about 400 changed lines or fewer (lockfile and generated files excluded). Cover every in-scope roadmap item; never drop required work to make the phase smaller, and never go beyond the phase.
+2. Split it into ordered slices, each independently green and building on merged predecessors, of about ${SLICE_LINES} changed lines or fewer (lockfile and generated files excluded). Cover every in-scope roadmap item; never drop required work to make the phase smaller, and never go beyond the phase.
 3. Each slice has: id ("${PHASE}.1", "${PHASE}.2", ...); title; scope; done (checkable done criteria); risky (true when it touches the wire format, signing or keys, the pointer, lock or gc, patches, or storage credentials${RISKY_PHASES.includes(PHASE) ? "; every slice of this phase is risky" : ""}); estLines; and state "pending".
 4. mkdir -p ${OUT} and write {"phase": "${PHASE}", "slices": [...]} to ${PLAN}. Return status "ok" with the slices.`,
     "plan",
@@ -506,14 +507,9 @@ async function finish() {
     );
   }
 
+  // The owner opted out of approving slices: risky ones get the design note and deep review, then merge like any other.
   let state = "pr-open";
-  if (RISKY || g.riskyFiles.length) {
-    await ok(
-      "label needs-owner",
-      `cd ${WT} && ${LABEL} && gh pr edit ${PR} --add-label needs-owner`,
-    );
-    state = "needs-owner";
-  } else if (AUTO_MERGE) {
+  if (AUTO_MERGE) {
     await ok(
       "auto-merge",
       `cd ${WT} && gh pr merge ${PR} --squash --auto --match-head-commit ${g.headSha}`,
