@@ -53,7 +53,9 @@ Always start a fresh run; never use `resumeFromRunId`, which replays stale evide
    round's head afterwards, saving the output as `codex-review-<round>.md`. A fresh, read-only Opus deep review
    runs alongside it on a risky slice's first round, or when the slice has more than `deepReviewLines` changed
    lines, touches risky files or any server or CLI source, or the gate reports test signals
-   (skips, retries, mocks, sleeps). A missing or empty review hands back; it never counts as clean.
+   (skips, retries, mocks, sleeps). In round 1 a fresh, read-only Opus simplicity review also checks the whole diff for a materially smaller
+   design (P1) and for duplication, dead code, single-use abstractions, needless indirection or unclear code (P2).
+   A missing or empty review hands back; it never counts as clean.
 5. **Fix (fresh Opus).** It checks every blocking finding against the code, fixes the real ones with a test it
    has seen fail on the old code, and rejects the rest with evidence. The gate runs again, with the same two fix
    attempts, and the workflow pushes. A fresh Opus then checks each claimed fix: its test must pass now and fail
