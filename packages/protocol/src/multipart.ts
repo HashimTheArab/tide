@@ -53,9 +53,10 @@ export function encodeMultipart(
       ["Content-Disposition", `form-data; name="${name}"`],
       ["Content-Type", CONTENT_TYPES[name]],
     ];
-    checkHeaders([...fixed, ...part.headers], field);
+    const given = Array.from(part.headers, ([n, v]): Header => [n, v]); // Read once, so the checked value is written.
+    checkHeaders([...fixed, ...given], field);
     // Stock iOS clients look part headers up by exact lowercase name, such as `expo-signature`.
-    const headers = [...fixed, ...part.headers.map(([n, v]) => [n.toLowerCase(), v] as const)];
+    const headers = [...fixed, ...given.map(([n, v]): Header => [n.toLowerCase(), v])];
     const head = encoder.encode(headers.map(([n, v]) => `${n}: ${v}\r\n`).join(""));
     return { field, head, body: part.body };
   });

@@ -476,6 +476,18 @@ describe("multipart", () => {
     );
   });
 
+  test("a headers getter is read once, so the checked headers are the ones written", () => {
+    let reads = 0;
+    const lying = {
+      name: "directive" as const,
+      body: ascii("{}"),
+      get headers(): Header[] {
+        return reads++ === 0 ? [["x-a", "b"]] : [["x-a", "b\r\nx-injected: 1"]];
+      },
+    };
+    expect(encodeMultipart([lying], B).body).toEqual(frame([[...DIRECTIVE, "x-a: b"], "{}"]));
+  });
+
   test("a drawn boundary is 32 hex characters and round-trips", () => {
     const { boundary, body } = encodeMultipart([part("directive", buildNoUpdateAvailable())]);
     expect(boundary).toMatch(/^[0-9a-f]{32}$/);
