@@ -577,6 +577,8 @@ cd ${WT} && pnpm install --frozen-lockfile`,
 
   // ---- Design note, risky slices only
   let advice = "";
+  // Design P1s left after the closure check, other than a smaller design: the build must meet them and round 1 checks.
+  let designMust = [];
   if (RISKY) {
     phase("Design");
     done(
@@ -626,13 +628,18 @@ End your final message with the line "Full review comments:" followed by one lin
         found.filter((f) => sev[f.severity] <= 1),
       );
       const left = found.filter((f) => sev[f.severity] <= 1);
-      if (left.length)
+      const hard = left.filter((f) => f.severity === "P0" || /smaller design/i.test(f.title));
+      if (hard.length)
         fail(
-          `the design review still has P0/P1 problems: ${left.map((f) => `[${f.severity}] ${f.title}`).join("; ")}`,
+          `the design review still has P0 or smaller-design problems: ${hard.map((f) => `[${f.severity}] ${f.title}`).join("; ")}`,
         );
+      designMust = left;
     }
-    if (found.length)
-      advice = `\nNon-blocking design review points; apply those that keep the slice simple:\n${found.map((f) => `- [${f.severity}] ${f.title}: ${f.scenario}`).join("\n")}`;
+    const rest = found.filter((f) => !designMust.includes(f));
+    if (designMust.length)
+      advice += `\nRequired: the design review left these unresolved, and the build must meet each one; the first deep review checks them:\n${designMust.map((f) => `- [${f.severity}] ${f.title}: ${f.scenario}`).join("\n")}`;
+    if (rest.length)
+      advice += `\nNon-blocking design review points; apply those that keep the slice simple:\n${rest.map((f) => `- [${f.severity}] ${f.title}: ${f.scenario}`).join("\n")}`;
   }
 
   // ---- Build
@@ -683,6 +690,7 @@ Return, for the PR body: summary (a few markdown bullet lines on what you built)
   const deepWhy = (r) =>
     [
       r === 1 && RISKY && "risky slice",
+      r === 1 && designMust.length > 0 && "design-gate requirements",
       g.changedLines > DEEP_LINES && `${g.changedLines} changed lines`,
       g.riskyFiles.length && `risky files: ${g.riskyFiles.slice(0, 10).join(", ")}`,
       g.deepFiles.length &&
@@ -696,7 +704,7 @@ Return, for the PR body: summary (a few markdown bullet lines on what you built)
 Slice ${S.id} "${safe(S.title)}" of roadmap phase ${PHASE}, in the worktree ${WT}.
 Scope: ${S.scope}
 Done when: ${S.done.join("; ")}
-Review git diff ${base}...HEAD${r > 1 ? " (the fixes since the last review), reading git diff origin/main...HEAD for context" : ""}. You were triggered by: ${why.join("; ")}.
+Review git diff ${base}...HEAD${r > 1 ? " (the fixes since the last review), reading git diff origin/main...HEAD for context" : ""}. You were triggered by: ${why.join("; ")}.${r === 1 && designMust.length ? `\nThe design review left these requirements for the build. Report each one the code does not meet as P1: ${designMust.map((f) => `${f.title} (${f.scenario})`).join("; ")}` : ""}
 The rules are AGENTS.md, docs/design.md, docs/decisions/ and docs/testing.md.${DECISIONS}${history.length ? `\nEarlier rounds and how each finding was settled:\n${history.map((h) => h.text).join("\n")}\nRaise a rejected finding again only with new evidence.` : ""}
 Report real problems only: correctness, security, data loss, races, idempotency, failure handling, decision-record violations, tests the testing standard rejects, dependency rule failures, needless complexity. Each finding needs file, line and a concrete failure scenario. Severity: P1 a real bug, security gap or data risk; P2 a concrete correctness, test or design problem; P3 a nit. An empty list is a valid answer.`,
         `deep review r${r}`,
