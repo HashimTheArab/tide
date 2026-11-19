@@ -14,6 +14,8 @@ AI agents write most of the code.
 - Defend at the trust boundary, not twice. The bucket is trusted: only the CLI writes it, after validating and
   signing. Clients verify every signature and asset hash. So the server validates request input and what it routes
   on, and does not re-check signatures, framing or hashes of what it stores.
+  This holds only because Tide requires code signing: an app without a code-signing certificate would run whatever
+  the bucket holds, so the CLI never publishes unsigned and the docs reject unsigned apps.
 
 ## Working with the owner
 
