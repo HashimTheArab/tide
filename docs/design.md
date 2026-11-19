@@ -31,8 +31,8 @@ One bucket (R2 or S3-compatible), written only by the CLI:
 assets/<sha256>                          immutable non-launch assets
 bundles/<sha256>                         launch bundles
 updates/<updateId>.json                  release record: launch hash, asset hashes, createdAt
-reply/<channel>/<runtime>/<platform>     ready-to-serve multipart body and headers (the pointer)
-reply/no-update                          pre-signed noUpdateAvailable part
+reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
+reply/no-update                          stored reply: the signed noUpdateAvailable
 bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
 patches/<fromHash>/<toHash>              BSDIFF40 patch
 lock                                     publish and gc lock
@@ -44,15 +44,44 @@ binding. Code running inside the Worker could delete objects; it could not make 
 and hash checks. An operator who needs a strictly read-only Worker can point the S3 adapter at R2's S3 API with a
 read-only token.
 
-- **Keys** are a known prefix plus a hash (today only `assets/<64 lowercase hex>`). Objects are stored unencoded; an
-  object with a `content-encoding` other than `identity` is an error, not an asset.
+- **Keys** are a known prefix plus a hash (`assets/<64 lowercase hex>`) or a reply key. Objects are stored
+  unencoded; an object with a `content-encoding` other than `identity` is an error, not an asset.
+- **Reply keys** come from protocol `replyKey`, shared by server and CLI. Channel and runtime version are each 1 to 64
+  of `A-Z a-z 0-9 . _ + -`, and neither is `.` or `..`, so no header value can name another key; platform is `ios` or
+  `android`. S3 receives each key segment percent-encoded (`+` as `%2B`).
 - **S3** (Node): path-style GetObject signed with SigV4. The credentials need `s3:GetObject` and `s3:ListBucket`;
   without ListBucket, S3 answers a missing key with 403, which the server must treat as an outage. Configured by
   `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`.
 - **Disk** (Node, tests and single-host development): `TIDE_DISK_DIR`. The root is trusted: only the publisher
   writes it. Containment is the key grammar alone, checked before any filesystem call; there are no symlink,
   realpath or volume checks and no metadata files. A root missing after startup is an outage (503), not a miss.
+  Protocol `diskPath` maps a key to its file: in a reply key, every character of channel and runtime outside
+  `a-z 0-9` becomes `_` and two hex digits (`Main` is `_4dain`), so names differing only in case stay distinct on a
+  case-insensitive filesystem and no channel collides with the `reply/no-update` file.
 - The Node entry needs exactly one of the two and exits before listening otherwise.
+
+### Stored replies
+
+One JSON object per reply key, encoded and decoded by protocol `encodeStoredReply` and `decodeStoredReply`; the
+golden files are `packages/protocol/test/fixtures/*.reply.json`. Keys in this order, no trailing newline:
+
+```json
+{"version":1,"kind":"manifest","updateId":"<uuid>","contentType":"multipart/mixed; boundary=<b>","manifestFilters":"branch=\"main\"","body":"--<b>\r\n…"}
+```
+
+- `kind` is `manifest`, `rollBackToEmbedded` or `noUpdateAvailable`. Only `manifest` has `updateId` (a lowercase UUID)
+  and `manifestFilters` (empty, or exactly what `encodeSfvDictionary` writes, at most 4 KiB).
+- `body` is the exact signed multipart as a string. It is UTF-8 by construction, so the string round-trips its bytes;
+  nothing parses or re-serialises it. A record is at most 2 MiB; encode refuses a larger one.
+- Any other `version` is unreadable. A new layout bumps it, and the CLI must not write it before servers read it.
+- The bucket is trusted, so neither codec nor server checks signatures, framing or that fields agree with the body.
+  The publisher builds the record from what it has just built and signed: the boundary `encodeMultipart` returned,
+  the kind of the part it built, `updateId` from the signed manifest's `id`, and the key's runtime from its
+  `runtimeVersion`. Each filter member is a signed metadata member (key lowercased, same value), so the client's
+  filter check passes. Metadata keys must stay distinct after lowercasing and Unicode canonical equivalence (NFC):
+  iOS compares Swift strings that way and traps on duplicate dictionary keys.
+- A publish replaces a record whole (R2 and S3 atomically; on disk a temporary file and a rename), so a request reads
+  the old reply or the new one, never a mix.
 
 ## Server
 
@@ -63,15 +92,31 @@ other failure is a non-cacheable 5xx, never a 404.
 
 ### `GET /manifest`
 
-1. Unknown `expo-platform`: 400. A configured app ID must match `expo-app-id` when the header is present.
-2. No pointer for `<channel>/<runtime>/<platform>`: the signed `noUpdateAvailable`.
-3. `Expo-Current-Update-ID` equals the pointer's update: signed `noUpdateAvailable`. For a rollback pointer, current
-   equal to `Expo-Embedded-Update-ID`: the same.
-4. Otherwise the stored body with `multipart/mixed; boundary=…`, `expo-protocol-version: 1`, `expo-sfv-version: 0`,
-   `expo-manifest-filters` (manifests only) and `cache-control: private, max-age=0`.
+An empty request header counts as absent. In order:
 
-Each part carries `Content-Disposition: form-data; name="manifest"` (or `"directive"`), `Content-Type:
-application/json` and `expo-signature: sig="<base64>", keyid="<id>"` over its exact bytes.
+1. `expo-platform` other than `ios` or `android`: 400.
+2. A configured app ID (`TIDE_APP_ID`, Workers var or Node env; empty is unset) that differs from a present
+   `expo-app-id`: 400. An absent header is accepted.
+3. `expo-protocol-version` present and not `1`, or an `accept` that contains none of `multipart/mixed`, `multipart/*`
+   and `*/*`: 406. A substring check that ignores parameters and q-values: stock clients send `multipart/mixed`, the
+   only type Tide serves.
+4. `expo-channel-name` or `expo-runtime-version` missing or outside the reply key grammar: 400. There is no default
+   channel: a misconfigured app sees a 400 in its logs rather than a silent no-update, and keeps its current update.
+5. No pointer for `<channel>/<runtime>/<platform>`: the stored `reply/no-update`.
+6. `Expo-Current-Update-ID` equal to the manifest pointer's update ID, or, for a rollback pointer, equal to
+   `Expo-Embedded-Update-ID` (UUIDs, compared ignoring case): the stored `reply/no-update`.
+7. Otherwise the pointer.
+
+A served reply is 200 with the stored body, `content-type: multipart/mixed; boundary=…`, `expo-protocol-version: 1`,
+`expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the stored
+`expo-manifest-filters` (even when empty: a client keeps earlier filters when the header is absent). Each part
+carries `Content-Disposition: form-data; name="manifest"` (or `"directive"`), `Content-Type: application/json` and
+`expo-signature: sig="<base64>", keyid="<id>"` over its exact bytes.
+
+One deadline (10 s) covers every read of a request. A missing `reply/no-update` when it is needed, a record over
+2 MiB (checked from its stored size before reading), one that fails to decode or has the wrong kind for its key, a
+store error, and a read past the deadline are each 503 with `cache-control: no-store`; 400 and 406 are `no-store`
+too.
 
 ### `GET /bundles/<sha256>`
 
