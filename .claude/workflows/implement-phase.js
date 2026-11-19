@@ -235,7 +235,8 @@ async function gate(tag) {
   const r = await sh(`read gate ${tag}`, `node -e ${q(SUMMARY)} ${out}`);
   let g;
   try {
-    g = JSON.parse(r.output.trim().split("\n").pop());
+    // The step runner sometimes appends a line such as "exit=0"; the summary is the last JSON line.
+    g = JSON.parse(r.output.trim().split("\n").findLast((l) => l.startsWith("{")) ?? "");
   } catch {
     fail(`gate ${tag} wrote no readable report to ${out}`);
   }
