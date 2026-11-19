@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  chownSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -23,6 +24,28 @@ const WRITER = fileURLToPath(new URL("disk-writer.ts", import.meta.url));
 const KEY = "reply/main/1.0.0/ios";
 const path = (root: string, key = KEY) => join(root, diskPath(key));
 const staged = (root: string) => readdirSync(join(root, ".tide", "tmp"));
+
+/**
+ * Runs `body` with `root`'s tree owned by an unprivileged effective user when the tests run as root, since root's
+ * permission bypass reads a directory whatever its mode.
+ */
+async function unprivileged(root: string, body: () => Promise<void>) {
+  if (process.geteuid?.() !== 0 || process.seteuid === undefined || process.setegid === undefined) {
+    return body();
+  }
+  const nobody = 65534;
+  for (const name of ["", ...readdirSync(root, { recursive: true, encoding: "utf8" })]) {
+    chownSync(join(root, name), nobody, nobody);
+  }
+  process.setegid(nobody);
+  process.seteuid(nobody);
+  try {
+    await body();
+  } finally {
+    process.seteuid(0);
+    process.setegid(0);
+  }
+}
 
 /** Starts a writer process and waits until it is ready to run its operation. */
 async function writer(root: string, op: string, payload: string, etag = "") {
@@ -192,21 +215,23 @@ describe("disk bucket", () => {
     await bucket.put(KEY, utf8("x"));
     const assets = join(root, "assets");
     mkdirSync(assets);
-    chmodSync(assets, 0);
-    try {
-      expect(() => readdirSync(assets)).toThrow(); // Holds only without a permission bypass such as root.
-      expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
-      expect(await rejection(bucket.list(""))).toMatchObject({
-        message: `disk bucket ${root} failed: EACCES`,
-      });
-      chmodSync(join(root, "reply"), 0);
-      expect(await rejection(bucket.list("reply/"))).toMatchObject({
-        message: `disk bucket ${root} failed: EACCES`,
-      });
-    } finally {
-      chmodSync(assets, 0o755);
-      chmodSync(join(root, "reply"), 0o755);
-    }
+    await unprivileged(root, async () => {
+      chmodSync(assets, 0);
+      try {
+        expect(() => readdirSync(assets)).toThrow();
+        expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
+        expect(await rejection(bucket.list(""))).toMatchObject({
+          message: `disk bucket ${root} failed: EACCES`,
+        });
+        chmodSync(join(root, "reply"), 0);
+        expect(await rejection(bucket.list("reply/"))).toMatchObject({
+          message: `disk bucket ${root} failed: EACCES`,
+        });
+      } finally {
+        chmodSync(assets, 0o755);
+        chmodSync(join(root, "reply"), 0o755);
+      }
+    });
   });
 
   test("a listing never leaves the root", async () => {
