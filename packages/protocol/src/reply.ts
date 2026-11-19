@@ -124,11 +124,6 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   };
 }
 
-/** Returns whether `value` is a UUID in lowercase. */
-export function isUuid(value: string): boolean {
-  return UUID.test(value);
-}
-
 /** Returns the pointer key for a channel, runtime version and platform; names outside the grammar are rejected. */
 export function replyKey(channel: string, runtimeVersion: string, platform: string): string {
   checkName(channel, "channel");
@@ -177,7 +172,7 @@ function checkKind(kind: unknown): Kind {
 }
 
 function checkUpdateId(value: unknown): string {
-  if (typeof value !== "string" || !isUuid(value)) {
+  if (typeof value !== "string" || !UUID.test(value)) {
     throw new ProtocolError("updateId", "must be a lowercase UUID");
   }
   return value;

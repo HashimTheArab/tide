@@ -221,14 +221,15 @@ export function manifestCases(harness: Harness): void {
       expect(got.body).toEqual(fixture("rollback.multipart"));
     });
 
-    test("serves no-update to a client running its embedded update, IDs in any case", async () => {
+    // The client may have a downloaded OTA update queued; applying the directive's commitTime stops it launching.
+    test("serves the directive to a client running its embedded update", async () => {
       await pointer("rb-embedded", ROLLBACK);
       const got = await get("rb-embedded", {
-        "expo-current-update-id": EMBEDDED_ID.toUpperCase(),
+        "expo-current-update-id": EMBEDDED_ID,
         "expo-embedded-update-id": EMBEDDED_ID,
       });
-      expectReply(got, NO_UPDATE);
-      expect(got.body).toEqual(fixture("no-update.multipart"));
+      expectReply(got, ROLLBACK);
+      expect(got.body).toEqual(fixture("rollback.multipart"));
     });
 
     test.each<[string, Record<string, string>]>([

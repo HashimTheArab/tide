@@ -9,7 +9,6 @@ import {
   assetContentType,
   contentKey,
   decodeStoredReply,
-  isUuid,
   replyKey,
 } from "@tide/protocol";
 
@@ -92,10 +91,11 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     try {
       const pointer = await read(key, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
-      const current = header("expo-current-update-id");
-      const embedded = header("expo-embedded-update-id");
-      if (pointer !== undefined && !isCurrent(pointer, current, embedded)) reply = pointer;
-      else {
+      // A rollback is always served: the client applies it only when its commitTime is newer than what it runs.
+      const current = header("expo-current-update-id")?.toLowerCase();
+      if (pointer !== undefined && (pointer.kind !== "manifest" || current !== pointer.updateId)) {
+        reply = pointer;
+      } else {
         const noUpdate = await read(NO_UPDATE_KEY, signal);
         if (noUpdate === undefined) throw new Error(`${NO_UPDATE_KEY} is missing`);
         if (noUpdate.kind !== "noUpdateAvailable") {
@@ -157,19 +157,4 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     return c.text("internal error\n", 500, NO_STORE);
   });
   return app;
-}
-
-/**
- * Returns whether the client already runs what `pointer` would give it: the manifest's update, or, for a rollback,
- * the embedded update. UUIDs compare ignoring case.
- */
-function isCurrent(
-  pointer: StoredReply,
-  currentId: string | undefined,
-  embeddedId: string | undefined,
-): boolean {
-  const current = currentId?.toLowerCase();
-  // Decode checked the manifest's update ID, so equality already implies a UUID.
-  if (pointer.kind === "manifest") return current === pointer.updateId;
-  return current !== undefined && isUuid(current) && current === embeddedId?.toLowerCase();
 }

@@ -103,9 +103,11 @@ An empty request header counts as absent. In order:
 4. `expo-channel-name` or `expo-runtime-version` missing or outside the reply key grammar: 400. There is no default
    channel: a misconfigured app sees a 400 in its logs rather than a silent no-update, and keeps its current update.
 5. No pointer for `<channel>/<runtime>/<platform>`: the stored `reply/no-update`.
-6. `Expo-Current-Update-ID` equal to the manifest pointer's update ID, or, for a rollback pointer, equal to
-   `Expo-Embedded-Update-ID` (UUIDs, compared ignoring case): the stored `reply/no-update`.
-7. Otherwise the pointer.
+6. `Expo-Current-Update-ID` equal to the manifest pointer's update ID (compared ignoring case): the stored
+   `reply/no-update`.
+7. Otherwise the pointer. A rollback is served even to a client running its embedded update: the client applies it
+   only when its `commitTime` is newer than the running update's, and applying it stops an OTA update it already
+   downloaded from launching next.
 
 A served reply is 200 with the stored body, `content-type: multipart/mixed; boundary=…`, `expo-protocol-version: 1`,
 `expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the stored
