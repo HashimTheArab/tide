@@ -185,8 +185,9 @@ empty counts as unset). A configuration error exits before any request.
 
 `tide status` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
 read from the stored signed part without re-serialising it) and whether `reply/no-update` is present, unreadable or
-missing. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. Diagnostics are fixed
-text: a stored name or field is never printed.
+missing. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. An unreadable record is
+reported by its key, the same name a readable row prints, with a fixed reason; a name outside the key grammar and a
+stored field are never printed.
 
 `publish`:
 
