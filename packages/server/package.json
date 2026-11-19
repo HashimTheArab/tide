@@ -1,0 +1,27 @@
+{
+  "name": "@tide/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./core": "./src/core/app.ts"
+  },
+  "scripts": {
+    "dev:workers": "wrangler dev",
+    "dev:node": "node src/node.ts",
+    "types": "wrangler types",
+    "typecheck": "wrangler types --check && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.workers.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "catalog:",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

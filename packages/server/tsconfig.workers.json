@@ -1,0 +1,9 @@
+{
+  // Core is checked here too, so it compiles against Workers types as well as Node's.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["./worker-configuration.d.ts", "@cloudflare/vitest-plugin/types"],
+    "tsBuildInfoFile": "${configDir}/.cache/tsbuildinfo.workers.json"
+  },
+  "include": ["src/core", "src/workers.ts", "test/workers"]
+}

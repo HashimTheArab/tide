@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.cache/
+.wrangler/
+.agent-output/
+.worktrees/
+.claude/settings.local.json
+.claude/worktrees/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.DS_Store
+coverage/

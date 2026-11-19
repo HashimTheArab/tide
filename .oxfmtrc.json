@@ -1,0 +1,61 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "**/worker-configuration.d.ts"
+  ],
+  "sortImports": {
+    "newlinesBetween": false,
+    "customGroups": [
+      {
+        "groupName": "type-tide",
+        "selector": "type",
+        "elementNamePattern": [
+          "@tide/**"
+        ]
+      },
+      {
+        "groupName": "tide",
+        "elementNamePattern": [
+          "@tide/**"
+        ]
+      }
+    ],
+    "groups": [
+      "side_effect",
+      {
+        "newlinesBetween": true
+      },
+      "builtin",
+      [
+        "type-builtin",
+        "type-external"
+      ],
+      [
+        "external",
+        "unknown"
+      ],
+      {
+        "newlinesBetween": true
+      },
+      "type-tide",
+      "tide",
+      {
+        "newlinesBetween": true
+      },
+      [
+        "type-internal",
+        "type-parent",
+        "type-sibling",
+        "type-index"
+      ],
+      "internal",
+      [
+        "parent",
+        "sibling",
+        "index"
+      ]
+    ]
+  }
+}

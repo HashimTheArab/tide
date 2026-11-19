@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FORCE_COLOR: 3
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Install Betterleaks
+        env:
+          VERSION: 1.10.1
+          SHA256: c174b42d7aa60caf58c0c3e555c0e4bed01fe6b0d99a412bce777b5af4ce913e
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o betterleaks.tar.gz "https://github.com/betterleaks/betterleaks/releases/download/v${VERSION}/betterleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  betterleaks.tar.gz" | sha256sum --check --strict
+          sudo tar -xzf betterleaks.tar.gz -C /usr/local/bin betterleaks
+          betterleaks version
+
+      # The gate exits 0 even when a check fails, so the job result comes from its JSON.
+      - name: Gate
+        run: |
+          base=origin/main
+          git rev-parse --verify -q "$base" > /dev/null || base=$(git rev-list --max-parents=0 HEAD)
+          node scripts/gate.mjs --base "$base" --out "$RUNNER_TEMP/gate.json" > /dev/null
+          jq '{allChecksPassed, tests, checks: (.checks | map_values(.exitCode))}' "$RUNNER_TEMP/gate.json"
+          jq -e '.allChecksPassed == true' "$RUNNER_TEMP/gate.json" > /dev/null
+
+  # The one check branch protection requires: it passes only when every other job passed.
+  check:
+    if: ${{ always() }}
+    needs: [gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: All jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: echo "$RESULTS" | jq -e 'all(. == "success" or . == "skipped")'

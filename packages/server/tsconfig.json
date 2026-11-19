@@ -1,0 +1,5 @@
+{
+  // Node and Workers code compile under different global types; each file belongs to one project.
+  "files": [],
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.workers.json" }]
+}

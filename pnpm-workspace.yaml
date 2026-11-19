@@ -1,0 +1,21 @@
+packages:
+  - packages/*
+
+catalog:
+  "@cloudflare/vitest-plugin": 1.8.3
+  "@hono/node-server": 2.1.8
+  "@types/node": ^26.6.6
+  hono: ^4.13.18
+  typescript: 7.0.2
+  vitest: ^5.1.0
+  wrangler: ^4.163.0
+
+linkWorkspacePackages: true
+
+# Every dependency with an install script must be listed: true runs it, false skips it.
+allowBuilds:
+  esbuild: true
+  sharp: false
+  workerd: true
+
+minimumReleaseAge: 4320
