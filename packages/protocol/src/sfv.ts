@@ -20,16 +20,20 @@ export function encodeSfvDictionary(members: Readonly<Record<string, string>>): 
 }
 
 const TOKEN_CHAR = /[!#$%&'*+.^_`|~0-9A-Za-z:/-]/;
+// Empty or padded base64: the byte sequences both stock clients decode (iOS rejects unpadded, Android extra `=`).
+const BYTES = /^:((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?):/;
 
-/**
- * Returns the members of an RFC 8941 dictionary: a string item's value, or null for any other item or inner list.
- * Parameters are dropped and a repeated key keeps its last value.
- */
-export function parseSfvDictionary(value: string, field: string): Map<string, string | null> {
+/** A dictionary member: the text of a string or token, or the kind of any other item. */
+type SfvMember =
+  | { readonly kind: "string" | "token"; readonly text: string }
+  | { readonly kind: "number" | "bytes" | "boolean" | "inner-list" };
+
+/** Returns the members of an RFC 8941 dictionary. Parameters are dropped and a repeated key keeps its last value. */
+export function parseSfvDictionary(value: string, field: string): Map<string, SfvMember> {
   const fail = (reason: string): never => {
     throw new ProtocolError(field, `is not an RFC 8941 dictionary: ${reason}`);
   };
-  const members = new Map<string, string | null>();
+  const members = new Map<string, SfvMember>();
   let at = 0;
   const peek = () => value[at] ?? "";
   const skip = (chars: string) => {
@@ -43,8 +47,7 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
     return k;
   };
 
-  /** Returns a string item's value, or null for any other bare item. */
-  const bareItem = (): string | null => {
+  const bareItem = (): SfvMember => {
     const c = peek();
     if (c === '"') {
       let s = "";
@@ -61,23 +64,31 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
         } else s += ch;
       }
       at++;
-      return s;
+      return { kind: "string", text: s };
     }
     if (c === "-" || (c >= "0" && c <= "9")) {
       const m = /^-?(?:\d{1,15}(?![\d.])|\d{1,12}\.\d{1,3}(?!\d))/.exec(value.slice(at));
       if (m === null) return fail(`bad number at ${at}`);
       at += m[0].length;
-    } else if (/[A-Za-z*]/.test(c)) {
+      return { kind: "number" };
+    }
+    if (/[A-Za-z*]/.test(c)) {
+      const start = at;
       for (at++; TOKEN_CHAR.test(peek()); at++);
-    } else if (c === ":") {
-      const m = /^:[A-Za-z0-9+/=]*:/.exec(value.slice(at));
+      return { kind: "token", text: value.slice(start, at) };
+    }
+    if (c === ":") {
+      const m = BYTES.exec(value.slice(at));
       if (m === null) return fail(`bad byte sequence at ${at}`);
       at += m[0].length;
-    } else if (c === "?") {
+      return { kind: "bytes" };
+    }
+    if (c === "?") {
       if (value[at + 1] !== "0" && value[at + 1] !== "1") fail(`bad boolean at ${at}`);
       at += 2;
-    } else fail(`expected an item at ${at}`);
-    return null;
+      return { kind: "boolean" };
+    }
+    return fail(`expected an item at ${at}`);
   };
 
   const parameters = () => {
@@ -92,7 +103,7 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
     }
   };
 
-  const itemOrInnerList = (): string | null => {
+  const itemOrInnerList = (): SfvMember => {
     if (peek() !== "(") {
       const item = bareItem();
       parameters();
@@ -107,13 +118,13 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
     }
     at++;
     parameters();
-    return null;
+    return { kind: "inner-list" };
   };
 
   skip(" ");
   while (at < value.length) {
     const k = key();
-    let member: string | null = null; // A bare key is the boolean true.
+    let member: SfvMember = { kind: "boolean" }; // A bare key is the boolean true.
     if (peek() === "=") {
       at++;
       member = itemOrInnerList();

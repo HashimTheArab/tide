@@ -48,10 +48,17 @@ export async function verifyExpoSignature(
   checkKey(key, "public", "verify");
   const members = parseSfvDictionary(header, "signature");
   const member = (name: string, fallback?: string): string => {
-    const value = members.has(name) ? members.get(name) : fallback;
-    if (typeof value !== "string") throw new ProtocolError("signature", `${name} must be a string`);
+    const m = members.get(name);
+    const value = m === undefined ? fallback : m.kind === "string" ? m.text : undefined;
+    if (value === undefined) throw new ProtocolError("signature", `${name} must be a string`);
     return value;
   };
+  // iOS reads the whole dictionary as [String: String], so any other member fails there.
+  for (const [name, { kind }] of members) {
+    if (kind !== "string" && kind !== "token") {
+      throw new ProtocolError("signature", `${name} must be a string or token`);
+    }
+  }
   const sigText = member("sig");
   const alg = member("alg", ALG);
   const id = member("keyid", "root");

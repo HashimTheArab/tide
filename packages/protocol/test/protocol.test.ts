@@ -386,45 +386,47 @@ describe("sfv", () => {
     await rejects(() => encodeSfvDictionary(loose(members)), field);
   });
 
-  test.each<[string, string, [string, string | null][]]>([
-    ["escaped strings", 'a="say \\"hi\\" \\\\ bye"', [["a", 'say "hi" \\ bye']]],
+  const str = (text: string) => ({ kind: "string", text });
+  test.each<[string, string, [string, object][]]>([
+    ["escaped strings", 'a="say \\"hi\\" \\\\ bye"', [["a", str('say "hi" \\ bye')]]],
     ["the empty header", "", []],
     [
       "surrounding and separating whitespace",
       '  a="x" ,\tb="y"\t',
       [
-        ["a", "x"],
-        ["b", "y"],
+        ["a", str("x")],
+        ["b", str("y")],
       ],
     ],
     [
       "parameters, which are dropped",
       'a="x";p=1;q;r="s", b="y"',
       [
-        ["a", "x"],
-        ["b", "y"],
+        ["a", str("x")],
+        ["b", str("y")],
       ],
     ],
     [
       "a repeated key, last wins",
       'a="1", b="2", a="3"',
       [
-        ["a", "3"],
-        ["b", "2"],
+        ["a", str("3")],
+        ["b", str("2")],
       ],
     ],
     [
-      "every non-string item as null",
-      't=tok/en:x, i=-42, d=1.125, bs=:aGk=:, b=?0, l=("a" b;p=1);q, e=(), bare;p',
+      "every other item by kind",
+      't=tok/en:x, i=-42, d=1.125, bs=:aGk=:, z=::, b=?0, l=("a" b;p=1);q, e=(), bare;p',
       [
-        ["t", null],
-        ["i", null],
-        ["d", null],
-        ["bs", null],
-        ["b", null],
-        ["l", null],
-        ["e", null],
-        ["bare", null],
+        ["t", { kind: "token", text: "tok/en:x" }],
+        ["i", { kind: "number" }],
+        ["d", { kind: "number" }],
+        ["bs", { kind: "bytes" }],
+        ["z", { kind: "bytes" }],
+        ["b", { kind: "boolean" }],
+        ["l", { kind: "inner-list" }],
+        ["e", { kind: "inner-list" }],
+        ["bare", { kind: "boolean" }],
       ],
     ],
   ])("parses %s", (_, header, members) => {
@@ -446,6 +448,12 @@ describe("sfv", () => {
     ["an unclosed inner list", "a=(1 2", "expected space or )"],
     ["a comma in an inner list", "a=(1,2)", "expected space or )"],
     ["a bad byte sequence", "a=:ab$:", "bad byte sequence"],
+    // Both stock clients decode byte sequences, even in ignored parameters, and neither takes these.
+    ["an undecodable byte sequence", "a=:A:", "bad byte sequence"],
+    ["an undecodable byte-sequence parameter", 'a="x";p=:A:', "bad byte sequence"],
+    ["unpadded base64", "a=:aGk:", "bad byte sequence"],
+    ["excess padding", "a=:aGk==:", "bad byte sequence"],
+    ["padding mid-sequence", "a=:a=Gk:", "bad byte sequence"],
     ["an RFC 9651 date", "a=@1", "expected an item"],
   ])("parse rejects %s", async (_, header, message) => {
     await rejects(() => parseSfvDictionary(header, "h"), "h", message);
@@ -728,11 +736,11 @@ describe("signature", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("parameters and an earlier duplicate sig do not change the verdict", async () => {
+  test("parameters, a token member and an earlier duplicate sig do not change the verdict", async () => {
     const keys = await mainKeys();
     const body = fixture("manifest.json");
     const sig = sigOf(await expoSignature(body, cryptoKeySigner(keys.privateKey, "main")));
-    const h = `sig="AAAA", sig="${sig}";p=1, keyid="main";q`;
+    const h = `sig="AAAA", sig="${sig}";p=1, keyid="main";q, t=tok`;
     await expect(verifyExpoSignature(body, h, keys.publicKey, "main")).resolves.toBeUndefined();
   });
 
@@ -754,6 +762,33 @@ describe("signature", () => {
     ["non-canonical base64", () => header("AB=="), "signature", "padded base64"],
     ["an empty sig", () => header(""), "signature", "padded base64"],
     ["keyid as a token", (s) => header(s, ", keyid=root"), "signature", "keyid must be a string"],
+    [
+      "an undecodable byte-sequence parameter",
+      (s) => `${header(s)};p=:A:`,
+      "signature",
+      "bad byte sequence",
+    ],
+    // iOS reads the whole dictionary as [String: String], so any member but a string or token fails there.
+    [
+      "a boolean member",
+      (s) => `${header(s)}, flag=?1`,
+      "signature",
+      "flag must be a string or token",
+    ],
+    ["a bare key", (s) => `${header(s)}, flag`, "signature", "flag must be a string or token"],
+    ["a number member", (s) => `${header(s)}, n=1`, "signature", "n must be a string or token"],
+    [
+      "a byte-sequence member",
+      (s) => `${header(s)}, b=:aGk=:`,
+      "signature",
+      "b must be a string or token",
+    ],
+    [
+      "an inner-list member",
+      (s) => `${header(s)}, l=("a")`,
+      "signature",
+      "l must be a string or token",
+    ],
     [
       "alg as a boolean",
       (s) => header(s, ', keyid="main", alg=?1'),
