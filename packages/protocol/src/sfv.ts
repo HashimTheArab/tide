@@ -1,13 +1,17 @@
 import { ProtocolError } from "./hash.ts";
 
+const KEY = /[a-z*][a-z0-9_.*-]*/y; // Sticky: the parser matches at `lastIndex`.
+const STRING_CHAR = /[\x20-\x7E]/;
+const WHOLE_KEY = new RegExp(`^(?:${KEY.source})$`);
+const WHOLE_STRING = new RegExp(`^${STRING_CHAR.source}*$`);
+
 /** Returns `members` as an RFC 8941 dictionary of strings, the `expo-manifest-filters` header value. */
 export function encodeSfvDictionary(members: Readonly<Record<string, string>>): string {
   const entries: [string, unknown][] = Object.entries(members);
   return entries
     .map(([key, value]) => {
-      if (!/^[a-z*][a-z0-9_.*-]*$/.test(key))
-        throw new ProtocolError(key, "must be an RFC 8941 key");
-      if (typeof value !== "string" || !/^[\x20-\x7E]*$/.test(value)) {
+      if (!WHOLE_KEY.test(key)) throw new ProtocolError(key, "must be an RFC 8941 key");
+      if (typeof value !== "string" || !WHOLE_STRING.test(value)) {
         throw new ProtocolError(key, "must be a string of printable ASCII");
       }
       return `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -15,8 +19,6 @@ export function encodeSfvDictionary(members: Readonly<Record<string, string>>): 
     .join(", ");
 }
 
-const KEY_START = /[a-z*]/;
-const KEY_CHAR = /[a-z0-9_.*-]/;
 const TOKEN_CHAR = /[!#$%&'*+.^_`|~0-9A-Za-z:/-]/;
 
 /**
@@ -35,11 +37,10 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
   };
 
   const key = (): string => {
-    const start = at;
-    if (!KEY_START.test(peek())) fail(`expected a key at ${at}`);
-    at++;
-    while (KEY_CHAR.test(peek())) at++;
-    return value.slice(start, at);
+    KEY.lastIndex = at;
+    const k = KEY.exec(value)?.[0] ?? fail(`expected a key at ${at}`);
+    at += k.length;
+    return k;
   };
 
   /** Returns a string item's value, or null for any other bare item. */
@@ -55,7 +56,7 @@ export function parseSfvDictionary(value: string, field: string): Map<string, st
           at++;
           if (peek() !== '"' && peek() !== "\\") fail(`bad escape at ${at}`);
           s += peek();
-        } else if (ch < " " || ch > "~") {
+        } else if (!STRING_CHAR.test(ch)) {
           fail(`bad string character at ${at}`);
         } else s += ch;
       }

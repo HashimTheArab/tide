@@ -3,7 +3,7 @@ export type { Asset, JsonObject, JsonValue, LaunchAsset, ManifestInput } from ".
 export { buildManifest, buildNoUpdateAvailable, buildRollBackToEmbedded } from "./manifest.ts";
 export type { Part, PartName } from "./multipart.ts";
 export { encodeMultipart, parseMultipart } from "./multipart.ts";
-export { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
+export { encodeSfvDictionary } from "./sfv.ts";
 export type { Signer } from "./signature.ts";
 export {
   certificatePublicKey,

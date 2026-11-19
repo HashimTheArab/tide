@@ -27,13 +27,7 @@ const provide = { fcSeed: seed === undefined ? DEFAULT_SEED : parseSeed(seed), f
 export default defineConfig({
   test: {
     projects: [
-      {
-        test: {
-          name: "node",
-          include: ["test/protocol.test.ts", "test/generate-fixtures.test.ts"],
-          provide,
-        },
-      },
+      { test: { name: "node", include: ["test/protocol.test.ts"], provide } },
       {
         plugins: [cloudflareTest({ miniflare: { compatibilityDate: "2026-11-01" } })],
         test: { name: "workers", include: ["test/protocol.test.ts"], provide },

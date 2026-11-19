@@ -22,6 +22,18 @@ export function base64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** Returns the bytes of non-empty canonical padded base64, or undefined. */
+export function decodeBase64(text: string): Uint8Array<ArrayBuffer> | undefined {
+  if (
+    text === "" ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)
+  ) {
+    return undefined;
+  }
+  const bytes = Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+  return base64(bytes) === text ? bytes : undefined;
+}
+
 /** Returns `value` if it is the canonical 43-character base64url encoding of a 32-byte digest. */
 export function assetHash(value: unknown, field: string): string {
   // The last character carries 4 data bits and 2 zero bits.

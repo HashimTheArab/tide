@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
 import type { ManifestInput, Part, PartName, Signer } from "../src/index.ts";
+import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   ProtocolError,
   assetHash,
@@ -15,10 +16,10 @@ import {
   encodeSfvDictionary,
   expoSignature,
   parseMultipart,
-  parseSfvDictionary,
   sha256Base64Url,
   verifyExpoSignature,
 } from "../src/index.ts";
+import { parseSfvDictionary } from "../src/sfv.ts";
 import {
   BOUNDARY,
   EXPO_GOLDEN,
@@ -27,6 +28,7 @@ import {
   certificate,
   goldenParts,
   pem,
+  signedFixtures,
 } from "./fixtures.ts";
 
 declare module "vitest" {
@@ -48,19 +50,7 @@ const hex = (bytes: Uint8Array) =>
 /** Passes a malformed value where the types forbid it, as a JavaScript caller could. */
 const loose = <T>(value: unknown) => value as T;
 
-function rejects(run: () => unknown, field: string, message = ""): void {
-  let error: unknown;
-  try {
-    run();
-  } catch (e) {
-    error = e;
-  }
-  expect(error).toBeInstanceOf(ProtocolError);
-  expect(error).toMatchObject({ field });
-  expect((error as Error).message).toContain(message);
-}
-
-async function rejectsAsync(run: () => Promise<unknown>, field: string, message = "") {
+async function rejects(run: () => unknown, field: string, message = "") {
   let error: unknown;
   try {
     await run();
@@ -111,8 +101,8 @@ describe("hash", () => {
     ["/", `/${PNG_HASH.slice(1)}`],
     ["a non-canonical last character", `${EMPTY_HASH.slice(0, 42)}V`],
     ["a non-string", 123],
-  ])("contentKey rejects %s", (_, hash) => {
-    rejects(() => contentKey(loose(hash)), "hash");
+  ])("contentKey rejects %s", async (_, hash) => {
+    await rejects(() => contentKey(loose(hash)), "hash");
   });
 });
 
@@ -339,10 +329,10 @@ describe("manifest", () => {
         extra(d, loop);
       },
     ],
-  ])("buildManifest rejects %s", (_, field, change) => {
+  ])("buildManifest rejects %s", async (_, field, change) => {
     const d = draft();
     change(d);
-    rejects(() => build(d), field);
+    await rejects(() => build(d), field);
   });
 });
 
@@ -369,8 +359,8 @@ describe("directives", () => {
     ["a missing commitTime", {}, "commitTime"],
     ["a null input", null, "input"],
     ["an undefined input", undefined, "input"],
-  ])("rollBackToEmbedded rejects %s", (_, input, field) => {
-    rejects(() => buildRollBackToEmbedded(loose(input)), field);
+  ])("rollBackToEmbedded rejects %s", async (_, input, field) => {
+    await rejects(() => buildRollBackToEmbedded(loose(input)), field);
   });
 });
 
@@ -392,8 +382,8 @@ describe("sfv", () => {
     ["a leading digit", { "1branch": "main" }, "1branch"],
     ["a non-ASCII value", { branch: "café" }, "branch"],
     ["a non-string value", { branch: 1 }, "branch"],
-  ])("rejects %s", (_, members, field) => {
-    rejects(() => encodeSfvDictionary(loose(members)), field);
+  ])("rejects %s", async (_, members, field) => {
+    await rejects(() => encodeSfvDictionary(loose(members)), field);
   });
 
   test.each<[string, string, [string, string | null][]]>([
@@ -457,8 +447,8 @@ describe("sfv", () => {
     ["a comma in an inner list", "a=(1,2)", "expected space or )"],
     ["a bad byte sequence", "a=:ab$:", "bad byte sequence"],
     ["an RFC 9651 date", "a=@1", "expected an item"],
-  ])("parse rejects %s", (_, header, message) => {
-    rejects(() => parseSfvDictionary(header, "h"), "h", message);
+  ])("parse rejects %s", async (_, header, message) => {
+    await rejects(() => parseSfvDictionary(header, "h"), "h", message);
   });
 });
 
@@ -634,15 +624,18 @@ describe("multipart", () => {
       "parts[0]",
       "contains the boundary",
     ],
-  ])("parse rejects %s", (_, body, field, message) => {
-    rejects(() => parseMultipart(body(), B), field, message);
+  ])("parse rejects %s", async (_, body, field, message) => {
+    await rejects(() => parseMultipart(body(), B), field, message);
   });
 
   test.each<[string, unknown]>([
     ["an empty boundary", ""],
     ["a boundary inside an array", [B]],
-  ])("parse rejects %s", (_, boundary) => {
-    rejects(() => parseMultipart(fixture("no-update.multipart"), loose(boundary)), "boundary");
+  ])("parse rejects %s", async (_, boundary) => {
+    await rejects(
+      () => parseMultipart(fixture("no-update.multipart"), loose(boundary)),
+      "boundary",
+    );
   });
 
   const json = ascii("{}");
@@ -687,14 +680,12 @@ describe("multipart", () => {
       () => [[loose({ ...part("manifest", json), headers: { 0: ["expo-signature", SIGNATURE] } })]],
       "parts[0].headers",
     ],
-  ])("encode rejects %s", (_, args, field) => {
+  ])("encode rejects %s", async (_, args, field) => {
     const [parts, boundary] = args();
-    rejects(() => encodeMultipart(parts, boundary), field);
+    await rejects(() => encodeMultipart(parts, boundary), field);
   });
 });
 
-const b64 = (bytes: Uint8Array) => btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""));
-const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const header = (sig: string, rest = ', keyid="main", alg="rsa-v1_5-sha256"') =>
   `sig="${sig}"${rest}`;
 const sigOf = (h: string) => /sig="([^"]*)"/.exec(h)?.[1] ?? "";
@@ -723,7 +714,7 @@ describe("signature", () => {
     const body = fixture("manifest.json");
     const raw = new Uint8Array(await crypto.subtle.sign(RSA_SHA256, keys.privateKey, body));
     const h = await expoSignature(body, cryptoKeySigner(keys.privateKey, "main"));
-    expect(h).toBe(`sig="${b64(raw)}", keyid="main", alg="rsa-v1_5-sha256"`);
+    expect(h).toBe(`sig="${base64(raw)}", keyid="main", alg="rsa-v1_5-sha256"`);
     const key = await certificatePublicKey(await mainCertificate());
     await expect(verifyExpoSignature(body, h, key, "main")).resolves.toBeUndefined();
   });
@@ -773,7 +764,7 @@ describe("signature", () => {
     const keys = await mainKeys();
     const body = fixture("manifest.json");
     const sig = sigOf(await expoSignature(body, cryptoKeySigner(keys.privateKey, "main")));
-    await rejectsAsync(
+    await rejects(
       () => verifyExpoSignature(body, make(sig), keys.publicKey, "main"),
       field,
       message,
@@ -785,12 +776,9 @@ describe("signature", () => {
     const body = fixture("manifest.json");
     const h = await expoSignature(body, cryptoKeySigner(keys.privateKey, "main"));
     const wrong = fixture("directive-no-update.json");
-    await rejectsAsync(
-      () => verifyExpoSignature(wrong, h, keys.publicKey, "main"),
-      "signature.sig",
-    );
+    await rejects(() => verifyExpoSignature(wrong, h, keys.publicKey, "main"), "signature.sig");
     const byOther = await expoSignature(body, cryptoKeySigner(other.privateKey, "main"));
-    await rejectsAsync(
+    await rejects(
       () => verifyExpoSignature(body, byOther, keys.publicKey, "main"),
       "signature.sig",
     );
@@ -800,21 +788,17 @@ describe("signature", () => {
     const sha1 = await sha1Keys();
     const body = fixture("manifest.json");
     const h = header(
-      b64(new Uint8Array(await crypto.subtle.sign(RSA_SHA256, sha1.privateKey, body))),
+      base64(new Uint8Array(await crypto.subtle.sign(RSA_SHA256, sha1.privateKey, body))),
     );
-    await rejectsAsync(
-      () => verifyExpoSignature(body, h, sha1.publicKey, "main"),
-      "key",
-      "SHA-256",
-    );
+    await rejects(() => verifyExpoSignature(body, h, sha1.publicKey, "main"), "key", "SHA-256");
     const spki = await crypto.subtle.exportKey("spki", sha1.publicKey);
     const asSha256 = await crypto.subtle.importKey("spki", spki, RSA_SHA256, false, ["verify"]);
-    await rejectsAsync(() => verifyExpoSignature(body, h, asSha256, "main"), "signature.sig");
+    await rejects(() => verifyExpoSignature(body, h, asSha256, "main"), "signature.sig");
   });
 
   test("verify rejects a private key", async () => {
     const keys = await mainKeys();
-    await rejectsAsync(
+    await rejects(
       () => verifyExpoSignature(fixture("manifest.json"), header("AAAA"), keys.privateKey, "main"),
       "key",
       "public",
@@ -823,8 +807,8 @@ describe("signature", () => {
 
   test("cryptoKeySigner rejects a SHA-1 key and a public key", async () => {
     const [sha1, keys] = [await sha1Keys(), await mainKeys()];
-    rejects(() => cryptoKeySigner(sha1.privateKey, "main"), "key", "SHA-256");
-    rejects(() => cryptoKeySigner(keys.publicKey, "main"), "key", "private");
+    await rejects(() => cryptoKeySigner(sha1.privateKey, "main"), "key", "SHA-256");
+    await rejects(() => cryptoKeySigner(keys.publicKey, "main"), "key", "private");
   });
 
   test.each<[string, string, string]>([
@@ -840,7 +824,7 @@ describe("signature", () => {
         return Promise.resolve(new Uint8Array([1]));
       },
     };
-    await rejectsAsync(() => expoSignature(fixture("manifest.json"), signer), field);
+    await rejects(() => expoSignature(fixture("manifest.json"), signer), field);
     expect(calls).toBe(0);
   });
 
@@ -850,12 +834,12 @@ describe("signature", () => {
     ["a string", "sig"],
   ])("expoSignature rejects a signer resolving %s", async (_, result) => {
     const signer: Signer = { keyId: "main", sign: () => Promise.resolve(loose(result)) };
-    await rejectsAsync(() => expoSignature(fixture("manifest.json"), signer), "signer");
+    await rejects(() => expoSignature(fixture("manifest.json"), signer), "signer");
   });
 });
 
 /** The DER of a PEM certificate. */
-const derOf = (text: string) => unb64(text.replace(/-----[^-]+-----|\n/g, ""));
+const derOf = (text: string) => decodeBase64(text.replace(/-----[^-]+-----|\n/g, ""))!;
 
 describe("certificate", () => {
   test.each<[string, (der: Uint8Array<ArrayBuffer>) => string, string]>([
@@ -906,13 +890,13 @@ describe("certificate", () => {
     ["a non-sequence envelope", () => pem(new Uint8Array([0x04, 0x00])), "expected a DER SEQUENCE"],
   ])("certificatePublicKey rejects %s", async (_, make, message) => {
     const der = derOf(await mainCertificate());
-    await rejectsAsync(() => certificatePublicKey(make(der)), "certificate", message);
+    await rejects(() => certificatePublicKey(make(der)), "certificate", message);
   });
 
   test("certificatePublicKey rejects a certificate for an EC key", async () => {
     const ec = await ecKeys();
     const pemText = await certificate(ec.publicKey, (await mainKeys()).privateKey, new Date());
-    await rejectsAsync(() => certificatePublicKey(pemText), "certificate", "RSA public key");
+    await rejects(() => certificatePublicKey(pemText), "certificate", "RSA public key");
   });
 });
 
@@ -936,6 +920,22 @@ describe("signed goldens", () => {
     },
   );
 
+  test("the generator's fixtures carry the committed parts, signed for its certificate", async () => {
+    const keys = await mainKeys();
+    const key = await certificatePublicKey(await mainCertificate());
+    const files = await signedFixtures(fixture, cryptoKeySigner(keys.privateKey, "main"));
+    expect(Object.keys(files)).toEqual(Object.keys(TIDE_GOLDEN));
+    const shape = (bytes: Uint8Array<ArrayBuffer>) =>
+      parseMultipart(bytes, B).map(({ name, body, signature }) => [name, body, !signature]);
+    for (const [file, bytes] of Object.entries(files)) {
+      expect(shape(bytes)).toEqual(shape(fixture(file)));
+      for (const p of parseMultipart(bytes, B).filter((p) => p.signature !== undefined))
+        await expect(
+          verifyExpoSignature(p.body, p.signature!, key, "main"),
+        ).resolves.toBeUndefined();
+    }
+  });
+
   test("the expo-updates directive verifies against the chain's leaf as root", async () => {
     const [directive] = parseMultipart(fixture("expo.multipart"), B);
     const leaf = await certificatePublicKey(text(fixture("expo-chain.pem")));
@@ -949,7 +949,7 @@ describe("signed goldens", () => {
     const leaf = await certificatePublicKey(text(fixture("expo-chain.pem")));
     const body = new Uint8Array(directive!.body);
     body[10]! ^= 0x01;
-    await rejectsAsync(
+    await rejects(
       () => verifyExpoSignature(body, directive!.signature!, leaf, "root"),
       "signature.sig",
     );
@@ -1034,14 +1034,11 @@ describe(`properties (seed ${seed})`, () => {
           const body = build(d);
           const h = await expoSignature(body, signer);
           await verifyExpoSignature(body, h, keys.publicKey, "main");
-          const sig = unb64(sigOf(h));
+          const sig = decodeBase64(sigOf(h))!;
           const flipped = new Uint8Array(inSignature ? sig : body);
           flipped[at % flipped.length]! ^= mask;
-          const [b, s] = inSignature ? [body, header(b64(flipped))] : [flipped, h];
-          await rejectsAsync(
-            () => verifyExpoSignature(b, s, keys.publicKey, "main"),
-            "signature.sig",
-          );
+          const [b, s] = inSignature ? [body, header(base64(flipped))] : [flipped, h];
+          await rejects(() => verifyExpoSignature(b, s, keys.publicKey, "main"), "signature.sig");
         },
       ),
       { seed },

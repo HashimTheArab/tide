@@ -100,15 +100,13 @@ const EXTENSIONS = der(
   ),
 );
 
-/** UTCTime through 2049, GeneralizedTime from 2050, as RFC 5280 requires. */
-function time(date: Date): Uint8Array<ArrayBuffer> {
-  const iso = date.toISOString().replace(/[-:T]|\.\d+/g, "");
-  const utc = date.getUTCFullYear() < 2050;
-  return der(utc ? 0x17 : 0x18, new TextEncoder().encode(utc ? iso.slice(2) : iso));
-}
+/** UTCTime, which RFC 5280 allows through 2049. */
+const utcTime = (date: Date) =>
+  der(0x17, new TextEncoder().encode(date.toISOString().replace(/^\d\d|[-:T]|\.\d+/g, "")));
+const NOT_AFTER = new Date("2049-12-31T23:59:59Z");
 
 /**
- * Returns a PEM X.509 code-signing certificate for `subject` signed by `issuer`, valid from `now` for 100 years.
+ * Returns a PEM X.509 code-signing certificate for `subject` signed by `issuer`, valid from `now` through 2049.
  * Self-signed when `issuer` is `subject`'s private key.
  */
 export async function certificate(
@@ -118,15 +116,13 @@ export async function certificate(
 ): Promise<string> {
   const serial = crypto.getRandomValues(new Uint8Array(16));
   serial[0] = 0x40 | ((serial[0] ?? 0) & 0x3f); // Positive and minimal.
-  const notAfter = new Date(now);
-  notAfter.setUTCFullYear(now.getUTCFullYear() + 100);
   const tbs = der(
     SEQUENCE,
     der(0xa0, der(0x02, new Uint8Array([2]))),
     der(0x02, serial),
     SHA256_WITH_RSA,
     NAME,
-    der(SEQUENCE, time(now), time(notAfter)),
+    der(SEQUENCE, utcTime(now), utcTime(NOT_AFTER)),
     NAME,
     new Uint8Array(await crypto.subtle.exportKey("spki", subject)),
     EXTENSIONS,
