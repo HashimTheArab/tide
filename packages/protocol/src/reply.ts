@@ -151,6 +151,21 @@ export function diskPath(key: string): string {
   return `reply/${escapeName(channel)}/${escapeName(runtime)}/${platform}`;
 }
 
+/** Returns the key whose `diskPath` is `path`, or undefined when no key maps there. */
+export function diskKey(path: string): string | undefined {
+  const key = unescapeDiskPath(path);
+  try {
+    return diskPath(key) === path ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reverses `diskPath`'s escaping; for a directory `diskPath` creates, this is the key prefix it holds. */
+export function unescapeDiskPath(path: string): string {
+  return path.replace(/_([0-9a-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+}
+
 function escapeName(name: string): string {
   return name.replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }

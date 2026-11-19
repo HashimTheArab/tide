@@ -8,6 +8,9 @@ export const FAKE_S3 = {
   secretAccessKey: "tide-fake-secret",
 };
 
+/** A secret that passes configuration checks but is not the fake's. */
+export const WRONG_SECRET = "not-the-fake-secret-0123456789";
+
 /** What `stall-body` declares and what it sends before it stops. */
 export const STALL_BODY = { size: 64, sent: 32 };
 
@@ -24,6 +27,12 @@ export const BEHAVIOURS = [
   "stall", // 500 headers flushed, then no body
   "stall-body", // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
   "oversize", // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
+  "nested-404", // 404 whose only Code is inside another element
+  "duplicate-404", // 404 with two Code children
+  "encoding-access-key", // 200 whose Content-Encoding is the access key ID
+  "encoding-secret", // 200 whose Content-Encoding is the secret
+  "length-secret", // 200 whose Content-Length is the secret
+  "no-etag", // 200 with the stored body and no ETag
 ] as const;
 export type Behaviour = (typeof BEHAVIOURS)[number];
 

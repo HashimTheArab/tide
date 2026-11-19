@@ -7,9 +7,8 @@ import type { FileHandle } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
-import { diskPath } from "@tide/protocol";
+import { diskPath, storageFromEnv } from "@tide/protocol";
 
-import type { S3Config } from "./core/s3.ts";
 import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";
 import { s3Store } from "./core/s3.ts";
@@ -53,34 +52,10 @@ export function diskStore(root: string): Store {
   };
 }
 
-// The TIDE_ prefix keeps ambient AWS credentials out.
-const S3_VARS = {
-  endpoint: "TIDE_S3_ENDPOINT",
-  region: "TIDE_S3_REGION",
-  bucket: "TIDE_S3_BUCKET",
-  accessKeyId: "TIDE_S3_ACCESS_KEY_ID",
-  secretAccessKey: "TIDE_S3_SECRET_ACCESS_KEY",
-} as const satisfies Record<Exclude<keyof S3Config, "timeoutMs">, string>;
-
 /** Returns the store the environment configures: TIDE_DISK_DIR, or every TIDE_S3_* variable. Empty means unset. */
 export function storeFromEnv(env: Readonly<Record<string, string | undefined>>): Store {
-  const read = (name: string) => (env[name] === "" ? undefined : env[name]);
-  const disk = read("TIDE_DISK_DIR");
-  const names = Object.values(S3_VARS);
-  const missing = names.filter((name) => read(name) === undefined);
-
-  if (missing.length === names.length) {
-    if (disk !== undefined) return diskStore(disk);
-    throw new Error(`no store configured: set TIDE_DISK_DIR, or all of ${names.join(", ")}`);
-  }
-  if (disk !== undefined) throw new Error("set TIDE_DISK_DIR or the TIDE_S3_* variables, not both");
-  if (missing.length > 0) throw new Error(`S3 store incomplete: set ${missing.join(", ")}`);
-  const config = Object.fromEntries(Object.entries(S3_VARS).map(([k, v]) => [k, read(v)]));
-  try {
-    return s3Store(config as Record<keyof typeof S3_VARS, string>);
-  } catch (e) {
-    throw new Error(`${S3_VARS.endpoint}: ${(e as Error).message}`); // Only the endpoint is checked here.
-  }
+  const storage = storageFromEnv(env);
+  return "disk" in storage ? diskStore(storage.disk) : s3Store(storage.s3);
 }
 
 /** Starts the app on Node; port 0 picks a free port. */

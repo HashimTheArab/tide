@@ -3,9 +3,20 @@
   "ignore": [
     ".claude/workflows/**"
   ],
+  "ignoreBinaries": [
+    "mkfifo"
+  ],
   "workspaces": {
     "packages/protocol": {
-      "entry": ["test/generate-fixtures.ts"]
+      "entry": [
+        "test/generate-fixtures.ts"
+      ]
+    },
+    "packages/cli": {
+      "entry": [
+        "src/main.ts",
+        "test/disk-writer.ts"
+      ]
     }
   }
 }

@@ -14,15 +14,33 @@ export {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   decodeStoredReply,
+  diskKey,
   diskPath,
+  unescapeDiskPath,
   encodeStoredReply,
   replyKey,
 } from "./reply.ts";
+export type { S3Config, S3Operation, S3Request } from "./s3.ts";
+export {
+  S3Error,
+  childElements,
+  parseS3Xml,
+  readS3Text,
+  s3Absent,
+  s3BodyProblem,
+  s3ErrorCode,
+  s3Fetch,
+  s3Target,
+  signV4,
+  storageFromEnv,
+  textOf,
+} from "./s3.ts";
 export { encodeSfvDictionary } from "./sfv.ts";
 export type { Signer } from "./signature.ts";
 export {
   certificatePublicKey,
   cryptoKeySigner,
   expoSignature,
+  parseExpoSignature,
   verifyExpoSignature,
 } from "./signature.ts";

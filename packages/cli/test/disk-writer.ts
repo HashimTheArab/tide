@@ -1,0 +1,36 @@
+// Runs one disk-bucket operation in its own process, as a concurrent CLI would.
+// Usage: node disk-writer.ts <root> putIfAbsent|putIfMatch|hold <key> <payload> [etag]
+// Prints "ready" (or "held"), waits for a "go" line on stdin, then prints the result as one JSON line.
+import { once } from "node:events";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
+
+import { BucketError } from "../src/bucket.ts";
+import { diskBucket } from "../src/disk.ts";
+
+const [root = "", op = "", key = "", payload = "", etag = ""] = process.argv.slice(2);
+const lines = createInterface({ input: process.stdin });
+
+if (op === "hold") {
+  // Holds the writers' mutex as another CLI process inside its critical section would, until killed.
+  const db = new DatabaseSync(join(root, ".tide", "mutex.sqlite"), { timeout: 0 });
+  db.exec("BEGIN IMMEDIATE");
+  process.stdout.write("held\n");
+} else {
+  const bucket = diskBucket(root, { busyTimeoutMs: 60_000 });
+  const bytes = new Uint8Array(new TextEncoder().encode(payload));
+  process.stdout.write("ready\n");
+  await once(lines, "line");
+  try {
+    const result =
+      op === "putIfAbsent"
+        ? await bucket.putIfAbsent(key, bytes)
+        : await bucket.putIfMatch(key, bytes, etag);
+    process.stdout.write(`${JSON.stringify({ etag: result ?? null })}\n`);
+  } catch (e) {
+    if (!(e instanceof BucketError)) throw e;
+    process.stdout.write(`${JSON.stringify({ error: e.message, outcome: e.outcome })}\n`);
+  }
+  lines.close();
+}
