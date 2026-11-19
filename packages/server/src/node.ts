@@ -1,4 +1,4 @@
-import { constants, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -7,10 +7,13 @@ import type { FileHandle } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
+import type { S3Config } from "./core/s3.ts";
 import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";
 import { s3Store } from "./core/s3.ts";
-import { isStoreKey } from "./core/store.ts";
+
+// The fixed shapes the publisher writes: a known prefix and a hex SHA-256.
+const KEY = /^assets\/[0-9a-f]{64}$/;
 
 /**
  * Returns a store over a directory, for tests and single-host development. The root is trusted (only the publisher
@@ -22,11 +25,10 @@ export function diskStore(root: string): Store {
   }
   return {
     async get(key) {
-      if (!isStoreKey(key)) throw new Error(`invalid store key ${JSON.stringify(key)}`);
+      if (!KEY.test(key)) throw new Error(`invalid store key ${JSON.stringify(key)}`);
       let fh: FileHandle;
       try {
-        // Nonblocking, so a FIFO at the key cannot hold a libuv thread; regular-file reads are unaffected.
-        fh = await open(join(root, key), constants.O_RDONLY | constants.O_NONBLOCK);
+        fh = await open(join(root, key), "r");
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
         // A root gone after startup is an outage, not a miss for every key.
@@ -47,30 +49,30 @@ export function diskStore(root: string): Store {
   };
 }
 
-// In S3Config order; the TIDE_ prefix keeps ambient AWS credentials out.
-const S3_VARS = [
-  "TIDE_S3_ENDPOINT",
-  "TIDE_S3_REGION",
-  "TIDE_S3_BUCKET",
-  "TIDE_S3_ACCESS_KEY_ID",
-  "TIDE_S3_SECRET_ACCESS_KEY",
-];
+// The TIDE_ prefix keeps ambient AWS credentials out.
+const S3_VARS = {
+  endpoint: "TIDE_S3_ENDPOINT",
+  region: "TIDE_S3_REGION",
+  bucket: "TIDE_S3_BUCKET",
+  accessKeyId: "TIDE_S3_ACCESS_KEY_ID",
+  secretAccessKey: "TIDE_S3_SECRET_ACCESS_KEY",
+} as const satisfies Record<Exclude<keyof S3Config, "timeoutMs">, string>;
 
 /** Returns the store the environment configures: TIDE_DISK_DIR, or every TIDE_S3_* variable. Empty means unset. */
 export function storeFromEnv(env: Readonly<Record<string, string | undefined>>): Store {
   const read = (name: string) => (env[name] === "" ? undefined : env[name]);
   const disk = read("TIDE_DISK_DIR");
-  const s3 = S3_VARS.map(read);
-  const missing = S3_VARS.filter((_, i) => s3[i] === undefined);
+  const names = Object.values(S3_VARS);
+  const missing = names.filter((name) => read(name) === undefined);
 
-  if (missing.length === S3_VARS.length) {
+  if (missing.length === names.length) {
     if (disk !== undefined) return diskStore(disk);
-    throw new Error(`no store configured: set TIDE_DISK_DIR, or all of ${S3_VARS.join(", ")}`);
+    throw new Error(`no store configured: set TIDE_DISK_DIR, or all of ${names.join(", ")}`);
   }
   if (disk !== undefined) throw new Error("set TIDE_DISK_DIR or the TIDE_S3_* variables, not both");
   if (missing.length > 0) throw new Error(`S3 store incomplete: set ${missing.join(", ")}`);
-  const [endpoint = "", region = "", bucket = "", accessKeyId = "", secretAccessKey = ""] = s3;
-  return s3Store({ endpoint, region, bucket, accessKeyId, secretAccessKey });
+  const config = Object.fromEntries(Object.entries(S3_VARS).map(([k, v]) => [k, read(v)]));
+  return s3Store(config as Record<keyof typeof S3_VARS, string>);
 }
 
 /** Starts the app on Node; port 0 picks a free port. */

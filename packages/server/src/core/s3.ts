@@ -34,8 +34,7 @@ export function s3Store(config: S3Config): Store {
 
   return {
     async get(key) {
-      const path = [config.bucket, ...key.split("/")].map(uriEncode).join("/");
-      const url = new URL(`/${path}`, endpoint);
+      const url = new URL(`/${config.bucket}/${key}`, endpoint);
       const signed = {
         host: url.host,
         "x-amz-content-sha256": EMPTY_SHA256,

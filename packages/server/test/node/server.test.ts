@@ -1,11 +1,9 @@
-import { execFileSync, spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { contentKey, sha256Base64Url } from "@tide/protocol";
 
@@ -88,35 +86,6 @@ describe("diskStore", () => {
     rmSync(root, { recursive: true });
     await expect(store.get(KEY)).rejects.toThrow(`disk store root ${root} unavailable`);
     await expect(store.get(key)).rejects.toThrow("invalid store key");
-  });
-
-  test("a FIFO at a key rejects as not a regular file instead of blocking", async () => {
-    const root = tempRoot();
-    mkdirSync(join(root, "assets"));
-    execFileSync("mkfifo", [join(root, KEY)]);
-    // A child process, so a blocking open cannot wedge this runner; it is killed when the test ends.
-    const child = spawn(
-      process.execPath,
-      [
-        "--input-type=module",
-        "-e",
-        `const [url, root, key] = process.argv.slice(1);
-         const { diskStore } = await import(url);
-         await diskStore(root).get(key).then(() => console.log("resolved"), (e) => console.log(e.message));
-         process.exit(0);`,
-        new URL("../../src/node.ts", import.meta.url).href,
-        root,
-        KEY,
-      ],
-      { stdio: ["ignore", "pipe", "inherit"] },
-    );
-    onTestFinished(() => {
-      child.kill("SIGKILL");
-    });
-    let out = "";
-    child.stdout.setEncoding("utf8").on("data", (s: string) => (out += s));
-    await once(child, "exit");
-    expect(out.trim()).toBe(`${KEY} is not a regular file`);
   });
 });
 

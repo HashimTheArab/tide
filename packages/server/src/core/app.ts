@@ -17,8 +17,7 @@ export function createApp(store: Store): Hono {
     const h = c.req.queries("h");
     let key: string;
     try {
-      if (h?.length !== 1) throw new Error("one h is required");
-      key = `assets/${contentKey(h[0] ?? "")}`;
+      key = `assets/${contentKey(h?.length === 1 ? (h[0] ?? "") : "")}`;
     } catch {
       return c.text("h must be one 43-character base64url SHA-256\n", 400, NO_STORE);
     }
@@ -34,8 +33,7 @@ export function createApp(store: Store): Hono {
 
     const ext = c.req.queries("ext");
     const headers = {
-      "content-type":
-        ext?.length === 1 ? assetContentType(ext[0] ?? "") : "application/octet-stream",
+      "content-type": assetContentType(ext?.length === 1 ? (ext[0] ?? "") : ""),
       "content-length": String(object.size),
       "cache-control": "public, max-age=31536000, immutable",
     };
