@@ -13,6 +13,17 @@ export function fixture(name: string): Uint8Array<ArrayBuffer> {
   );
 }
 
+/** mulberry32: a fixed sequence in [0, 1) for each seed. */
+export function prng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), s | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
+}
+
 export const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
 
 /** Returns a fresh directory, removed when the test finishes. */
