@@ -29,6 +29,7 @@ const CONTENT_HEX = /^[0-9a-f]{64}$/; // A bundle key's SHA-256, as stored.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
 const QVALUE = /^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$/; // RFC 9110 12.4.2.
 const QUOTED = /"(?:[^"\\]|\\[\s\S]?)*(?:"|$)/g; // A quoted-string, to the end when unterminated.
+const NO_PATCH = new Error("no patch"); // Thrown by a lookup that found nothing without a fault.
 
 export interface AppOptions {
   /** When set and not empty, a request whose `expo-app-id` is present and differs is rejected. */
@@ -214,20 +215,31 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     { current, requested }: PatchRequest,
     answered: AbortSignal,
   ): Promise<StoredObject | undefined> => {
-    const signal = AbortSignal.any([patchDeadline(), answered]);
+    const settled = new AbortController(); // Ends a base read once its sibling has decided.
+    const signal = AbortSignal.any([patchDeadline(), answered, settled.signal]);
+    // Either base alone can rule a patch out, so neither waits on the other to say so.
+    const usable = async (
+      read: Promise<BaseRecord | undefined>,
+      ok: (r: BaseRecord) => boolean,
+    ) => {
+      const record = await read;
+      if (record === undefined || !ok(record)) throw NO_PATCH;
+      return record;
+    };
     try {
-      const [from, to] = await Promise.all([
-        readBase(current, signal),
-        readBase(requested, signal),
+      const [from] = await Promise.all([
+        usable(readBase(current, signal), () => true),
+        usable(readBase(requested, signal), (r) => contentKey(r.launchAsset.hash) === hex),
       ]);
-      if (from === undefined || to === undefined || contentKey(to.launchAsset.hash) !== hex) {
-        return undefined;
-      }
       return await getBeforeDeadline(patchKey(contentKey(from.launchAsset.hash), hex), signal);
     } catch (e) {
       // Every fault falls back to the full bundle, which is always correct; only a patch is lost.
-      if (!answered.aborted) console.error(`patch lookup for bundles/${hex} failed`, e);
+      if (e !== NO_PATCH && !answered.aborted) {
+        console.error(`patch lookup for bundles/${hex} failed`, e);
+      }
       return undefined;
+    } finally {
+      settled.abort();
     }
   };
 
@@ -264,7 +276,6 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("not found\n", 404, NO_STORE);
     }
     const patch = await lookup;
-    answered.abort(); // Ends a base read a failed sibling left running.
     if (request === undefined || patch === undefined) {
       return send(c, object, 200, {
         "content-type": assetContentType("bundle"),

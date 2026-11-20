@@ -193,7 +193,8 @@ with no body and cancels every stream it holds.
   `Expo-Requested-Update-ID` are both UUIDs, compared lowercase. It reads `bases/<current>` and
   `bases/<requested>` (at most 256 KiB each, from the stored size) through `decodeBaseRecord`; each record's
   `updateId` must be the ID it was read by. The requested record's launch hash must be this path's, and then
-  `patches/<current launch hex>/<this hex>` is read.
+  `patches/<current launch hex>/<this hex>` is read. Once either record rules a patch out (absent, a fault, or the
+  requested hash naming another bundle), the other read is cancelled rather than awaited.
 - A patch found: 226 with its bytes, `content-type: application/octet-stream`, `im: bsdiff`,
   `expo-base-update-id: <current ID, lowercase>`, `cache-control: private, no-store`, `vary: A-IM,
   Expo-Current-Update-ID`. The bundle read's body is cancelled.

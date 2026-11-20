@@ -295,8 +295,11 @@ export function stallCases(): void {
     const uuid = () => `00000000-0000-4000-9000-${(++next).toString(16).padStart(12, "0")}`;
 
     type Part = "bundle" | "current" | "requested" | "patch";
-    /** Stores, with signed PUTs, a bundle, two base records and a patch of `label`'s own, except `skip`. */
-    const seed = async (label: string, skip: readonly Part[] = []) => {
+    /**
+     * Stores, with signed PUTs, a bundle, two base records and a patch of `label`'s own, except `skip`. With
+     * `misnamed`, the requested base names the current base's bundle rather than this one.
+     */
+    const seed = async (label: string, skip: readonly Part[] = [], misnamed = false) => {
       const base = utf8(`${label} base`);
       const bundle = utf8(`${label} bundle`);
       const patch = utf8(`${label} patch`);
@@ -310,7 +313,7 @@ export function stallCases(): void {
       const parts: Record<Part, [string, Uint8Array<ArrayBuffer>]> = {
         bundle: [`bundles/${hex}`, bundle],
         current: [baseKey(current), baseRecord(current, baseHash)],
-        requested: [baseKey(requested), baseRecord(requested, bundleHash)],
+        requested: [baseKey(requested), baseRecord(requested, misnamed ? baseHash : bundleHash)],
         patch: [patchKey(contentKey(baseHash), hex), patch],
       };
       for (const [part, [key, body]] of Object.entries(parts)) {
@@ -406,6 +409,22 @@ export function stallCases(): void {
       expect(deadlines.calls).toBe(1);
       await fake.event("abandoned", s.key(stalled));
     });
+
+    // The deadline never fires here: the full bundle must not wait on a base read once the other rules a patch out.
+    test.each<[string, Part, Part, boolean]>([
+      ["an unknown current base", "current", "requested", false],
+      ["an unknown requested base", "requested", "current", false],
+      ["a requested base naming another bundle", "requested", "current", true],
+    ])(
+      "%s serves the full bundle without waiting on the other base",
+      async (label, decided, stalled, misnamed) => {
+        const s = await seed(label, misnamed ? [stalled] : [decided, stalled], misnamed);
+        await fake.script(s.key(stalled), "hang");
+        const { res } = start(s.path, s.headers, new AbortController().signal);
+        await expectFull(res, s.bundle);
+        await fake.event("abandoned", s.key(stalled));
+      },
+    );
 
     test.each<[string, Behaviour | undefined, number]>([
       ["fails", "internal-error", 503],
