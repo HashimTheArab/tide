@@ -17,7 +17,7 @@ const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
  * One readable record with its signed part as stored, or why it cannot be served; every reason is fixed text, never
  * stored data.
  */
-type Verdict =
+export type Verdict =
   | {
       readonly kind: StoredReply["kind"];
       readonly updateId?: string;
