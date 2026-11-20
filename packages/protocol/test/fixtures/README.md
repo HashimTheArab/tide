@@ -10,3 +10,21 @@ once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.
 `expo-directive.json`, `expo-chain.pem` (leaf then intermediate) and the signature in `expo.multipart` come from
 `packages/expo-updates/ios/Tests` in [expo/expo@54c0d6f6](https://github.com/expo/expo/tree/54c0d6f6e9ef537280831b68e5c236807facb641/packages/expo-updates/ios/Tests),
 copyright 650 Industries, Inc., MIT licence in `LICENSE-expo`.
+
+`base-update.json` and `base-embedded.json` are hand-written golden base records.
+
+The patch fixtures come from `node packages/protocol/test/generate-patch-fixtures.ts --bsdiff <path> [--out <dir>]`,
+which needs the system `bzip2` and reference bsdiff 4.3 (BSD-2-Clause). Build bsdiff outside the repo from the Debian
+orig tarball Homebrew pins (`bsdiff_4.3.orig.tar.gz`, SHA-256
+`18821588b2dc5bf159aa37d3bcb7b885d85ffd1e19f23a0c57a58723fea85f48`) with `cc -O2 bsdiff.c -lbz2`. A rerun writes the
+same bytes.
+
+- `patch-<name>.base`, `.target`, `.bsdiff`: golden pairs and bsdiff's patch; each patch was also applied once with
+  `/usr/bin/bspatch` and matched its target.
+- `patch-known.bsdiff`: `KNOWN_PATCH` in `../fixtures.ts`; it applies to any base of 64 bytes or more.
+- `patch-bad-*.bsdiff`: variants of `patch-text.bsdiff` that each break one rule.
+- `patch-text-extra-group.bsdiff` and `patch-bad-huffman-unused.bsdiff`: `patch-text.bsdiff` with its ctrl block
+  rewritten to carry a third Huffman group no selector names, valid or over-subscribed.
+- `bzip2-run-control.bz2` decodes to `xaaaa`; `bzip2-run-at-block-end.bz2` is the same block without the run's count
+  byte.
+- `multiblock.bz2`: several level-1 blocks with long runs.

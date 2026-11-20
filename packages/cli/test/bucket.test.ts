@@ -7,7 +7,7 @@ import { diskPath } from "@tide/protocol";
 import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
 import type { Bucket } from "../src/bucket.ts";
-import { BucketError } from "../src/bucket.ts";
+import { BucketError, isKey } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";
 import { s3Bucket } from "../src/s3.ts";
 import { rejection, tempRoot, utf8 } from "./helpers.ts";
@@ -15,6 +15,33 @@ import { rejection, tempRoot, utf8 } from "./helpers.ts";
 // A whole second far from the local clock, so a test cannot pass by reading the wrong clock.
 const BUCKET_TIME = Date.UTC(2031, 0, 2, 3, 4, 5);
 const ASSET = `assets/${"ab".repeat(32)}`;
+const ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
+const [FROM, TO] = ["ab".repeat(32), "cd".repeat(32)];
+const BASE = `bases/${ID}`;
+const PATCH = `patches/${FROM}/${TO}`;
+// Base and patch key variants outside the grammar.
+const BAD_KEYS = [
+  `bases/${ID.toUpperCase()}`,
+  `bases/${ID}.json`,
+  `bases/${ID.slice(1)}`,
+  `bases/${ID}/x`,
+  "bases/",
+  "bases/../x",
+  `patches/${FROM.toUpperCase()}/${TO}`,
+  `patches/${FROM}/${TO.toUpperCase()}`,
+  `patches/${FROM.slice(1)}/${TO}`,
+  `patches/${FROM}/${TO.slice(1)}`,
+  `patches/${FROM}/${TO}/x`,
+  `patches/${FROM}`,
+  `patches/${FROM}/`,
+  `patches/${FROM}/../${TO}`,
+];
+
+test("isKey accepts base and patch keys and refuses every variant outside the grammar", () => {
+  expect(isKey(BASE)).toBe(true);
+  expect(isKey(PATCH)).toBe(true);
+  for (const key of BAD_KEYS) expect(isKey(key), key).toBe(false);
+});
 
 interface Backend {
   readonly bucket: Bucket;
@@ -105,6 +132,18 @@ describe.each(backends)("%s bucket", (_, open) => {
     expect(await bucket.list("reply/")).toEqual([{ key, size: 4 }]);
   });
 
+  test("a base and a patch key round-trip through put, get and list", async () => {
+    await bucket.put(BASE, utf8("base"));
+    await bucket.put(PATCH, utf8("patch"));
+    expect((await bucket.get(BASE, 100))?.bytes).toEqual(utf8("base"));
+    expect((await bucket.get(PATCH, 100))?.bytes).toEqual(utf8("patch"));
+    expect(await bucket.list("")).toEqual([
+      { key: BASE, size: 4 },
+      { key: PATCH, size: 5 },
+    ]);
+    expect(await bucket.list(`patches/${FROM}/`)).toEqual([{ key: PATCH, size: 5 }]);
+  });
+
   test("get rejects an object over maxBytes", async () => {
     await bucket.put(ASSET, utf8("12345"));
     const error = await rejection(bucket.get(ASSET, 4));
@@ -183,7 +222,7 @@ describe.each(backends)("%s bucket", (_, open) => {
     },
   );
 
-  test.each(["reply/main/1/web", "reply/../x/ios", "lock", "assets/AB"])(
+  test.each(["reply/main/1/web", "reply/../x/ios", "lock", "assets/AB", ...BAD_KEYS])(
     "every operation rejects the key %j before any I/O",
     async (key) => {
       const before = b.requests();

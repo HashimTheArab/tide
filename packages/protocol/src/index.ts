@@ -8,6 +8,8 @@ export {
 } from "./manifest.ts";
 export type { Part, PartName } from "./multipart.ts";
 export { HEADER_VALUE, encodeMultipart, parseMultipart } from "./multipart.ts";
+export type { BaseAsset, BaseRecord } from "./patch.ts";
+export { MAX_BASE_BYTES, applyBsdiff, decodeBaseRecord, encodeBaseRecord } from "./patch.ts";
 export type { StoredReply } from "./reply.ts";
 export {
   CONTENT_KEY,

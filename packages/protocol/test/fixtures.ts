@@ -213,3 +213,17 @@ export function pem(bytes: Uint8Array, label = "CERTIFICATE"): string {
   const lines = base64(bytes).match(/.{1,64}/g) ?? [];
   return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
 }
+
+/** `patch-known.bsdiff`: these control triples, diff and extra bytes; it applies to any base of 64 or more bytes. */
+export const KNOWN_PATCH = {
+  minBase: 64,
+  newSize: 100,
+  triples: [
+    [16, 8, 10],
+    [20, 4, -40], // A backward seek.
+    [30, 0, 28], // Seeks to byte 64, the end of the shortest base.
+    [0, 22, -64],
+  ],
+  diff: Uint8Array.from({ length: 66 }, (_, i) => (i * 37 + 11) & 0xff),
+  extra: Uint8Array.from({ length: 34 }, (_, i) => (i * 53 + 7) & 0xff),
+} as const;

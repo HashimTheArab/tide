@@ -75,9 +75,9 @@ export interface ManifestInput {
   readonly extra: JsonObject;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // The device stores `key + fileExtension` as a file name; without "." in keys, names are safe and distinct.
-const KEY = /^[A-Za-z0-9_-]{1,64}$/;
+export const ASSET_KEY = /^[A-Za-z0-9_-]{1,64}$/;
 const FILE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/;
 const MEDIA_TYPE = new RegExp(`^${TOKEN}/${TOKEN}$`);
 const NON_EMPTY = /./s;
@@ -107,7 +107,7 @@ export function buildManifest(input: ManifestInput): Uint8Array<ArrayBuffer> {
   const assets = array(m.assets, "assets", (value, field) => {
     const a = object(value, field);
     const hash = assetHash(a.hash, `${field}.hash`);
-    const key = matching(a.key, `${field}.key`, KEY, "1 to 64 of A-Z, a-z, 0-9, _ and -");
+    const key = matching(a.key, `${field}.key`, ASSET_KEY, "1 to 64 of A-Z, a-z, 0-9, _ and -");
     if (keys.has(key.toLowerCase()))
       throw new ProtocolError(`${field}.key`, "duplicates another key");
     keys.add(key.toLowerCase());

@@ -9,7 +9,11 @@
   "workspaces": {
     "packages/protocol": {
       "entry": [
-        "test/generate-fixtures.ts"
+        "test/generate-fixtures.ts",
+        "test/generate-patch-fixtures.ts"
+      ],
+      "ignoreBinaries": [
+        "bzip2"
       ]
     },
     "packages/cli": {
