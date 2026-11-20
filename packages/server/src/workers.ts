@@ -20,4 +20,7 @@ function r2Store(bucket: Pick<R2Bucket, "get">): Store {
   };
 }
 
-export default createApp(r2Store(env.BUCKET), { appId: env.TIDE_APP_ID });
+export default createApp(r2Store(env.BUCKET), {
+  appId: env.TIDE_APP_ID,
+  analytics: (point) => env.ANALYTICS.writeDataPoint(point),
+});

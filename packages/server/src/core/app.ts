@@ -18,7 +18,9 @@ import {
   replyKey,
 } from "@tide/protocol";
 
+import type { AnalyticsSink } from "./analytics.ts";
 import type { Store, StoredObject } from "./store.ts";
+import { manifestPoint } from "./analytics.ts";
 import { abortable, discard, readBounded } from "./store.ts";
 
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
@@ -38,6 +40,8 @@ export interface AppOptions {
   readonly replyDeadline?: () => AbortSignal;
   /** Returns the deadline of a `/bundles` request's patch lookup; past it the full bundle is served. */
   readonly patchDeadline?: () => AbortSignal;
+  /** Receives a data point per `/manifest` request that reaches the reply decision. */
+  readonly analytics?: AnalyticsSink | undefined;
 }
 
 /** Returns the Tide HTTP app; it uses only web-standard APIs, so every runtime serves the same app. */
@@ -46,6 +50,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   const {
     replyDeadline = () => AbortSignal.timeout(10_000),
     patchDeadline = () => AbortSignal.timeout(2_000),
+    analytics = () => undefined,
   } = options;
   const appId = options.appId === "" ? undefined : options.appId; // Empty is unset.
   // A received header value never has edge whitespace, so such an app ID could never match.
@@ -94,22 +99,22 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("accept must allow multipart/mixed\n", 406, NO_STORE);
     }
     // No default channel: a misconfigured app sees a 400 in its logs rather than a silent no-update.
-    const channel = header("expo-channel-name");
-    const runtime = header("expo-runtime-version");
+    const channel = header("expo-channel-name") ?? "";
+    const runtime = header("expo-runtime-version") ?? "";
     let key: string;
     try {
-      key = replyKey(channel ?? "", runtime ?? "", platform);
+      key = replyKey(channel, runtime, platform);
     } catch (e) {
       if (!(e instanceof ProtocolError)) throw e;
       const name = e.field === "channel" ? "expo-channel-name" : "expo-runtime-version";
       const value = e.field === "channel" ? channel : runtime;
       const problem =
-        value === undefined ? "is missing" : "must be 1 to 64 of A-Z, a-z, 0-9, ., _, + and -";
+        value === "" ? "is missing" : "must be 1 to 64 of A-Z, a-z, 0-9, ., _, + and -";
       return c.text(`${name} ${problem}\n`, 400, NO_STORE);
     }
 
     const signal = replyDeadline();
-    let reply: StoredReply;
+    let reply: StoredReply | undefined;
     try {
       const pointer = await readRecord(key, MAX_REPLY_BYTES, decodeStoredReply, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
@@ -132,8 +137,17 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       }
     } catch (e) {
       console.error(`/manifest for ${key} failed`, e);
-      return c.text("storage unavailable\n", 503, NO_STORE);
     }
+    try {
+      const written: unknown = analytics(
+        manifestPoint(reply?.kind ?? "503", platform, channel, runtime, header),
+      );
+      // An async sink still type-checks; its rejection is logged, never awaited.
+      Promise.resolve(written).catch(sinkFailed);
+    } catch (e) {
+      sinkFailed(e);
+    }
+    if (reply === undefined) return c.text("storage unavailable\n", 503, NO_STORE);
     const headers: Record<string, string> = {
       "content-type": `multipart/mixed; boundary=${reply.boundary}`,
       "expo-protocol-version": "1",
@@ -317,6 +331,11 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
 interface PatchRequest {
   readonly current: string; // Lowercase UUIDs.
   readonly requested: string;
+}
+
+/** Logs a failed analytics write by error name only: the point holds client values. */
+function sinkFailed(e: unknown): void {
+  console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
 }
 
 /** Returns the update IDs of a request that accepts a bsdiff patch, or undefined. */

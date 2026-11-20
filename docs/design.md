@@ -476,9 +476,33 @@ imported:
 
 ## Observability
 
-One analytics data point per `/manifest` (runtime, platform, current and embedded IDs, recent failed update IDs,
-fatal-error flag), and a synthetic probe that verifies a manifest's signature against a pinned certificate and
-fetches its bundle.
+Every `/manifest` request that reaches the reply decision (each 200 and 503) writes one Workers Analytics Engine
+data point through the `ANALYTICS` binding (dataset `tide_manifest` in `wrangler.jsonc`). A 400 or 406 is answered
+before that decision and writes none. The Node entry has no sink and records nothing.
+
+| Field | Holds |
+| --- | --- |
+| `index1` | `expo-channel-name` |
+| `blob1` | The reply served: `manifest`, `rollBackToEmbedded`, `noUpdateAvailable`, or `503` |
+| `blob2` | `expo-platform`: `ios` or `android` |
+| `blob3` | `expo-runtime-version` |
+| `blob4` | `expo-current-update-id` |
+| `blob5` | `expo-embedded-update-id` |
+| `blob6` | `expo-recent-failed-update-ids`, comma-joined |
+| `double1` | 1 when `expo-fatal-error` is present, else 0 |
+
+Headers are client input, so each value is bounded before it is written. Channel and runtime already passed the
+reply key grammar (at most 64 ASCII characters). An update ID is kept only when it is a UUID, lowercased, else empty;
+a repeated header arrives joined and is dropped. The failed IDs are read as a list of quoted strings: members that
+are quoted UUIDs are kept, lowercased and in order, up to 5 (a stock client sends at most 5); any other member is
+dropped. `expo-fatal-error` holds the client's error message, which may contain user data, so only its presence is
+recorded. A point is therefore at most 64 bytes of index and 345 bytes of blobs, well inside Analytics Engine's
+limits (96-byte index, 16 KB of blobs).
+
+The sink is never awaited: a sink that throws, rejects, or returns a promise that never settles leaves the reply
+unchanged, and a throw or rejection is logged by error name only, never with the point's values.
+
+A synthetic probe verifies a manifest's signature against a pinned certificate and fetches its bundle.
 
 ## Later
 
