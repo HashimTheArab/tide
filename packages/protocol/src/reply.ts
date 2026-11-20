@@ -37,6 +37,9 @@ const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   noUpdateAvailable: ["version", "kind", "contentType", "body"],
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Content-addressed objects and release records; lowercase, so they are safe on case-insensitive disks.
+const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
+const RECORD_KEY = new RegExp(`^updates/${UUID.source.slice(1, -1)}\\.json$`);
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
 // Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.
 const NAME = /^[A-Za-z0-9._+():-]{1,64}$/;
@@ -140,7 +143,7 @@ export function replyKey(channel: string, runtimeVersion: string, platform: stri
  * no two keys share a path on a case-insensitive filesystem and no name collides with `reply/no-update`.
  */
 export function diskPath(key: string): string {
-  if (key === NO_UPDATE_KEY || /^assets\/[0-9a-f]{64}$/.test(key)) return key;
+  if (key === NO_UPDATE_KEY || CONTENT_KEY.test(key) || RECORD_KEY.test(key)) return key;
   const [prefix, channel = "", runtime = "", platform = "", ...rest] = key.split("/");
   if (prefix !== "reply" || rest.length > 0) throw new ProtocolError("key", "is not a store key");
   try {

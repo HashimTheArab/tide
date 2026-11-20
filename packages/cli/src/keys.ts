@@ -36,6 +36,19 @@ export interface AppProject {
 interface Identity {
   readonly key: CryptoKey;
   readonly keyId: string;
+  readonly pem: string;
+}
+
+/** A proven signer and the bucket it may write, with the checks a write command repeats before activating. */
+export interface Writer {
+  readonly signer: Signer;
+  readonly bucket: Bucket;
+  /** Whether a `reply/no-update` signed under this identity was present when opened. */
+  readonly noUpdate: boolean;
+  /** Re-reads `reply/no-update`: true when present and signed under this identity, false when absent. */
+  checkNoUpdate(): Promise<boolean>;
+  /** Refuses unless the certificate is valid at epoch milliseconds `at`. */
+  checkCertificate(at: number): Promise<void>;
 }
 
 export type Env = Readonly<Record<string, string | undefined>>;
@@ -56,21 +69,43 @@ const FINGERPRINT = /^(?:[0-9a-f]{64}|[0-9a-f]{2}(?::[0-9a-f]{2}){31})$/i;
 export async function openWriter(
   env: Env,
   project: AppProject,
-  options: { readonly kmsTimeoutMs?: number } = {},
-): Promise<{ readonly signer: Signer; readonly bucket: Bucket }> {
-  const identity = await appIdentity(env, project);
+  options: { readonly kmsTimeoutMs?: number; readonly now?: () => number } = {},
+): Promise<Writer> {
+  const { now = Date.now } = options;
+  const identity = await appIdentity(env, project, now());
   const signer = verifying(
     keySource(env, identity.keyId, options.kmsTimeoutMs ?? 30_000),
     identity,
   );
   await signer.sign(PROBE);
   const bucket = bucketFromEnv(env);
-  await checkBucket(bucket, identity);
-  return { signer, bucket };
+  return {
+    signer,
+    bucket,
+    noUpdate: await checkBucket(bucket, identity),
+    checkNoUpdate: () => checkBucket(bucket, identity),
+    checkCertificate: async (at) => {
+      await validCertificate(identity.pem, at);
+    },
+  };
 }
 
-/** Reads the identity from the app config, checked against the build pins and the certificate profile. */
-async function appIdentity(env: Env, { projectRoot, config }: AppProject): Promise<Identity> {
+/** Returns the certificate checked against the code-signing profile at epoch milliseconds `at`. */
+async function validCertificate(pem: string, at: number) {
+  try {
+    return await codeSigningCertificate(pem, new Date(at));
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw new KeyError(`updates.codeSigningCertificate: ${e.message}`);
+  }
+}
+
+/** Reads the identity from the app config, checked against the build pins and the certificate profile at `now`. */
+async function appIdentity(
+  env: Env,
+  { projectRoot, config }: AppProject,
+  now: number,
+): Promise<Identity> {
   const updates = member(config, "updates");
   const certificatePath = member(updates, "codeSigningCertificate");
   if (typeof certificatePath !== "string" || certificatePath === "") {
@@ -112,17 +147,11 @@ async function appIdentity(env: Env, { projectRoot, config }: AppProject): Promi
   if (pem === undefined) {
     throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
   }
-  let certificate;
-  try {
-    certificate = await codeSigningCertificate(pem, new Date());
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    throw new KeyError(`updates.codeSigningCertificate: ${e.message}`);
-  }
+  const certificate = await validCertificate(pem, now);
   if (certificate.sha256 !== buildCertificate.replaceAll(":", "").toLowerCase()) {
     throw new KeyError(`app code-signing certificate differs from ${BUILD_CERTIFICATE}`);
   }
-  return { key: certificate.key, keyId };
+  return { key: certificate.key, keyId, pem };
 }
 
 /** Returns the signer for the one configured key source. */
@@ -194,11 +223,11 @@ function verifying(inner: Signer, { key, keyId }: Identity): Signer {
 
 /**
  * Refuses a bucket whose `reply/no-update` is unreadable or signed under another identity: every build the bucket
- * serves gets that one reply, so all of them trust one certificate and key ID.
+ * serves gets that one reply, so all of them trust one certificate and key ID. Returns whether it exists.
  */
-async function checkBucket(bucket: Bucket, { key, keyId }: Identity): Promise<void> {
+async function checkBucket(bucket: Bucket, { key, keyId }: Identity): Promise<boolean> {
   const record = await readRecord(bucket, NO_UPDATE_KEY);
-  if (record === undefined) return;
+  if (record === undefined) return false;
   if (typeof record === "string") throw new KeyError(`${NO_UPDATE_KEY} is unreadable: ${record}`);
   try {
     await verifyExpoSignature(record.signed.body, record.signed.signature, key, keyId);
@@ -207,6 +236,7 @@ async function checkBucket(bucket: Bucket, { key, keyId }: Identity): Promise<vo
       "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
     );
   }
+  return true;
 }
 
 /** Returns the file's bytes if it is a regular file of at most 64 KiB, else undefined. */
@@ -234,11 +264,11 @@ export function read(env: Env, name: string): string | undefined {
 }
 
 /** Returns the own field `name` of a plain object, or undefined. */
-function member(value: unknown, name: string): unknown {
-  return typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.hasOwn(value, name)
-    ? (value as Record<string, unknown>)[name]
-    : undefined;
+export function member(value: unknown, name: string): unknown {
+  return isObject(value) && Object.hasOwn(value, name) ? value[name] : undefined;
+}
+
+/** True for a JSON object: not null and not an array. */
+export function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

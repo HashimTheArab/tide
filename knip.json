@@ -16,6 +16,7 @@
       "entry": [
         "src/main.ts",
         "test/disk-writer.ts",
+        "test/fake-expo.ts",
         "test/open-writer.ts"
       ]
     }

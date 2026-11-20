@@ -1591,6 +1591,11 @@ describe("stored reply", () => {
     ["reply/main/exposdk:57.0.0/ios", "reply/main/exposdk_3a57_2e0_2e0/ios"],
     [NO_UPDATE_KEY, NO_UPDATE_KEY],
     [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
+    [`bundles/${PNG_HEX}`, `bundles/${PNG_HEX}`],
+    [
+      "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
+      "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
+    ],
   ])("diskPath maps %s to %s", (key, path) => {
     expect(diskPath(key)).toBe(path);
   });
@@ -1603,6 +1608,10 @@ describe("stored reply", () => {
     "reply/a/b",
     "assets/../x",
     `assets/${PNG_HEX.toUpperCase()}`,
+    `bundles/${PNG_HEX.slice(1)}`,
+    "updates/0F6A9A3E-6C1B-4C4E-9D55-2B8F3F7C1A90.json",
+    "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90",
+    "updates/../reply/no-update",
     "lock",
     "",
   ])("diskPath rejects %j", async (key) => {

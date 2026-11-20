@@ -1,3 +1,4 @@
+import type { Context } from "hono";
 import { Hono } from "hono";
 
 import type { StoredReply } from "@tide/protocol";
@@ -17,6 +18,7 @@ import { abortable, readBounded } from "./store.ts";
 
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
 const NO_STORE = { "cache-control": "no-store" };
+const CONTENT_HEX = /^[0-9a-f]{64}$/; // A bundle key's SHA-256, as stored.
 // Media-type parameters and q-values are ignored: stock clients send multipart/mixed, the only type Tide stores.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
 
@@ -118,16 +120,8 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     return new Response(reply.body, { headers });
   });
 
-  // Serves URLs earlier servers put in signed manifests: `h` is the asset's unpadded base64url SHA-256.
-  app.get("/assets", async (c) => {
-    const h = c.req.queries("h");
-    let key: string;
-    try {
-      key = `assets/${contentKey(h?.length === 1 ? (h[0] ?? "") : "")}`;
-    } catch {
-      return c.text("h must be one 43-character base64url SHA-256\n", 400, NO_STORE);
-    }
-
+  /** Serves the object at `key` as immutable `contentType`; only a 200 may be cached. */
+  const serveObject = async (c: Context, key: string, contentType: string) => {
     let object;
     try {
       object = await store.get(key);
@@ -136,10 +130,8 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("storage unavailable\n", 503, NO_STORE);
     }
     if (object === undefined) return c.text("not found\n", 404, NO_STORE);
-
-    const ext = c.req.queries("ext");
     const headers = {
-      "content-type": assetContentType(ext?.length === 1 ? (ext[0] ?? "") : ""),
+      "content-type": contentType,
       "content-length": String(object.size),
       "cache-control": "public, max-age=31536000, immutable",
     };
@@ -149,6 +141,28 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return new Response(null, { headers });
     }
     return new Response(object.body, { headers });
+  };
+
+  // Every manifest's launch asset URL; patch negotiation joins it with bundle diffing.
+  app.get("/bundles/:hex", async (c) => {
+    const hex = c.req.param("hex");
+    if (!CONTENT_HEX.test(hex)) {
+      return c.text("the path must end in 64 lowercase hex characters\n", 400, NO_STORE);
+    }
+    return await serveObject(c, `bundles/${hex}`, assetContentType("bundle"));
+  });
+
+  // Serves URLs earlier servers put in signed manifests: `h` is the asset's unpadded base64url SHA-256.
+  app.get("/assets", async (c) => {
+    const h = c.req.queries("h");
+    let key: string;
+    try {
+      key = `assets/${contentKey(h?.length === 1 ? (h[0] ?? "") : "")}`;
+    } catch {
+      return c.text("h must be one 43-character base64url SHA-256\n", 400, NO_STORE);
+    }
+    const ext = c.req.queries("ext");
+    return await serveObject(c, key, assetContentType(ext?.length === 1 ? (ext[0] ?? "") : ""));
   });
 
   app.notFound((c) => c.text("not found\n", 404, NO_STORE));

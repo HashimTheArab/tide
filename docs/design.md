@@ -33,7 +33,7 @@ One bucket (R2 or S3-compatible), written only by the CLI:
 ```
 assets/<sha256>                          immutable non-launch assets
 bundles/<sha256>                         launch bundles
-updates/<updateId>.json                  release record: launch hash, asset hashes, createdAt
+updates/<updateId>.json                  release record (CLI, Release records)
 reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
 reply/no-update                          stored reply: the signed noUpdateAvailable
 bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
@@ -47,7 +47,9 @@ binding. Code running inside the Worker could delete objects; it could not make 
 and hash checks. An operator who needs a strictly read-only Worker can point the S3 adapter at R2's S3 API with a
 read-only token.
 
-- **Keys** are a known prefix plus a hash (`assets/<64 lowercase hex>`) or a reply key. Objects are stored
+- **Keys** are a known prefix plus a hash (`assets/` or `bundles/` and 64 lowercase hex), a release record
+  (`updates/<lowercase UUID>.json`) or a reply key. All but reply keys are lowercase, so they are distinct on a
+  case-insensitive disk and need no escaping. Objects are stored
   unencoded; an object with a `content-encoding` other than `identity` is an error, not an asset.
 - **Reply keys** come from protocol `replyKey`, shared by server and CLI. Channel and runtime version are each 1 to 64
   of `A-Z a-z 0-9 . _ + - ( ) :`, and neither is `.` or `..`, so no header value can name another key; platform is `ios` or
@@ -141,12 +143,16 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 - With `A-IM: bsdiff`: resolve `Expo-Current-Update-ID` through `bases/`, confirm `Expo-Requested-Update-ID` names an
   update whose launch hash is this one, and look up `patches/<base>/<this>`. Found: 226, `im: bsdiff`,
   `expo-base-update-id`, `cache-control: private, no-store`, `vary: A-IM, Expo-Current-Update-ID`.
-- Otherwise: 200, the full bundle, `public, max-age=31536000, immutable`.
+- Otherwise: 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`.
+- A path that is not 64 lowercase hex is 400, an absent bundle 404 and a store failure 503, each `no-store`.
 - Patches are never shared-cached: a cached patch under the plain URL would break the client's full-file retry.
 
 ### Other routes
 
-- Non-launch assets are served from the bucket's public domain with a one-year immutable cache.
+- Non-launch assets are served from the bucket's public domain (`TIDE_ASSET_URL`) at `assets/<hex>`, with the
+  `Content-Type` and `Cache-Control` the CLI stored on upload. The Node server does not serve these paths, and the
+  disk store keeps no metadata: a disk deployment needs a static origin over `TIDE_DISK_DIR/assets/` that sets each
+  type, and the disk integration test covers manifest delivery only.
 - `GET /assets?h=<hash>&ext=<ext>` streams `assets/<hex>`, for URLs published by earlier servers. `h` must be one
   canonical unpadded base64url SHA-256 (43 characters, zero trailing bits: protocol `assetHash`), else 400. The
   `content-type` comes from `ext`, a bare extension, through protocol `assetContentType`, the table the publisher
@@ -172,7 +178,9 @@ empty counts as unset). A configuration error exits before any request.
 - **Write credentials.** The CLI's S3 key needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and
   `s3:ListBucket`; on R2, an Object Read & Write token scoped to the bucket. Keep it a protected CI secret; the server
   keeps its read-only key. The secret is only used to derive signatures: it is never sent, put in a URL or printed.
-- **Writes.** Every request is signed (SigV4, with the payload hash). A pointer write is `PutObject` with
+- **Writes.** Every request is signed (SigV4, with the payload hash). Every PUT signs its own `Cache-Control`:
+  `public, max-age=31536000, immutable` with a `Content-Type` for bundles and assets, `no-store` for everything
+  else (fetch would otherwise add an unsigned `no-cache` to a conditional PUT, which S3 stores). A pointer write is `PutObject` with
   `If-Match: <etag>`, or `If-None-Match: *` for a first publish; a 412 is a lost race, and every other answer is an
   error. ETags are opaque strings, compared exactly. A write that got no answer, a 5xx, or a 200 without a valid ETag
   has an unknown outcome: the writer stops, exits non-zero, and the next run starts from what the bucket holds,
@@ -189,17 +197,61 @@ missing. It exits 1 if any record is unreadable, and 2 on a configuration or lis
 reported by its key, the same name a readable row prints, with a fixed reason; a name outside the key grammar and a
 stored field are never printed.
 
-`publish`:
+`tide publish --channel <name> [--platform ios|android]... [--runtime-version <v>] [--export-dir <dir>]
+[--project-root <dir>]`. Platforms default to both, and a repeated one is a usage error. Exit 0 means every pointer
+was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has one
+line per pointer written: `<key> <updateId> <createdAt>`.
 
-1. Run `expo export`; hash every file (SHA-256, base64url); upload missing `assets/` and `bundles/`. Keep Metro's
-   asset keys, which the bundle references, and refuse to publish a key already recorded for a different SHA-256 in
-   any retained update or registered build.
-2. Compose the manifest with `createdAt = max(now, previous pointer and any rollback commitTime + 1 ms)`; refuse if
-   the clock differs from the bucket's `Date` by more than a minute.
-3. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through the configured key source (Keys).
-4. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
+**Configuration.** `TIDE_SERVER_URL` (the Tide server) and `TIDE_ASSET_URL` (the bucket's public domain) are each an
+absolute `https:` URL with no credentials, query or fragment, or `http:` to a loopback IP literal; a trailing `/`
+is dropped. Plus the bucket (Bucket configuration) and a key (Keys).
+
+**URL shapes**, permanent once published (no extension: the client names files by `key` and `fileExtension`):
+
+- launch asset: `<TIDE_SERVER_URL>/bundles/<64 hex>`;
+- asset: `<TIDE_ASSET_URL>/assets/<64 hex>`. Byte-identical files with two extensions share one object and its
+  first upload's `Content-Type`; clients check the hash, not the type.
+
+**Expo.** `expo` and `expo-updates` run from the nearest `node_modules/.bin` at or above the project root, with no
+shell, every `TIDE_` variable removed, `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or
+`production`: the mode `expo export` forces, so config, runtime and bundle agree. The runtime is
+`expo-updates runtimeversion:resolve --platform <p>` (every Expo policy, resolved by Expo) unless
+`--runtime-version` is given. The full `expo config` gives the signing identity; `--type public` becomes
+`extra.expoClient`.
+
+**Export.** Without `--export-dir`, `expo export` runs into a temporary directory. A given `--export-dir` must hold
+a production export of the same checkout and stay unchanged while publish runs. Every path in `metadata.json` must
+resolve inside the export to a regular file. An asset path is `assets/<md5>` or `www.bundle/<md5>.<ext>` (DOM
+components), the MD5 is its key, and the file's bytes must hash to it. Repeated identical entries collapse.
+
+Steps, in order; every refusal comes before the first write, and all replies are signed in memory first:
+
+1. Read the config, runtimes and export, and open the writer (Keys).
+2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build, or in two
+   of them, comparing keys case-insensitively. An unreadable record refuses too.
+3. Read each pointer and its ETag, then the bucket's time. Refuse a local clock more than a minute from it, or a
+   certificate invalid by either clock.
+4. Compose each platform's manifest under a fresh UUID with `createdAt = max(now, previous createdAt or commitTime
+   + 1 ms)`, one clock sample for all; metadata `channel`, filter `channel="<channel>"`. Sign the exact part bytes
+   (RSA PKCS#1 v1.5, SHA-256) through the key source, and build `reply/no-update` if it is missing.
+5. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
    updates); apply each and check its hash before upload; keep one only if it is well under the compressed bundle.
-5. Write the release record, bases and patches, then the pointer with `If-Match` on its ETag.
+6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then
+   `reply/no-update` (a winner must verify under the identity), release records, bases and patches. Then, per
+   platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on its
+   ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
+   an unknown outcome may be live, and the next run starts from what the bucket holds.
+
+**Release records.** `updates/<updateId>.json` is one JSON object, keys in this order, no trailing newline, at most
+2 MiB; decode refuses anything encode would not write byte for byte:
+
+```json
+{"version":1,"updateId":"<uuid>","channel":"main","runtimeVersion":"1.0.0","platform":"ios","createdAt":"<ISO ms Z>","serverUrl":"https://updates.example.com","assetUrl":"https://assets.example.com","launchAsset":{"hash":"<b64url>"},"assets":[{"key":"<md5>","hash":"<b64url>","fileExtension":".png"}],"extra":{…}}
+```
+
+The two bases and the URL shapes give back every original URL, so a republish keeps them after configuration
+changes; a new URL shape needs a new `version`. `contentType` follows from `fileExtension`; the launch asset is
+always `.bundle`.
 
 Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `rollback`
 (a signed `rollBackToEmbedded` with a fresh `commitTime`, or a republish of older code under a new ID), `republish`,
@@ -256,7 +308,7 @@ credential or provider text.
 exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
 certificate and `keyid`. A new key or key ID therefore needs a new bucket and `updates.url`. `publish` creates
 `reply/no-update` with put-if-absent before any pointer and re-checks a winner it did not write; it re-checks the
-certificate's validity before the pointer write; and it runs `expo config` and `expo export` with every `TIDE_`
+certificate's validity by both clocks before each pointer write; and it runs Expo's tools with every `TIDE_`
 variable removed and `EXPO_NO_DOTENV=1`, so no signing or storage secret reaches project code.
 
 **KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
