@@ -99,8 +99,9 @@ Staging deploys from `main`; production deploys a commit only after staging has 
 - **GitHub Actions.** [`examples/deploy-workers.yml`](examples/deploy-workers.yml): a `staging` job on push to `main`
   and a `production` job after it. Each job reads `secrets.CLOUDFLARE_API_TOKEN` and `vars.CLOUDFLARE_ACCOUNT_ID`
   from its own GitHub environment, so production's protection rules decide when its token can be read. Each
-  environment has a concurrency group, and each job checks that its commit is still the head of `main` before it
-  deploys, so a rerun or a late approval cannot replace a newer deploy with an older one.
+  environment has a concurrency group whose runs queue in order, and each job checks that its commit is still the
+  head of `main` before it deploys, so a rerun or a late approval cannot replace a newer deploy with an older one.
+  Wrangler runs in the operator project's directory.
 
 How production is gated depends on the GitHub plan:
 
@@ -112,7 +113,9 @@ How production is gated depends on the GitHub plan:
 
 ## The container
 
-`packages/server/Dockerfile` runs the Node entry. Build it from the repository root:
+`packages/server/Dockerfile` runs the Node entry. Build it from the repository root with BuildKit, which reads
+`packages/server/Dockerfile.dockerignore`; a builder that reads only the root `.dockerignore` gets an empty context
+and fails:
 
 ```sh
 docker build -f packages/server/Dockerfile -t tide .
@@ -123,7 +126,7 @@ docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_
 | --- | --- |
 | `PORT` | Listening port; default `8787` |
 | `TIDE_DISK_DIR` | A bucket directory, for a single host |
-| `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID`, `TIDE_S3_SECRET_ACCESS_KEY` | An S3-compatible bucket; all five, and read-only credentials |
+| `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID`, `TIDE_S3_SECRET_ACCESS_KEY` | An S3-compatible bucket; all five, and read-only credentials with `s3:GetObject` and `s3:ListBucket` (without ListBucket a missing key is a 403, which Tide answers with 503) |
 | `TIDE_APP_ID` | Optional; as for the Worker |
 
 Exactly one store is configured; otherwise the container exits 1 naming what is wrong. The image holds no

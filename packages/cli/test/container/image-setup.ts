@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestProject } from "vitest/node";
@@ -7,6 +9,7 @@ import type { TestProject } from "vitest/node";
 declare module "vitest" {
   export interface ProvidedContext {
     image: { tag: string };
+    rootContext: string[];
   }
 }
 
@@ -26,6 +29,18 @@ export default function setup(project: TestProject): () => void {
     { stdio: "inherit" },
   );
   project.provide("image", { tag });
+  // A Dockerfile from stdin has no per-Dockerfile ignore file, so this exports what the root .dockerignore admits.
+  const context = mkdtempSync(join(tmpdir(), "tide-context-"));
+  try {
+    execFileSync(
+      "docker",
+      ["build", "--quiet", "-f", "-", "--output", `type=local,dest=${context}`, ROOT],
+      { input: "FROM scratch\nCOPY . /\n", stdio: ["pipe", "ignore", "inherit"] },
+    );
+    project.provide("rootContext", readdirSync(context, { recursive: true, encoding: "utf8" }));
+  } finally {
+    rmSync(context, { recursive: true, force: true });
+  }
   return () => {
     execFileSync("docker", ["image", "rm", "--force", tag], { stdio: "ignore" });
   };

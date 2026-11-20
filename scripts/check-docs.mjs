@@ -1,4 +1,5 @@
-// Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status front matter.
+// Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status
+// front matter, or when deploy.md omits a permission the server's S3 credentials need.
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,19 @@ for (const path of walk(docsDir)) {
   }
   if (!/^updated: \d{4}-\d{2}-\d{2}$/m.test(frontMatter)) {
     errors.push(`${rel}: front matter needs updated: YYYY-MM-DD`);
+  }
+}
+
+// The container's variable table must name each permission the server's S3 credentials need.
+const s3Bullet = /^- \*\*S3\*\* \(Node\)[\s\S]*?(?=\n- )/m.exec(
+  readFileSync(join(docsDir, "design.md"), "utf8"),
+)?.[0];
+const permissions = new Set(s3Bullet?.match(/`s3:\w+`/g) ?? []);
+if (permissions.size === 0) errors.push("design.md: the S3 bullet names no s3: permission");
+const deploy = readFileSync(join(docsDir, "deploy.md"), "utf8");
+for (const permission of permissions) {
+  if (!deploy.includes(permission)) {
+    errors.push(`deploy.md: does not name ${permission}, which the server's S3 credentials need`);
   }
 }
 

@@ -15,10 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: staging
-    # One deploy per environment at a time; a newer pending run replaces an older one.
+    # One deploy per environment at a time. Runs queue in order, so a rerun of an older commit cannot replace the
+    # pending head; the head check then refuses the older one.
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -32,6 +34,8 @@ jobs:
           git fetch --quiet origin main
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
       - name: Deploy
+        # The operator project, which holds Wrangler and wrangler.jsonc.
+        working-directory: examples/operator
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -45,6 +49,7 @@ jobs:
     concurrency:
       group: deploy-production
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -57,6 +62,7 @@ jobs:
           git fetch --quiet origin main
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
       - name: Deploy
+        working-directory: examples/operator
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
