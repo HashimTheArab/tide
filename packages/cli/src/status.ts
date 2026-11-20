@@ -61,7 +61,7 @@ export async function status(
   return unreadable ? 1 : 0;
 }
 
-/** Reads and checks the record at `key` the way a signing client would receive it; undefined when absent. */
+/** Reads and checks the record at `key`; undefined when absent. */
 export async function readRecord(bucket: Bucket, key: string): Promise<Verdict | undefined> {
   let bytes;
   try {
@@ -70,7 +70,11 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
     // The listing succeeded, so one failed read is this record's problem; later records are still read.
     return e instanceof BucketError ? e.message : "read failed";
   }
-  if (bytes === undefined) return undefined;
+  return bytes === undefined ? undefined : checkRecord(key, bytes);
+}
+
+/** Checks the bytes stored at `key` the way a signing client would receive them. */
+export function checkRecord(key: string, bytes: Uint8Array): Verdict {
   let reply: StoredReply;
   try {
     reply = decodeStoredReply(bytes);
@@ -130,7 +134,7 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
 }
 
 /** Exactly the form the publisher writes: an ISO 8601 UTC time with milliseconds that names a real instant. */
-function isTime(value: unknown): value is string {
+export function isTime(value: unknown): value is string {
   if (typeof value !== "string" || !TIME.test(value)) return false;
   const ms = Date.parse(value);
   return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
