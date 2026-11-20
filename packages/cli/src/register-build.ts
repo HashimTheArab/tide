@@ -23,7 +23,7 @@ import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError } from "./publish-record.ts";
 import { parsed } from "./publish-rollback.ts";
-import { addKey, execute, platformsOf, recordedKeys } from "./publish.ts";
+import { addKey, execute, platformOf, recordedKeys } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const REGISTER_BUILD_USAGE =
@@ -77,17 +77,17 @@ async function prepare(
   const { keys: recorded } = await recordedKeys(bucket);
   for (const a of assets) addKey(recorded, a.key, a.hash, "this build");
   const bundleKey = `bundles/${contentKey(launch)}`;
-  // The bundle is written first, so a stored identical base proves it is there.
-  if (stored !== undefined) return async () => out(`${key} ${bundleKey}`);
 
   return async () => {
-    // A lost create stored the same content-addressed bytes.
-    await writing(
-      bundleKey,
-      () => bucket.putIfAbsent(bundleKey, bundle, assetContentType("bundle")),
-      RERUN,
-    );
-    await createBase(bucket, key, record);
+    // The bundle is written first, so a stored identical base proves it is there; a lost create stored the same bytes.
+    if (stored === undefined) {
+      await writing(
+        bundleKey,
+        () => bucket.putIfAbsent(bundleKey, bundle, assetContentType("bundle")),
+        RERUN,
+      );
+      await createBase(bucket, key, record);
+    }
     out(`${key} ${bundleKey}`);
   };
 }
@@ -128,7 +128,7 @@ function parse(args: readonly string[]) {
     return value;
   };
   return {
-    platform: platformsOf([required("platform")])[0]!,
+    platform: platformOf(required("platform")),
     runtime: required("runtime-version"),
     manifest: required("manifest"),
     bundle: required("bundle"),
