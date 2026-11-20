@@ -253,9 +253,31 @@ The two bases and the URL shapes give back every original URL, so a republish ke
 changes; a new URL shape needs a new `version`. `contentType` follows from `fileExtension`; the launch asset is
 always `.bundle`.
 
-Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `rollback`
-(a signed `rollBackToEmbedded` with a fresh `commitTime`, or a republish of older code under a new ID), `republish`,
-`status`, and `gc` (dry-run by default; never deletes anything a retained update, rollback, base or legacy map
+**Rollback and republish.** Both run only `expo config --json` (with the Expo environment above) for the
+identity, need no `TIDE_SERVER_URL` or `TIDE_ASSET_URL`, and share publish's exit codes, clock and certificate checks,
+`reply/no-update` repair and pointer writes. Every refusal, including each argument rule below, comes before the
+first write; arguments are checked before Expo runs.
+
+- `tide rollback --embedded --channel <name> --runtime-version <v> [--platform ios|android]... [--project-root <dir>]`
+  writes, per platform, a signed `rollBackToEmbedded` with `commitTime = max(now, previous createdAt or commitTime +
+  1 ms)`. The runtime is given, never resolved, and the pointer must exist: a typo must not pass for a rollback. It
+  has no release record and no `expo-manifest-filters`. stdout: `<key> - <commitTime>`.
+- `tide republish <updateId>... [--channel <name>] [--runtime-version <v>] [--project-root <dir>]` serves each
+  update's stored code again under a fresh UUID, on `--channel` or the update's own channel. It is rebuilt from the
+  release record by publish's own manifest builder, so hashes, keys, extensions, `extra` and URLs are the original's;
+  only the ID, `createdAt = max(now, previous + 1 ms, source createdAt + 1 ms)`, `metadata.channel` and the filter
+  change. It writes a new release record and uploads nothing. stdout as publish.
+- `tide rollback --to <updateId> [--to <updateId>]... [--project-root <dir>]` is `republish` onto each update's own
+  pointer, and takes no `--channel`, `--runtime-version` or `--platform`. `--to A B` is a usage error.
+
+Refused: an ID that is not a lowercase UUID or is given twice; an ID with no release record; a release record that
+is unreadable or names another ID; a record whose runtime differs from `--runtime-version`; two IDs with one target
+pointer; a referenced bundle or asset that is not stored (on disk, a regular file the server can open); and any
+asset key two retained records disagree on. A lost race or unknown outcome behaves as publish; a record whose PUT
+has an unknown outcome is named, and no pointer refers to it yet.
+
+Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `status`, and
+`gc` (dry-run by default; never deletes anything a retained update, rollback, base or legacy map
 references). `gc` is two-pass mark and sweep: each run records the unreferenced objects it finds in
 `gc/candidates.json`, and deletes only objects that were already candidates in a scan at least 24 hours earlier and
 are still unreferenced. A publish that reuses an object in between makes it referenced again, so it survives.
@@ -301,15 +323,18 @@ certificate does not pass while the builds hold an expired one.
 **Probe.** Before the bucket is opened, the CLI signs `tide signing probe` and verifies it against the certificate
 and `keyid`. Every later signature is verified the same way before it is returned, so a re-pointed KMS alias cannot
 produce a part the app rejects. Every key or config refusal exits before the bucket is opened; the bucket check only
-reads `reply/no-update`. Each refusal has a fixed message that names variables and config fields, never a key,
+reads replies. Each refusal has a fixed message that names variables and config fields, never a key,
 credential or provider text.
 
 **One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
 exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
-certificate and `keyid`. A new key or key ID therefore needs a new bucket and `updates.url`. `publish` creates
-`reply/no-update` with put-if-absent before any pointer and re-checks a winner it did not write; it re-checks the
-certificate's validity by both clocks before each pointer write; and it runs Expo's tools with every `TIDE_`
-variable removed and `EXPO_NO_DOTENV=1`, so no signing or storage secret reaches project code.
+certificate and `keyid`. When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
+the same way (an empty `reply/` is a new bucket), so no writer repairs another identity's bucket. A new key or key
+ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `republish` create a missing
+`reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; they re-check the
+certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
+write; and they run Expo's tools with every `TIDE_` variable removed and `EXPO_NO_DOTENV=1`, so no signing or
+storage secret reaches project code.
 
 **KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
 imported:
