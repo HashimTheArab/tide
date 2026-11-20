@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { chownSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -22,6 +22,28 @@ export function tempRoot(): string {
     rmSync(root, { recursive: true, force: true });
   });
   return root;
+}
+
+/**
+ * Runs `body` with `root`'s tree owned by an unprivileged effective user when the tests run as root, since root's
+ * permission bypass reads a directory whatever its mode.
+ */
+export async function unprivileged(root: string, body: () => Promise<void>) {
+  if (process.geteuid?.() !== 0 || process.seteuid === undefined || process.setegid === undefined) {
+    return body();
+  }
+  const nobody = 65534;
+  for (const name of ["", ...readdirSync(root, { recursive: true, encoding: "utf8" })]) {
+    chownSync(join(root, name), nobody, nobody);
+  }
+  process.setegid(nobody);
+  process.seteuid(nobody);
+  try {
+    await body();
+  } finally {
+    process.seteuid(0);
+    process.setegid(0);
+  }
 }
 
 /** Returns the rejection of `promise`, failing the test if it resolves. */

@@ -5,7 +5,7 @@ interface BucketObject {
   readonly etag: string; // Opaque: compared by exact string equality only.
 }
 
-/** A listed name: a store key, or a stored name outside the key grammar. */
+/** A listed name: a store key, or a stored name outside the key grammar or, on disk, a bundle or asset it cannot open. */
 export type ListEntry = { readonly key: string } | { readonly unknown: string };
 
 /**

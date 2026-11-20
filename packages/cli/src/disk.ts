@@ -252,6 +252,25 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
     time: () => settle(now),
   };
 
+  /**
+   * False for content the server could not open: a bundle or asset key that is not a readable regular file, a symlink
+   * followed. Other keys are always listed, so `status` can name what is wrong with them.
+   */
+  function servable(key: string, name: string): boolean {
+    if (!key.startsWith("bundles/") && !key.startsWith("assets/")) return true;
+    let fd;
+    try {
+      fd = openSync(join(root, name), READ_FLAGS);
+    } catch {
+      return false;
+    }
+    try {
+      return fstatSync(fd).isFile();
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   function listSync(prefix: string): ListEntry[] {
     const entries: ListEntry[] = [];
     const reaches = (name: string) =>
@@ -268,7 +287,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
         if (rel === "" && d.name === META) continue;
         const name = rel === "" ? d.name : `${rel}/${d.name}`;
         const key = diskKey(name);
-        if (key !== undefined) entries.push({ key });
+        if (key !== undefined) entries.push(servable(key, name) ? { key } : { unknown: name });
         // A subtree that cannot hold a match is skipped, so its failures cannot fail this listing.
         else if (d.isDirectory()) {
           if (reaches(name) || reaches(unescapeDiskPath(name))) walk(name);

@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
-  chownSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -18,34 +17,12 @@ import { diskPath } from "@tide/protocol";
 
 import { BucketError } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";
-import { child, rejection, tempRoot, utf8 } from "./helpers.ts";
+import { child, rejection, tempRoot, unprivileged, utf8 } from "./helpers.ts";
 
 const WRITER = fileURLToPath(new URL("disk-writer.ts", import.meta.url));
 const KEY = "reply/main/1.0.0/ios";
 const path = (root: string, key = KEY) => join(root, diskPath(key));
 const staged = (root: string) => readdirSync(join(root, ".tide", "tmp"));
-
-/**
- * Runs `body` with `root`'s tree owned by an unprivileged effective user when the tests run as root, since root's
- * permission bypass reads a directory whatever its mode.
- */
-async function unprivileged(root: string, body: () => Promise<void>) {
-  if (process.geteuid?.() !== 0 || process.seteuid === undefined || process.setegid === undefined) {
-    return body();
-  }
-  const nobody = 65534;
-  for (const name of ["", ...readdirSync(root, { recursive: true, encoding: "utf8" })]) {
-    chownSync(join(root, name), nobody, nobody);
-  }
-  process.setegid(nobody);
-  process.seteuid(nobody);
-  try {
-    await body();
-  } finally {
-    process.seteuid(0);
-    process.setegid(0);
-  }
-}
 
 /** Starts a writer process and waits until it is ready to run its operation. */
 async function writer(root: string, op: string, payload: string, etag = "") {
@@ -154,6 +131,31 @@ describe("disk bucket", () => {
       expect(error).toMatchObject({ outcome: "failed" });
     }
     expect(staged(root)).toEqual([]);
+  });
+
+  test("a bundle or asset key lists only as an object the server can open", async () => {
+    const root = tempRoot();
+    const bucket = diskBucket(root);
+    const [dir, file, link, locked] = ["aa", "bb", "cc", "dd"].map(
+      (c) => `bundles/${c.repeat(32)}`,
+    ) as [string, string, string, string];
+    mkdirSync(path(root, dir), { recursive: true });
+    await bucket.put(file, utf8("x"));
+    symlinkSync(path(root, file), path(root, link));
+    await bucket.put(locked, utf8("x"));
+    await unprivileged(root, async () => {
+      chmodSync(path(root, locked), 0);
+      try {
+        expect(await bucket.list("bundles/")).toEqual([
+          { unknown: diskPath(dir) },
+          { key: file },
+          { key: link },
+          { unknown: diskPath(locked) },
+        ]);
+      } finally {
+        chmodSync(path(root, locked), 0o644);
+      }
+    });
   });
 
   test.each([
