@@ -387,12 +387,10 @@ publish; stdout `bases/<id> bundles/<64 hex>`.
   `--assets-dir` is required only when the manifest lists assets.
 - **Refused before any write** (exit 2): a missing or repeated option or a positional; a bad runtime or platform;
   an ID that is not a lowercase UUID; an unreadable input; an asset key with no matching file; an asset key that a
-  release record or another registered build records with another SHA-256; a `bases/<id>` holding other bytes; and a
-  failed `bundles/` listing.
-- **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`) unless listed, then `bases/<id>`
-  put-if-absent. A lost base create succeeds only if the stored bytes are identical. Re-running with identical inputs
-  writes nothing and exits 0. An unknown outcome exits 1, and the re-run starts from the bucket (One writer at a
-  time).
+  release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
+- **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
+  A lost base create succeeds only if the stored bytes are identical. Re-running with identical inputs writes nothing
+  and exits 0. An unknown outcome exits 1, and the re-run starts from the bucket (One writer at a time).
 
 **Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an

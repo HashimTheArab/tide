@@ -272,7 +272,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       () => args(build()).map((a) => (a === "1.0.0" ? "1.0/0" : a)),
       "runtimeVersion must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
     ],
-    ["a bad platform", () => args(build(), "web"), "platform must be ios or android"],
+    ["a bad platform", () => args(build(), "web"), "--platform must be ios or android"],
     [
       "a packagerHash that is not an MD5",
       () => args(build({ keys: [PNG_MD5.toUpperCase()] })),
@@ -418,8 +418,8 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 describe("register-build on S3", () => {
   const store = () => STORES.s3();
 
-  test("a bundles/ listing that fails is a refusal with no PUT", async () => {
-    s3.onList("bases/", () => s3.failAll({ status: 500, code: "InternalError" }));
+  test("a bases/ listing that fails is a refusal with no PUT", async () => {
+    s3.onList("updates/", () => s3.failAll({ status: 500, code: "InternalError" }));
     expect(await register(args(build()), store())).toEqual({
       code: 2,
       out: [],
@@ -452,7 +452,7 @@ describe("register-build on S3", () => {
     expect(s3.objects.get(baseKey(ID))).toEqual(theirs);
   });
 
-  test("a lost bundle response stops before the base, and the re-run writes only the base", async () => {
+  test("a lost bundle response stops before the base, and the re-run completes it", async () => {
     const bundle = await bundleKey();
     s3.dropAfterPut("bundles/");
     expect(await register(args(build()), store())).toEqual({
@@ -463,7 +463,7 @@ describe("register-build on S3", () => {
     expect(s3.puts).toEqual([bundle]);
     s3.puts.length = 0;
     expect((await register(args(build()), store())).code).toBe(0);
-    expect(s3.puts).toEqual([baseKey(ID)]);
+    expect(s3.puts).toEqual([bundle, baseKey(ID)]);
     expect(s3.objects.get(baseKey(ID))).toEqual(await expectedBase(await defaultAssets()));
   });
 

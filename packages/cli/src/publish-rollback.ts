@@ -138,7 +138,7 @@ async function run(
 }
 
 /** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
-function parsed<T>(usage: string, parse: () => T): T {
+export function parsed<T>(usage: string, parse: () => T): T {
   try {
     return parse();
   } catch {

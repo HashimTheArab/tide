@@ -249,9 +249,8 @@ export async function plan(
 }
 
 /**
- * Writes `reply/no-update` if needed, the release and base records, then each pointer. The certificate is re-checked
- * before a pointer only once a PUT has been attempted since the plan's final check, so every failure here follows a
- * write.
+ * Writes `reply/no-update` if needed, the records, then each pointer. The certificate is re-checked before a pointer
+ * only once a PUT has been attempted since the plan's final check, so every failure here follows a write.
  */
 export async function commit(
   { writer, noUpdate, records, pointers, checkCertificate }: Plan,
@@ -379,10 +378,7 @@ export function addKey(keys: KeyHashes, key: string, hash: string, source: strin
   }
 }
 
-/**
- * Builds and signs a new update from `draft` under a fresh ID: its release and base records and its write to
- * `target`.
- */
+/** Builds and signs a new update from `draft` under a fresh ID: its records and its write to `target`. */
 export async function compose(
   writer: Writer,
   draft: DraftRecord,

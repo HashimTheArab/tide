@@ -17,13 +17,13 @@ import {
 
 import type { Bucket } from "./bucket.ts";
 import type { Env } from "./keys.ts";
-import type { Platform } from "./publish-record.ts";
 import type { PublishOptions, WriteStep } from "./publish.ts";
 import { member } from "./keys.ts";
 import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError } from "./publish-record.ts";
-import { addKey, execute, recordedKeys } from "./publish.ts";
+import { parsed } from "./publish-rollback.ts";
+import { addKey, execute, platformsOf, recordedKeys } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const REGISTER_BUILD_USAGE =
@@ -51,7 +51,7 @@ async function prepare(
   { out, cwd = process.cwd() }: PublishOptions,
 ): Promise<WriteStep> {
   const given = parse(args);
-  replyKey("main", given.runtime, given.platform);
+  replyKey("main", given.runtime, given.platform); // Refuses a bad runtime.
   const bucket = bucketFromEnv(env);
 
   const { id, key, keys } = readManifest(resolve(cwd, given.manifest));
@@ -65,32 +65,29 @@ async function prepare(
     kind: "embedded",
     updateId: id,
     runtimeVersion: given.runtime,
-    platform: given.platform as Platform,
+    platform: given.platform,
     launchAsset: { hash: launch },
     assets,
   });
 
   const stored = await bucket.get(key, MAX_BASE_BYTES);
-  if (stored !== undefined && !same(stored.bytes, record)) {
+  if (stored !== undefined && !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);
   }
   const { keys: recorded } = await recordedKeys(bucket);
   for (const a of assets) addKey(recorded, a.key, a.hash, "this build");
   const bundleKey = `bundles/${contentKey(launch)}`;
-  const bundleStored = (await bucket.list("bundles/")).some(
-    (e) => "key" in e && e.key === bundleKey,
-  );
+  // The bundle is written first, so a stored identical base proves it is there.
+  if (stored !== undefined) return async () => out(`${key} ${bundleKey}`);
 
   return async () => {
-    // The bundle first, so a base record never names a missing bundle; a lost create stored the same bytes.
-    if (!bundleStored) {
-      await writing(
-        bundleKey,
-        () => bucket.putIfAbsent(bundleKey, bundle, assetContentType("bundle")),
-        RERUN,
-      );
-    }
-    if (stored === undefined) await createBase(bucket, key, record);
+    // A lost create stored the same content-addressed bytes.
+    await writing(
+      bundleKey,
+      () => bucket.putIfAbsent(bundleKey, bundle, assetContentType("bundle")),
+      RERUN,
+    );
+    await createBase(bucket, key, record);
     out(`${key} ${bundleKey}`);
   };
 }
@@ -99,15 +96,14 @@ async function prepare(
 async function createBase(bucket: Bucket, key: string, record: Uint8Array<ArrayBuffer>) {
   if ((await writing(key, () => bucket.putIfAbsent(key, record), RERUN)) !== undefined) return;
   const stored = await writing(key, () => bucket.get(key, MAX_BASE_BYTES), RERUN);
-  if (stored === undefined || !same(stored.bytes, record)) {
+  if (stored === undefined || !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);
   }
 }
 
 function parse(args: readonly string[]) {
-  let values;
-  try {
-    ({ values } = parseArgs({
+  const { values } = parsed(REGISTER_BUILD_USAGE, () =>
+    parseArgs({
       args: [...args],
       options: {
         platform: { type: "string", multiple: true },
@@ -118,10 +114,8 @@ function parse(args: readonly string[]) {
       },
       strict: true,
       allowPositionals: false,
-    }));
-  } catch {
-    throw new PublishError(`unrecognised arguments; ${REGISTER_BUILD_USAGE}`);
-  }
+    }),
+  );
   const once = (name: keyof typeof values) => {
     const list = values[name];
     if (list !== undefined && list.length > 1) throw new PublishError(`--${name} is given twice`);
@@ -134,7 +128,7 @@ function parse(args: readonly string[]) {
     return value;
   };
   return {
-    platform: required("platform"),
+    platform: platformsOf([required("platform")])[0]!,
     runtime: required("runtime-version"),
     manifest: required("manifest"),
     bundle: required("bundle"),
@@ -211,6 +205,3 @@ async function embeddedAssets(
     return { key, hash };
   });
 }
-
-const same = (a: Uint8Array, b: Uint8Array) =>
-  a.length === b.length && a.every((byte, i) => byte === b[i]);
