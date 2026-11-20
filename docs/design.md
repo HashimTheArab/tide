@@ -502,7 +502,40 @@ limits (96-byte index, 16 KB of blobs).
 The sink is never awaited: a sink that throws, rejects, or returns a promise that never settles leaves the reply
 unchanged, and a throw or rejection is logged by error name only, never with the point's values.
 
-A synthetic probe verifies a manifest's signature against a pinned certificate and fetches its bundle.
+### `tide probe`
+
+A synthetic check that sees what an installed build would. It is read-only and needs no store credentials and no
+signing key, so it can run from any monitor:
+
+```
+tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios|android [--app-id <id>]
+```
+
+`--server-url` is the base before `/manifest` (`https:`, or `http:` to a loopback IP literal). The pins are the
+builds' own: `TIDE_BUILD_KEYID`, and the certificate the builds embed in exactly one of `TIDE_BUILD_CERTIFICATE_FILE`
+(a path, at most 64 KiB) or `TIDE_BUILD_CERTIFICATE` (the PEM). The certificate must pass the same profile and
+validity checks as at publish, so an expired one fails the probe.
+
+The probe sends `GET /manifest` as a stock client: `expo-protocol-version: 1`, `expo-expect-signature` with the
+pinned keyid, `accept: multipart/mixed`, and no current update ID, so a pointer is served whenever one exists. It
+parses the multipart reply and verifies the `expo-signature` of the one manifest or directive part over its exact
+bytes. A directive (`rollBackToEmbedded`, or `noUpdateAvailable` from `reply/no-update`) passes on that alone. A
+manifest's `launchAsset.url` is then fetched wherever it points and its SHA-256 compared with `launchAsset.hash`;
+other assets are not fetched. `/manifest` has 10 s and the launch asset 60 s, each covering the body.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Passed; stdout names the directive, or the update ID and the launch asset hash checked |
+| 2 | Usage or configuration; nothing was sent |
+| 3 | Unreachable: a request failed or passed its deadline |
+| 4 | `/manifest` or the launch asset answered a status other than 200 (404 for the asset is 7) |
+| 5 | Unparseable reply: not `multipart/mixed`, a bad body, no single signed part, or malformed JSON |
+| 6 | Signature: missing, malformed, another keyid, or not verifying under the pinned certificate |
+| 7 | The launch asset answered 404 |
+| 8 | The launch asset's SHA-256 differs from the manifest's hash |
+
+Exit 1 is left to an uncaught error, so it always means a bug. Messages are fixed text naming the failure and at
+most a status; no header value, key or response body is printed.
 
 ## Later
 
