@@ -128,8 +128,8 @@ little-endian sign-magnitude), then three bzip2 streams: ctrl triples (add, copy
 and extra bytes copied.
 
 The CLI's `makeBsdiff(base, target)` writes them: bsdiff 4.3's matching under a work budget (past it, the rest of the
-target goes to extra), then level-9 bzip2 streams. It takes inputs of at most 64 MiB, depends only on the input
-bytes, and returns only a patch that `applyBsdiff` turns back into the target.
+target goes to extra), then level-9 bzip2 streams. It takes inputs of at most 64 MiB and depends only on the input
+bytes. It only builds: publish applies and hash-checks every patch it makes (CLI, publish step 5).
 
 Protocol `applyBsdiff(base, patch, maxOutput)` runs in the CLI, which applies and hash-checks every patch before
 upload; the server only serves stored bytes. It is stricter than reference bspatch, and accepts every patch bsdiff
@@ -309,13 +309,21 @@ Steps, in order; every refusal comes before the first write, and all replies are
    certificate invalid by either clock.
 4. Compose each platform's manifest under a fresh UUID with `createdAt = max(now, previous createdAt or commitTime
    + 1 ms)`, one clock sample for all; metadata `channel`, filter `channel="<channel>"`. Sign the exact part bytes
-   (RSA PKCS#1 v1.5, SHA-256) through the key source, and build `reply/no-update` if it is missing.
-5. (P5) Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the
-   last N updates); apply each and check its hash before upload; keep one only if it is well under the compressed
-   bundle.
-6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then
-   `reply/no-update` (a winner must verify under the identity), each release record followed by its `update` base
-   record (put-if-absent), and (P5) patches. Then,
+   (RSA PKCS#1 v1.5, SHA-256) through the key source.
+5. Build patches to each platform's new bundle from every registered base of its runtime and platform: every
+   `embedded` build plus the 5 newest `update` bases by their release record's `createdAt` (ties by update ID). An
+   `update` base without a release record refuses. Bases whose launch hash is the new bundle's get none, bases
+   sharing a launch hash share one patch, and a patch already stored is skipped. A base whose bundle is not in the
+   `bundles/` listing refuses, whatever the sizes; then a base or new bundle over 64 MiB gets no patch and is never
+   read. `makeBsdiff` builds each patch, and protocol `applyBsdiff` applies it to the base: a refusal, or a result
+   whose SHA-256 is not the new bundle's, refuses the publish. A checked patch is kept only when at most half the
+   new bundle's level-9 gzip size, the encoding every client accepts; otherwise the full bundle serves alone. Then
+   build `reply/no-update` if it is missing, and re-check the certificate by both clocks.
+6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then kept patches
+   at `patches/<from hex>/<to hex>` (put-if-absent, `no-store`; a lost race stored the same deterministic, checked
+   bytes), then `reply/no-update` (a winner must verify under the identity), then each release record followed by
+   its `update` base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
+   Then,
    per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
    its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
    an unknown outcome may be live, and the next run starts from what the bucket holds.
