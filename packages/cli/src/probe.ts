@@ -11,13 +11,14 @@ import {
   codeSigningCertificate,
   encodeSfvDictionary,
   parseMultipart,
+  parseSfvDictionary,
   readLimited,
   replyKey,
   verifyExpoSignature,
 } from "@tide/protocol";
 
 import type { Env } from "./keys.ts";
-import { member, read, readSmallFile } from "./keys.ts";
+import { isObject, member, read, readSmallFile } from "./keys.ts";
 import { urlBase } from "./publish-record.ts";
 
 /** Exit codes by failure class; 1 is left to Node's exit on an uncaught error, so it always means a bug. */
@@ -29,7 +30,7 @@ export const PROBE_EXIT = {
   signature: 6,
   bundleMissing: 7,
   bundleHash: 8,
-  runtime: 9,
+  mismatch: 9,
 } as const;
 
 export const PROBE_USAGE =
@@ -237,7 +238,16 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   }
   // A client never launches an update built for another runtime, so a misrouted pointer must fail here.
   if (member(json, "runtimeVersion") !== probe.runtimeVersion) {
-    throw new ProbeFailure("runtime", "the manifest is for another runtime version than requested");
+    throw new ProbeFailure(
+      "mismatch",
+      "the manifest is for another runtime version than requested",
+    );
+  }
+  if (excluded(res.headers.get("expo-manifest-filters"), member(json, "metadata"))) {
+    throw new ProbeFailure(
+      "mismatch",
+      "the manifest's metadata does not match expo-manifest-filters",
+    );
   }
   const target = typeof url === "string" ? URL.parse(url) : null;
   if (target === null || !(target.protocol === "https:" || target.protocol === "http:")) {
@@ -264,6 +274,31 @@ async function verify(part: Part, { key, keyId }: Probe): Promise<void> {
           : "has a malformed expo-signature",
     );
   }
+}
+
+/**
+ * True when a stock client would drop the manifest: a filter names a metadata key (iOS ignores its case) whose value
+ * differs. A missing header or metadata filters nothing.
+ */
+function excluded(header: string | null, metadata: unknown): boolean {
+  if (header === null) return false;
+  let filters;
+  try {
+    filters = parseSfvDictionary(header, "expo-manifest-filters");
+  } catch {
+    filters = undefined;
+  }
+  if (filters === undefined || [...filters.values()].some((m) => m.kind !== "string")) {
+    throw new ProbeFailure(
+      "unparseable",
+      "the reply's expo-manifest-filters is not a dictionary of strings",
+    );
+  }
+  if (!isObject(metadata)) return false;
+  return Object.entries(metadata).some(([key, value]) => {
+    const filter = filters.get(key.toLowerCase());
+    return filter?.kind === "string" && value !== filter.text;
+  });
 }
 
 /** Fetches the launch asset and compares its SHA-256, streamed, with the manifest's hash. */

@@ -46,7 +46,7 @@ export {
   storageFromEnv,
   textOf,
 } from "./s3.ts";
-export { encodeSfvDictionary } from "./sfv.ts";
+export { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
 export type { CodeSigningCertificate, Signer } from "./signature.ts";
 export {
   certificatePublicKey,

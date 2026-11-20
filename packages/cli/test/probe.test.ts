@@ -317,7 +317,35 @@ describe.each([
     });
     const requested = args(base).map((a) => (a === "1.0.0" ? "2.0.0" : a));
     expect(await tide(requested)).toEqual(
-      failure(PROBE_EXIT.runtime, "the manifest is for another runtime version than requested"),
+      failure(PROBE_EXIT.mismatch, "the manifest is for another runtime version than requested"),
+    );
+  });
+
+  test("filters that exclude the signed metadata fail as a client would", async () => {
+    const base = await proxy(store.published().base, {
+      reply: (h) => h.set("expo-manifest-filters", 'channel="beta"'),
+    });
+    expect(await tide(args(base))).toEqual(
+      failure(PROBE_EXIT.mismatch, "the manifest's metadata does not match expo-manifest-filters"),
+    );
+  });
+
+  test("a filter on a key the metadata lacks excludes nothing", async () => {
+    const base = await proxy(store.published().base, {
+      reply: (h) => h.set("expo-manifest-filters", 'channel="main", branch="beta"'),
+    });
+    expect((await tide(args(base))).code).toBe(0);
+  });
+
+  test("filters that are not a dictionary of strings are unparseable", async () => {
+    const base = await proxy(store.published().base, {
+      reply: (h) => h.set("expo-manifest-filters", "channel=main"),
+    });
+    expect(await tide(args(base))).toEqual(
+      failure(
+        PROBE_EXIT.unparseable,
+        "the reply's expo-manifest-filters is not a dictionary of strings",
+      ),
     );
   });
 
