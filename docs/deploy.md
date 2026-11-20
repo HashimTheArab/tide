@@ -119,15 +119,28 @@ separate jobs of one workflow:
     `artifact-ids` (not `name`), with `digest-mismatch: error` and `path` a fresh directory under
     `${{ runner.temp }}`, outside the Tide checkout. A single artifact by ID is "extracted directly to the specified
     path" (`actions/download-artifact` v8.0.2 README).
-  - **Head check.** On every attempt, reruns included, before downloading, a publish checks through the GitHub API
+  - **Head check.** Once, at the start of the job and before downloading, a publish checks through the GitHub API
     that its commit is still the branch head, as [`examples/deploy-workers.yml`](examples/deploy-workers.yml) does
-    for deploys. The job already holds the group's slot, so neither a late approval nor a rerun that waited behind a
-    newer writer publishes older code over newer.
+    for deploys, so neither a late approval nor a run the queue let past a newer one publishes older code over newer.
   - **KMS through OIDC.** `id-token: write` lets the job request a token; Tide needs the AWS session it is exchanged
     for. `aws-actions/configure-aws-credentials` with `role-to-assume`, `output-credentials: true` and
     `output-env-credentials: false`; then pass its `aws-access-key-id`, `aws-secret-access-key` and
     `aws-session-token` outputs as `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY` and
     `TIDE_KMS_SESSION_TOKEN`, beside `TIDE_KMS_KEY_ID` and `TIDE_KMS_REGION`.
+  - **Retry in place.** The writer command runs in a loop in one step, with the same arguments and the same
+    downloaded directory. Exit 0 or 2 ends the step with that status; exit 1 retries after a short pause. Every
+    attempt runs while the job holds the group's slot, so no other writer runs between them. `register-build` has no
+    attempt limit (`while :; do`), so only the job's `timeout-minutes` bounds it (`design.md`, One writer at a time):
+
+    ```sh
+    for attempt in 1 2 3 4 5; do
+      status=0
+      node packages/cli/src/main.ts publish --from "$RUNNER_TEMP/export" --channel main || status=$?
+      if [ "$status" -ne 1 ]; then exit "$status"; fi
+      sleep 30
+    done
+    exit 1
+    ```
 
 The writer job also reads `TIDE_BUILD_KEYID` and the build certificate, and refuses an export whose certificate or
 `keyid` is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
@@ -138,10 +151,11 @@ binding above.
 ([Workflow syntax, `concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)),
 so the head check, not the queue, keeps older code from publishing over newer.
 
-**Recovery.** A writer that exits 1 failed after writes began; one that exits 2 wrote nothing. Rerun the failed job
-(Re-run failed jobs): it downloads the same artifact by ID, publishes to the same channel and starts from what the
-bucket holds. Once the branch has moved on, its head check refuses it before any write, and the newer commit's
-writer publishes over whatever the failed run left. A writer whose pending run was cancelled is rerun by hand.
+**Recovery.** A writer retries itself in the same job while it exits 1, so it keeps the group's slot. Exit 2 wrote
+nothing. Never use Re-run on a writer job: the rerun queues again, so another writer can run before it. If a job
+still ends without exit 0 (timeout, cancellation or runner loss), start a new run at the branch head. It starts from
+what the bucket holds (`design.md`, Bucket configuration). For `register-build`, `design.md`'s key check is the
+backstop.
 
 ## Routine deploys
 

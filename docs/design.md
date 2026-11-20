@@ -240,11 +240,11 @@ concurrency group (for example `concurrency: tide-publish`) that runs them one a
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
 
-When `register-build` exits 1, the workflow keeps its exact inputs and runs it again with them, admitting no other
-writer, until it exits 0. A base PUT whose response was lost can still land; once a re-run has stored the same bytes,
-a late copy can only be refused or identical. Otherwise it could land after another writer had committed another
-SHA-256 for one of its asset keys, on a build already installed. If the rule is broken anyway, the next key check
-refuses, naming both sources.
+When `register-build` exits 1, the writer job retries it in place with its exact inputs (`deploy.md`, Publishing),
+admitting no other writer, until it exits 0. A base PUT whose response was lost can still land; once a retry has
+stored the same bytes, a late copy can only be refused or identical. Otherwise it could land after another writer had
+committed another SHA-256 for one of its asset keys, on a build already installed. If the rule is broken anyway, the
+next key check refuses, naming both sources.
 
 ### Bucket configuration
 
@@ -438,7 +438,7 @@ cannot pin another identity over its asset keys. Exit codes as publish; stdout
   release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
 - **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
   A lost base create succeeds only if the stored bytes are identical. Re-running with identical inputs writes nothing
-  and exits 0. An unknown outcome exits 1, and the re-run starts from the bucket (One writer at a time).
+  and exits 0. An unknown outcome exits 1, and the retry starts from the bucket (One writer at a time).
 
 **Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an
