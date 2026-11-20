@@ -153,6 +153,16 @@ async function noUpdateReply(
   });
 }
 
+/** A stored rollback pointer whose directive is signed by `key` under keyid main. */
+async function rollbackReply(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
+  const body = fixture("directive-rollback.json");
+  const signature = await expoSignature(body, cryptoKeySigner(key, "main"));
+  return encodeStoredReply({
+    kind: "rollBackToEmbedded",
+    ...encodeMultipart([{ name: "directive", body, signature }], BOUNDARY),
+  });
+}
+
 /** Every file under `root` with its bytes. */
 function tree(root: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -603,16 +613,57 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
   });
 
   test("key A under main passes, and so does an empty bucket", async () => {
-    for (const seed of [{ "reply/no-update": await noUpdateReply(main.keys.privateKey) }, {}]) {
+    for (const [seed, reads] of [
+      [{ "reply/no-update": await noUpdateReply(main.keys.privateKey) }, 1],
+      [{}, 2], // reply/no-update, then the empty reply/ listing.
+    ] as const) {
       const opened = await store(kind, seed);
       const { signer } = await openWriter(
         { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
         project(main.certificate),
       );
       expect(signer.keyId).toBe("main");
-      opened.unchanged(kind === "s3" ? 1 : 0);
+      opened.unchanged(kind === "s3" ? reads : 0);
     }
   });
+});
+
+describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (kind) => {
+  const open = (env: Record<string, string>) =>
+    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...env }, project(main.certificate));
+
+  test("opens to be repaired when every pointer verifies under the identity", async () => {
+    const opened = await store(kind, {
+      "reply/main/1.0.0/ios": await rollbackReply(main.keys.privateKey),
+    });
+    expect((await open(opened.env)).noUpdate).toBe(false);
+    opened.unchanged(kind === "s3" ? 3 : 0);
+  });
+
+  test.each<[string, () => Promise<Uint8Array<ArrayBuffer>>, string]>([
+    ["a pointer signed by key B", () => rollbackReply(other.keys.privateKey), OTHER_IDENTITY],
+    [
+      "an unreadable pointer",
+      () => Promise.resolve(utf8("garbage")),
+      "reply/main/1.0.0/ios is unreadable: not a stored reply",
+    ],
+  ])("%s is refused, so nothing repairs another identity's bucket", async (_, reply, message) => {
+    const opened = await store(kind, {
+      "reply/main/0/ios": await rollbackReply(main.keys.privateKey),
+      "reply/main/1.0.0/ios": await reply(),
+    });
+    await refusal(open(opened.env), message);
+    opened.unchanged(kind === "s3" ? 4 : 0);
+  });
+});
+
+test("a name outside the key grammar under reply/ refuses a bucket without reply/no-update", async () => {
+  const opened = await store("s3", { "reply/main/1 0/ios": utf8("x") });
+  await refusal(
+    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }, project(main.certificate)),
+    "reply/ is unreadable: an object name outside the key grammar",
+  );
+  opened.unchanged(2);
 });
 
 describe("KMS failures", () => {

@@ -14,6 +14,7 @@ import {
 } from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
+import type { Verdict } from "./status.ts";
 import { KMS_VARIABLES, kmsSigner } from "./keys-kms.ts";
 import { readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
@@ -64,7 +65,7 @@ const FINGERPRINT = /^(?:[0-9a-f]{64}|[0-9a-f]{2}(?::[0-9a-f]{2}){31})$/i;
 
 /**
  * Returns a signer proven against the app's certificate and the bucket it may write. Every refusal about the key or
- * the app comes before the bucket is constructed; the bucket check then only reads `reply/no-update`.
+ * the app comes before the bucket is constructed; the bucket check then only reads replies.
  */
 export async function openWriter(
   env: Env,
@@ -223,20 +224,41 @@ function verifying(inner: Signer, { key, keyId }: Identity): Signer {
 
 /**
  * Refuses a bucket whose `reply/no-update` is unreadable or signed under another identity: every build the bucket
- * serves gets that one reply, so all of them trust one certificate and key ID. Returns whether it exists.
+ * serves gets that one reply, so all of them trust one certificate and key ID. Without one, every pointer must
+ * verify instead, so only a new bucket or one of this identity's gets it repaired. Returns whether it exists.
  */
-async function checkBucket(bucket: Bucket, { key, keyId }: Identity): Promise<boolean> {
+async function checkBucket(bucket: Bucket, identity: Identity): Promise<boolean> {
   const record = await readRecord(bucket, NO_UPDATE_KEY);
-  if (record === undefined) return false;
-  if (typeof record === "string") throw new KeyError(`${NO_UPDATE_KEY} is unreadable: ${record}`);
+  if (record !== undefined) {
+    await checkSigned(NO_UPDATE_KEY, record, identity);
+    return true;
+  }
+  for (const entry of await bucket.list("reply/")) {
+    if (!("key" in entry))
+      throw new KeyError("reply/ is unreadable: an object name outside the key grammar");
+    await checkSigned(
+      entry.key,
+      (await readRecord(bucket, entry.key)) ?? "absent when read",
+      identity,
+    );
+  }
+  return false;
+}
+
+/** Refuses a record that is unreadable or whose signed part does not verify under `identity`. */
+async function checkSigned(
+  key: string,
+  record: Verdict,
+  { key: verifyKey, keyId }: Identity,
+): Promise<void> {
+  if (typeof record === "string") throw new KeyError(`${key} is unreadable: ${record}`);
   try {
-    await verifyExpoSignature(record.signed.body, record.signed.signature, key, keyId);
+    await verifyExpoSignature(record.signed.body, record.signed.signature, verifyKey, keyId);
   } catch {
     throw new KeyError(
       "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
     );
   }
-  return true;
 }
 
 /** Returns the file's bytes if it is a regular file of at most 64 KiB, else undefined. */

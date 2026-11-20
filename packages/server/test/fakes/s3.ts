@@ -36,7 +36,7 @@ export interface FakeS3 {
   setNow(ms: number | undefined): void;
   /** The next PUT to `key` finds `bytes` stored first, as another writer's would be. */
   raceOnPut(key: string, bytes: Uint8Array): void;
-  /** The next PUT to `key` commits, then its connection drops before any response. */
+  /** The next PUT to `key`, or under it when it ends in `/`, commits, then its connection drops before any response. */
   dropAfterPut(key: string): void;
   /** Calls `fn` when the next PUT to `key` reaches handling. */
   onPut(key: string, fn: () => void): void;
@@ -161,7 +161,8 @@ export async function startFakeS3(): Promise<FakeS3> {
             ),
           ),
         );
-        if (drops.delete(key)) return req.socket.destroy();
+        const dropped = [...drops].find((d) => d === key || (d.endsWith("/") && key.startsWith(d)));
+        if (dropped !== undefined && drops.delete(dropped)) return req.socket.destroy();
         return res.writeHead(200, { etag: etagOf(body) }).end();
       }
       if (req.method === "DELETE") {

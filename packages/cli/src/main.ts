@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { status } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\n${PUBLISH_USAGE}`;
+const USAGE = `usage: tide status\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}`;
+const WRITERS = { publish, rollback, republish };
 
 /** Runs one command; each command documents its exit codes, and 2 is always a usage error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
-  if (args[0] === "publish") {
-    return await publish(args.slice(1), env, {
+  const command = args[0];
+  if (command !== undefined && Object.hasOwn(WRITERS, command)) {
+    return await WRITERS[command as keyof typeof WRITERS](args.slice(1), env, {
       out: (line) => process.stdout.write(`${line}\n`),
       err: (line) => process.stderr.write(`${line}\n`),
     });

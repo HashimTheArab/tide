@@ -22,10 +22,10 @@ import type { Bucket } from "./bucket.ts";
 import type { Env, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
-import type { Platform } from "./publish-record.ts";
+import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
 import { KeyError, isObject, member, openWriter } from "./keys.ts";
-import { createdAtFloor, readPointer, writePointer } from "./pointer.ts";
+import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
 import { expoEnv, expoJson, exportFor } from "./publish-export.ts";
 import {
   PublishError,
@@ -45,28 +45,26 @@ export interface PublishOptions {
   readonly cwd?: string;
 }
 
-/** One platform's pointer, its export and the pointer state read before composing. */
-interface Target extends ExportedPlatform {
-  readonly platform: Platform;
-  readonly runtime: string;
-  readonly key: string; // The pointer.
+/** A release record before it has an update ID and a time: everything its manifest is built from. */
+type DraftRecord = Omit<ReleaseRecord, "updateId" | "createdAt">;
+
+/** One pointer's reply, built and signed before anything is written, the state it replaces and its stdout line. */
+interface PointerWrite {
+  readonly key: string;
   readonly previous: PointerState;
-}
-
-/** One target's update, built and signed in memory before anything is written. */
-interface Composed {
-  readonly updateId: string;
-  readonly createdAt: string;
   readonly reply: Uint8Array<ArrayBuffer>;
-  readonly record: Uint8Array<ArrayBuffer>;
+  readonly line: string;
 }
 
-/** Everything a publish writes, prepared with every refusal already made. */
-interface Plan {
+/** Everything a write command writes after its uploads, prepared with every refusal already made. */
+export interface Plan {
   readonly writer: Writer;
-  readonly updates: readonly (readonly [Target, Composed])[];
   readonly noUpdate: Uint8Array<ArrayBuffer> | undefined; // Absent when the bucket already holds one.
+  readonly records: readonly (readonly [string, Uint8Array<ArrayBuffer>])[];
+  readonly pointers: readonly PointerWrite[];
+  /** Refuses unless the certificate is valid by both clocks, each read afresh. */
   readonly checkCertificate: () => Promise<void>;
+  readonly upload?: () => Promise<void>; // Stores content before any record or pointer is written.
 }
 
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
@@ -85,20 +83,33 @@ export async function publish(
   env: Env,
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
-  let plan;
+  return await execute(options, () => prepare(args, env, options));
+}
+
+/**
+ * Runs a write command: 0 once every pointer is written, 2 when `prepare` refuses before any write, 1 when a write
+ * fails.
+ */
+export async function execute(
+  options: PublishOptions,
+  prepare: () => Promise<Plan>,
+): Promise<0 | 1 | 2> {
+  let ready;
   try {
-    plan = await prepare(args, env, options);
+    ready = await prepare();
   } catch (e) {
     return report(e, options, 2);
   }
   try {
-    await write(plan, options.out);
+    await ready.upload?.();
+    await commit(ready, options.out);
   } catch (e) {
     return report(e, options, 1);
   }
   return 0;
 }
 
+/** Prints a write command's own error and returns `code`; anything else is a bug and is rethrown. */
 function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
   if (
     !(
@@ -158,19 +169,51 @@ async function prepare(
   }
 
   const writer = await openWriter(env, { projectRoot, config }, { now });
-  const { bucket } = writer;
   const exported = await exportFor(projectRoot, toolEnv, exportDir, pointers);
 
-  const keys: KeyHashes = new Map();
-  await addRecordedKeys(bucket, keys);
+  const { keys } = await recordedKeys(writer.bucket);
   for (const { platform, assets } of exported) {
     for (const a of assets) addKey(keys, a.key, a.hash, `this export (${platform})`);
   }
 
-  const targets: Target[] = [];
-  for (const e of exported) targets.push({ ...e, previous: await readPointer(bucket, e.key) });
+  const { targets, local, checkCertificate } = await readTargets(writer, exported, now);
+  const records = [];
+  const writes = [];
+  for (const t of targets) {
+    const draft: DraftRecord = {
+      channel,
+      runtimeVersion: t.runtime,
+      platform: t.platform,
+      serverUrl,
+      assetUrl: assetBase,
+      launchAsset: { hash: t.bundle.hash },
+      assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
+      extra: { expoClient: expoClient as JsonObject },
+    };
+    const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
+    records.push(c.record);
+    writes.push(c.pointer);
+  }
+  return {
+    ...(await plan(writer, checkCertificate, records, writes)),
+    upload: () => uploadObjects(writer.bucket, exported),
+  };
+}
+
+/**
+ * Reads each item's pointer, then the bucket's time, refusing a local clock more than a minute from it or a
+ * certificate invalid by either clock. Returns the pointers and the one local sample every new time comes from.
+ */
+export async function readTargets<T extends { readonly key: string }>(
+  writer: Writer,
+  items: readonly T[],
+  now: () => number,
+) {
+  const { bucket } = writer;
+  const targets: (T & { readonly previous: PointerState })[] = [];
+  for (const t of items) targets.push({ ...t, previous: await readPointer(bucket, t.key) });
   const bucketTime = await bucket.time();
-  const local = now(); // The one sample every createdAt comes from.
+  const local = now();
   if (Math.abs(local - bucketTime) > MAX_SKEW_MS) {
     throw new PublishError(
       "the local clock differs from the bucket's by more than a minute: fix the clock",
@@ -178,42 +221,57 @@ async function prepare(
   }
   await writer.checkCertificate(local);
   await writer.checkCertificate(bucketTime);
-  // Valid by both clocks, each read afresh; the local one last, so expiry during the bucket read still counts.
+  // The local clock last, so expiry during the bucket read still counts.
   const checkCertificate = async () => {
     await writer.checkCertificate(await bucket.time());
     await writer.checkCertificate(now());
   };
-
-  const updates: (readonly [Target, Composed])[] = [];
-  for (const t of targets) {
-    const createdAt = createdAtFloor(local, t.previous);
-    const p = { channel, serverUrl, assetBase, expoClient: expoClient as JsonObject, createdAt };
-    updates.push([t, await compose(writer, t, p)]);
-  }
-  const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer);
-  return { writer, updates, noUpdate, checkCertificate };
+  return { targets, local, checkCertificate };
 }
 
-async function write(
-  { writer, updates, noUpdate, checkCertificate }: Plan,
+/**
+ * Ends a plan once everything is signed: builds `reply/no-update` if the bucket lacks one, then checks the
+ * certificate afresh, so an expiry before the first write is a refusal.
+ */
+export async function plan(
+  writer: Writer,
+  checkCertificate: () => Promise<void>,
+  records: Plan["records"],
+  pointers: Plan["pointers"],
+): Promise<Plan> {
+  const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer);
+  await checkCertificate();
+  return { writer, noUpdate, records, pointers, checkCertificate };
+}
+
+/**
+ * Writes `reply/no-update` if needed, the release records, then each pointer. The certificate is re-checked before a
+ * pointer only once a PUT has been attempted since the plan's final check, so every failure here follows a write.
+ */
+async function commit(
+  { writer, noUpdate, records, pointers, checkCertificate }: Plan,
   out: (line: string) => void,
 ): Promise<void> {
   const { bucket } = writer;
-  await uploadObjects(
-    bucket,
-    updates.map(([t]) => t),
-  );
-  if (noUpdate !== undefined) await ensureNoUpdate(writer, noUpdate);
-  for (const [, c] of updates) {
-    const key = recordKey(c.updateId);
-    if ((await bucket.putIfAbsent(key, c.record)) === undefined) {
-      throw new PublishError(`${key} already exists`);
-    }
+  let attempted = false;
+  if (noUpdate !== undefined) {
+    attempted = true;
+    await writing(NO_UPDATE_KEY, () => ensureNoUpdate(writer, noUpdate));
   }
-  for (const [t, c] of updates) {
-    await checkCertificate();
-    await writePointer(bucket, t.key, c.reply, t.previous);
-    out(`${t.key} ${c.updateId} ${c.createdAt}`);
+  for (const [key, bytes] of records) {
+    attempted = true;
+    const etag = await writing(
+      key,
+      () => bucket.putIfAbsent(key, bytes),
+      "no pointer names it yet",
+    );
+    if (etag === undefined) throw new PublishError(`${key} already exists`);
+  }
+  for (const p of pointers) {
+    if (attempted) await checkCertificate();
+    attempted = true;
+    await writePointer(bucket, p.key, p.reply, p.previous);
+    out(p.line);
   }
 }
 
@@ -238,21 +296,26 @@ function parse(args: readonly string[], cwd: string) {
   const { channel } = values;
   if (channel === undefined) throw new PublishError(`--channel is required; ${PUBLISH_USAGE}`);
   replyKey(channel, "1", "ios"); // Refuses a bad channel before Expo runs.
+  const exportDir = values["export-dir"];
+  return {
+    channel,
+    platforms: platformsOf(values.platform),
+    runtimeVersion: values["runtime-version"],
+    exportDir: exportDir === undefined ? undefined : resolve(cwd, exportDir),
+    projectRoot: resolve(cwd, values["project-root"] ?? "."),
+  };
+}
+
+/** Returns the `--platform` values, both by default; a repeat is refused. */
+export function platformsOf(values: readonly string[] | undefined): Platform[] {
   const platforms: Platform[] = [];
-  for (const p of values.platform ?? ["ios", "android"]) {
+  for (const p of values ?? ["ios", "android"]) {
     if (p !== "ios" && p !== "android") throw new PublishError("--platform must be ios or android");
     // Two writes over one read ETag would fail the run against its own pointer.
     if (platforms.includes(p)) throw new PublishError(`--platform ${p} is given twice`);
     platforms.push(p);
   }
-  const exportDir = values["export-dir"];
-  return {
-    channel,
-    platforms,
-    runtimeVersion: values["runtime-version"],
-    exportDir: exportDir === undefined ? undefined : resolve(cwd, exportDir),
-    projectRoot: resolve(cwd, values["project-root"] ?? "."),
-  };
+  return platforms;
 }
 
 function configuredBase(env: Env, name: string): string {
@@ -269,8 +332,13 @@ function configuredBase(env: Env, name: string): string {
   return base;
 }
 
-/** Adds every asset key of every retained release record; a record that cannot be read refuses the publish. */
-async function addRecordedKeys(bucket: Bucket, keys: KeyHashes): Promise<void> {
+/**
+ * Returns the asset keys every retained release record names, and the records stored at `wanted` keys. A record that
+ * cannot be read refuses, since the key check cannot be proven without it.
+ */
+export async function recordedKeys(bucket: Bucket, wanted: readonly string[] = []) {
+  const keys: KeyHashes = new Map();
+  const records = new Map<string, ReleaseRecord>();
   for (const entry of await bucket.list(RECORD_PREFIX)) {
     if (!("key" in entry)) {
       throw new PublishError(`${RECORD_PREFIX}: an object name outside the key grammar`);
@@ -288,7 +356,10 @@ async function addRecordedKeys(bucket: Bucket, keys: KeyHashes): Promise<void> {
       throw new PublishError(`${entry.key} is unreadable: its updateId differs from its name`);
     }
     for (const a of record.assets) addKey(keys, a.key, a.hash, entry.key);
+    // Others are dropped, so memory follows the key index rather than the release history.
+    if (wanted.includes(entry.key)) records.set(entry.key, record);
   }
+  return { keys, records };
 }
 
 /** Records that `key` names `hash`; a key seen with another hash is refused, whichever source came first. */
@@ -302,66 +373,48 @@ function addKey(keys: KeyHashes, key: string, hash: string, source: string): voi
   }
 }
 
-/** Builds and signs one target's manifest, its stored reply and its release record. */
-async function compose(
+/** Builds and signs a new update from `draft` under a fresh ID: its release record and its write to `target`. */
+export async function compose(
   writer: Writer,
-  { platform, runtime, bundle, assets }: Target,
-  p: {
-    readonly channel: string;
-    readonly serverUrl: string;
-    readonly assetBase: string;
-    readonly expoClient: JsonObject;
-    readonly createdAt: number;
-  },
-): Promise<Composed> {
+  draft: DraftRecord,
+  createdAtMs: number,
+  { key, previous }: { readonly key: string; readonly previous: PointerState },
+): Promise<{ record: Plan["records"][number]; pointer: PointerWrite }> {
   const updateId = randomUUID();
-  const date = new Date(p.createdAt);
+  const date = new Date(createdAtMs);
   const createdAt = date.toISOString();
-  const extra = { expoClient: p.expoClient };
   const manifest = buildManifest({
     id: updateId,
     createdAt: date,
-    runtimeVersion: runtime,
+    runtimeVersion: draft.runtimeVersion,
     launchAsset: {
-      hash: bundle.hash,
+      hash: draft.launchAsset.hash,
       contentType: assetContentType("bundle"),
       fileExtension: ".bundle",
-      url: launchUrl(p.serverUrl, bundle.hash),
+      url: launchUrl(draft.serverUrl, draft.launchAsset.hash),
     },
-    assets: assets.map((a) => ({
+    assets: draft.assets.map((a) => ({
       hash: a.hash,
       key: a.key,
-      contentType: assetContentType(a.ext),
-      fileExtension: `.${a.ext}`,
-      url: assetUrl(p.assetBase, a.hash),
+      contentType: assetContentType(a.fileExtension.slice(1)),
+      fileExtension: a.fileExtension,
+      url: assetUrl(draft.assetUrl, a.hash),
     })),
-    metadata: { channel: p.channel },
-    extra,
+    metadata: { channel: draft.channel },
+    extra: draft.extra,
   });
   const signature = await expoSignature(manifest, writer.signer);
   const { boundary, body } = encodeMultipart([{ name: "manifest", body: manifest, signature }]);
-  return {
+  const reply = encodeStoredReply({
+    kind: "manifest",
     updateId,
-    createdAt,
-    reply: encodeStoredReply({
-      kind: "manifest",
-      updateId,
-      boundary,
-      manifestFilters: encodeSfvDictionary({ channel: p.channel }),
-      body,
-    }),
-    record: encodeRecord({
-      updateId,
-      channel: p.channel,
-      runtimeVersion: runtime,
-      platform,
-      createdAt,
-      serverUrl: p.serverUrl,
-      assetUrl: p.assetBase,
-      launchAsset: { hash: bundle.hash },
-      assets: assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
-      extra,
-    }),
+    boundary,
+    manifestFilters: encodeSfvDictionary({ channel: draft.channel }),
+    body,
+  });
+  return {
+    record: [recordKey(updateId), encodeRecord({ ...draft, updateId, createdAt })],
+    pointer: { key, previous, reply, line: `${key} ${updateId} ${createdAt}` },
   };
 }
 
@@ -386,11 +439,7 @@ async function ensureNoUpdate(writer: Writer, bytes: Uint8Array<ArrayBuffer>): P
  * stored the same content-addressed bytes, which is accepted.
  */
 async function uploadObjects(bucket: Bucket, exported: readonly ExportedPlatform[]): Promise<void> {
-  const existing = new Set(
-    [...(await bucket.list("assets/")), ...(await bucket.list("bundles/"))].flatMap((e) =>
-      "key" in e ? [e.key] : [],
-    ),
-  );
+  const existing = new Set(await storedContent(bucket));
   const upload = async (key: string, bytes: Uint8Array<ArrayBuffer>, contentType: string) => {
     if (existing.has(key)) return;
     existing.add(key);
@@ -402,4 +451,11 @@ async function uploadObjects(bucket: Bucket, exported: readonly ExportedPlatform
       await upload(`assets/${contentKey(a.hash)}`, a.bytes, assetContentType(a.ext));
     }
   }
+}
+
+/** Returns every stored bundle and asset key: objects the server can serve. */
+export async function storedContent(bucket: Bucket): Promise<string[]> {
+  return [...(await bucket.list("assets/")), ...(await bucket.list("bundles/"))].flatMap((e) =>
+    "key" in e ? [e.key] : [],
+  );
 }

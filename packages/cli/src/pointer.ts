@@ -27,6 +27,24 @@ export function createdAtFloor(local: number, previous: PointerState): number {
 }
 
 /**
+ * Runs one write to `key`, naming the key in a bucket failure. An unknown outcome may have committed, so the message
+ * says so with `unknown`, the reader's next step.
+ */
+export async function writing<T>(
+  key: string,
+  write: () => Promise<T>,
+  unknown = "check with tide status",
+): Promise<T> {
+  try {
+    return await write();
+  } catch (e) {
+    if (!(e instanceof BucketError)) throw e;
+    const hint = e.outcome === "unknown" ? `; outcome unknown; ${unknown}` : "";
+    throw new PublishError(`${key}: ${e.message}${hint}`);
+  }
+}
+
+/**
  * Writes the pointer only over the ETag that was read, or only if still absent. A lost race fails at once and
  * leaves the other writer's reply; an unknown outcome may already be live.
  */
@@ -36,17 +54,11 @@ export async function writePointer(
   bytes: Uint8Array<ArrayBuffer>,
   previous: PointerState,
 ): Promise<void> {
-  let etag;
-  try {
-    etag =
-      previous.etag === undefined
-        ? await bucket.putIfAbsent(key, bytes)
-        : await bucket.putIfMatch(key, bytes, previous.etag);
-  } catch (e) {
-    if (!(e instanceof BucketError)) throw e;
-    const unknown = e.outcome === "unknown" ? "; outcome unknown; check with tide status" : "";
-    throw new PublishError(`${key}: ${e.message}${unknown}`);
-  }
+  const etag = await writing(key, () =>
+    previous.etag === undefined
+      ? bucket.putIfAbsent(key, bytes)
+      : bucket.putIfMatch(key, bytes, previous.etag),
+  );
   if (etag === undefined) {
     throw new PublishError(
       `${key} was changed by another writer since it was read; it keeps theirs`,
