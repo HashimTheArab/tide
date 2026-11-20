@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
 
-import type { Part } from "@tide/protocol";
+import type { Part, StoredReply } from "@tide/protocol";
 import {
   HEADER_VALUE,
   MAX_REPLY_BYTES,
@@ -10,8 +10,8 @@ import {
   assetHash,
   codeSigningCertificate,
   encodeSfvDictionary,
-  parseExpoSignature,
   parseMultipart,
+  readLimited,
   replyKey,
   verifyExpoSignature,
 } from "@tide/protocol";
@@ -40,7 +40,10 @@ const BUNDLE_TIMEOUT_MS = 60_000;
 const CERTIFICATE_FILE = "TIDE_BUILD_CERTIFICATE_FILE";
 const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
 const KEYID = "TIDE_BUILD_KEYID";
-const DIRECTIVES = new Set(["rollBackToEmbedded", "noUpdateAvailable"]);
+const DIRECTIVES = {
+  rollBackToEmbedded: true,
+  noUpdateAvailable: true,
+} satisfies Record<Exclude<StoredReply["kind"], "manifest">, true>;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** A failed probe. Its message is fixed text and statuses, never a header value, key or response body. */
@@ -204,7 +207,7 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
 
   if (part.name === "directive") {
     const type = member(json, "type");
-    if (typeof type !== "string" || !DIRECTIVES.has(type)) {
+    if (typeof type !== "string" || !Object.hasOwn(DIRECTIVES, type)) {
       throw new ProbeFailure(
         "unparseable",
         "the directive is not rollBackToEmbedded or noUpdateAvailable",
@@ -237,17 +240,17 @@ async function verify(part: Part, { key, keyId }: Probe): Promise<void> {
   const fail = (message: string) =>
     new ProbeFailure("signature", `the ${part.name} part ${message}`);
   if (part.signature === undefined) throw fail("has no expo-signature");
-  let signedBy: string;
-  try {
-    signedBy = parseExpoSignature(part.signature).keyId;
-  } catch {
-    throw fail("has a malformed expo-signature");
-  }
-  if (signedBy !== keyId) throw fail(`is signed under another keyid than ${KEYID}`);
   try {
     await verifyExpoSignature(part.body, part.signature, key, keyId);
-  } catch {
-    throw fail("does not verify under the pinned certificate");
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw fail(
+      e.field === "signature.keyid"
+        ? `is signed under another keyid than ${KEYID}`
+        : e.field === "signature.sig"
+          ? "does not verify under the pinned certificate"
+          : "has a malformed expo-signature",
+    );
   }
 }
 
@@ -298,26 +301,14 @@ async function get(
 
 /** Returns the reply body, refusing one over the size the server ever serves. */
 async function readReply(res: Response): Promise<Uint8Array<ArrayBuffer>> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
+  let body: Uint8Array<ArrayBuffer> | undefined;
   try {
-    for await (const chunk of bodyOf(res)) {
-      size += chunk.length;
-      if (size > MAX_REPLY_BYTES) break;
-      chunks.push(chunk);
-    }
+    body = await readLimited(res, MAX_REPLY_BYTES);
   } catch {
     throw new ProbeFailure("unreachable", "GET /manifest failed: the body did not arrive in time");
   }
-  // Breaking out of the loop has already cancelled the rest of the body.
-  if (size > MAX_REPLY_BYTES) {
+  if (body === undefined) {
     throw new ProbeFailure("unparseable", `the reply is over ${MAX_REPLY_BYTES} bytes`);
-  }
-  const body = new Uint8Array(size);
-  let at = 0;
-  for (const c of chunks) {
-    body.set(c, at);
-    at += c.length;
   }
   return body;
 }

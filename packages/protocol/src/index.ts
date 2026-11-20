@@ -34,6 +34,7 @@ export {
   awsFetch,
   childElements,
   parseS3Xml,
+  readLimited,
   readS3Text,
   s3Absent,
   s3BodyProblem,

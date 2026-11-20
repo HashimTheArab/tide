@@ -10,7 +10,7 @@ import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}`;
-// Commands that take arguments and read their own configuration; probe needs no store.
+// Commands that parse arguments and read their own configuration.
 const COMMANDS = { publish, rollback, republish, "register-build": registerBuild, probe };
 const READERS = { status, storage };
 
