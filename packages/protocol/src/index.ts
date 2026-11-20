@@ -11,6 +11,7 @@ export { HEADER_VALUE, encodeMultipart, parseMultipart } from "./multipart.ts";
 export type { StoredReply } from "./reply.ts";
 export {
   MAX_FILTERS_BYTES,
+  LEGACY_MAP_KEY,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   decodeStoredReply,

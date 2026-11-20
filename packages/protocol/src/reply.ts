@@ -24,6 +24,8 @@ type Kind = StoredReply["kind"];
 
 /** The key of the signed noUpdateAvailable reply served when no pointer applies. */
 export const NO_UPDATE_KEY = "reply/no-update";
+/** The content keys that URLs published by earlier servers name, written by the legacy import. */
+export const LEGACY_MAP_KEY = "legacy/map.json";
 /** The largest record the server reads; encode refuses a larger one. */
 export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 /** The longest `expo-manifest-filters` value, well under the smallest client header budget. */
@@ -143,7 +145,14 @@ export function replyKey(channel: string, runtimeVersion: string, platform: stri
  * no two keys share a path on a case-insensitive filesystem and no name collides with `reply/no-update`.
  */
 export function diskPath(key: string): string {
-  if (key === NO_UPDATE_KEY || CONTENT_KEY.test(key) || RECORD_KEY.test(key)) return key;
+  if (
+    key === NO_UPDATE_KEY ||
+    key === LEGACY_MAP_KEY ||
+    CONTENT_KEY.test(key) ||
+    RECORD_KEY.test(key)
+  ) {
+    return key;
+  }
   const [prefix, channel = "", runtime = "", platform = "", ...rest] = key.split("/");
   if (prefix !== "reply" || rest.length > 0) throw new ProtocolError("key", "is not a store key");
   try {

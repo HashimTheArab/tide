@@ -1,11 +1,12 @@
 import type { JsonObject } from "@tide/protocol";
 import { MAX_REPLY_BYTES, ProtocolError, assetHash, contentKey, replyKey } from "@tide/protocol";
 
+import type { Bucket } from "./bucket.ts";
 import { isKey } from "./bucket.ts";
 import { isObject } from "./keys.ts";
 import { isTime } from "./status.ts";
 
-/** A write command's refusal or failure. Its message names keys, variables and rules, never stored data. */
+/** A command's refusal or failure. Its message names keys, variables and rules, never stored data. */
 export class PublishError extends Error {
   constructor(message: string) {
     super(message);
@@ -81,6 +82,10 @@ export function encodeRecord(record: ReleaseRecord): Uint8Array<ArrayBuffer> {
   if (typeof r.updateId !== "string" || !isKey(recordKey(r.updateId))) {
     throw fail("updateId", "must be a lowercase UUID");
   }
+  // Checked first: replyKey coerces its arguments, and an object without a usable toString throws a TypeError.
+  for (const field of ["channel", "runtimeVersion", "platform"] as const) {
+    if (typeof r[field] !== "string") throw fail(field, "must be a string");
+  }
   replyKey(r.channel, r.runtimeVersion, r.platform);
   if (!isTime(r.createdAt))
     throw fail("createdAt", "must be an ISO 8601 UTC time with milliseconds");
@@ -142,6 +147,26 @@ export function decodeRecord(bytes: Uint8Array): ReleaseRecord {
   const canonical = encodeRecord(record);
   if (canonical.length !== bytes.length || canonical.some((b, i) => b !== bytes[i])) {
     throw new ProtocolError("record", "is not in the form tide writes");
+  }
+  return record;
+}
+
+/** Returns the release record at `key`, undefined when absent; one that does not decode or names another ID refuses. */
+export async function readReleaseRecord(
+  bucket: Pick<Bucket, "get">,
+  key: string,
+): Promise<ReleaseRecord | undefined> {
+  const object = await bucket.get(key, MAX_REPLY_BYTES);
+  if (object === undefined) return undefined;
+  let record;
+  try {
+    record = decodeRecord(object.bytes);
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw new PublishError(`${key} is unreadable: ${e.message}`);
+  }
+  if (recordKey(record.updateId) !== key) {
+    throw new PublishError(`${key} is unreadable: its updateId differs from its name`);
   }
   return record;
 }

@@ -4,7 +4,6 @@ import { parseArgs } from "node:util";
 
 import type { JsonObject } from "@tide/protocol";
 import {
-  MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   ProtocolError,
   assetContentType,
@@ -31,9 +30,9 @@ import {
   PublishError,
   RECORD_PREFIX,
   assetUrl,
-  decodeRecord,
   encodeRecord,
   launchUrl,
+  readReleaseRecord,
   recordKey,
   urlBase,
 } from "./publish-record.ts";
@@ -343,18 +342,8 @@ export async function recordedKeys(bucket: Bucket, wanted: readonly string[] = [
     if (!("key" in entry)) {
       throw new PublishError(`${RECORD_PREFIX}: an object name outside the key grammar`);
     }
-    const object = await bucket.get(entry.key, MAX_REPLY_BYTES);
-    if (object === undefined) continue;
-    let record;
-    try {
-      record = decodeRecord(object.bytes);
-    } catch (e) {
-      if (!(e instanceof ProtocolError)) throw e;
-      throw new PublishError(`${entry.key} is unreadable: ${e.message}`);
-    }
-    if (recordKey(record.updateId) !== entry.key) {
-      throw new PublishError(`${entry.key} is unreadable: its updateId differs from its name`);
-    }
+    const record = await readReleaseRecord(bucket, entry.key);
+    if (record === undefined) continue;
     for (const a of record.assets) addKey(keys, a.key, a.hash, entry.key);
     // Others are dropped, so memory follows the key index rather than the release history.
     if (wanted.includes(entry.key)) records.set(entry.key, record);

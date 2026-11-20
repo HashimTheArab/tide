@@ -24,7 +24,7 @@ import {
 import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
 import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
-import { launchUrl } from "../src/publish-record.ts";
+import { assetUrl, launchUrl } from "../src/publish-record.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("fake-expo.ts", import.meta.url));
@@ -76,7 +76,7 @@ export let main: Identity;
 export let other: Identity;
 export let s3: FakeS3;
 
-/** Generates the main and other identities and starts the S3 fake for this file, emptying the fake per test. */
+/** Generates the main and other identities and starts the S3 fake for this file, resetting the fake per test. */
 export function useFixture(): void {
   beforeAll(async () => {
     [main, other, s3] = await Promise.all([identity(), identity(), startFakeS3()]);
@@ -85,9 +85,7 @@ export function useFixture(): void {
     await s3.close();
   });
   beforeEach(() => {
-    s3.objects.clear();
-    s3.puts.length = 0;
-    s3.setNow(undefined);
+    s3.reset();
   });
 }
 
@@ -235,8 +233,20 @@ export async function signedManifest(objects: Objects, key: string) {
   return { reply, manifest };
 }
 
-/** A pointer reply signed by `by`'s key: a manifest created at `time`, or a rollback committed then. */
-export async function seededPointer(kind: "manifest" | "rollback", time: number, by = main) {
+/** What a seeded manifest serves: its launch bundle's bytes and URL shape, and its assets' bytes. */
+interface Served {
+  readonly launch?: Uint8Array<ArrayBuffer>;
+  readonly launchUrl?: (hash: string) => string;
+  readonly assets?: readonly Uint8Array<ArrayBuffer>[];
+}
+
+/** A pointer reply signed by `by`'s key: a manifest created at `time` serving `served`, or a rollback committed then. */
+export async function seededPointer(
+  kind: "manifest" | "rollback",
+  time: number,
+  by = main,
+  served: Served = {},
+) {
   const signer = cryptoKeySigner(by.keys.privateKey, "main");
   if (kind === "rollback") {
     const body = buildRollBackToEmbedded({ commitTime: new Date(time) });
@@ -245,8 +255,15 @@ export async function seededPointer(kind: "manifest" | "rollback", time: number,
     ]);
     return encodeStoredReply({ kind: "rollBackToEmbedded", ...multipart });
   }
-  const hash = await sha256Base64Url(utf8("seeded"));
+  const hash = await sha256Base64Url(served.launch ?? utf8("seeded"));
   const id = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
+  const assets = [];
+  for (const bytes of served.assets ?? []) {
+    const assetHash = await sha256Base64Url(bytes);
+    const key = createHash("md5").update(bytes).digest("hex");
+    const url = assetUrl(ASSET_URL, assetHash);
+    assets.push({ hash: assetHash, key, contentType: "image/png", fileExtension: ".png", url });
+  }
   const body = buildManifest({
     id,
     createdAt: new Date(time),
@@ -255,9 +272,9 @@ export async function seededPointer(kind: "manifest" | "rollback", time: number,
       hash,
       contentType: "application/javascript",
       fileExtension: ".bundle",
-      url: launchUrl(SERVER_URL, hash),
+      url: (served.launchUrl ?? ((h) => launchUrl(SERVER_URL, h)))(hash),
     },
-    assets: [],
+    assets,
     metadata: { channel: "main" },
     extra: {},
   });
