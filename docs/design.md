@@ -379,11 +379,12 @@ publish; stdout `bases/<id> bundles/<64 hex>`.
   client has. Android: `assets/app.manifest` and `assets/index.android.bundle` from the built APK (`base/assets/`
   in an AAB), and `--assets-dir app/build/generated/res/react/<variant>` from the same Gradle run. Build clean or
   with `--rerun-tasks`: `create<Variant>UpdatesResources` does not track JS sources, so an incremental build can
-  pack a new bundle beside the previous build's manifest, which registration then refuses. iOS: the
-  `EXUpdates.bundle/app.manifest` inside the built `.app` (under `Frameworks/EXUpdates.framework/` with
-  `use_frameworks!`), which the client reads before any root-level `app.manifest`, with `main.jsbundle` and
-  `assets/`; when images are compiled into an asset catalog (`RNAssets.xcassets`), pass the same build's Metro asset
-  files from before catalog compilation instead.
+  pack a new bundle beside the previous build's manifest. The manifest names no bundle hash, so unless that ID is
+  already registered, registration accepts the pair and every patch from it fails on installs of the earlier build.
+  iOS: `main.jsbundle`, `assets/` and the manifest the client loads from the built `.app`: `app.manifest` in the
+  `EXUpdates.bundle` beside the `EXUpdates` code (the `.app` root, since Expo links `EXUpdates` statically), else the
+  `.app` root's own `app.manifest`. When images are compiled into an asset catalog (`RNAssets.xcassets`), pass the
+  same build's Metro asset files from before catalog compilation instead.
 - The update ID is the manifest's `id`, a lowercase UUID. Each manifest asset's key is its `packagerHash`
   (32 lowercase hex): the MD5 of the source file. Every regular file under `--assets-dir` (symlinks and other types
   skipped) is MD5-hashed, and the file matching each key gives its SHA-256. Files are found by content, never by
