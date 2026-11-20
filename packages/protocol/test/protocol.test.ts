@@ -15,7 +15,6 @@ import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   MAX_BASE_BYTES,
   MAX_FILTERS_BYTES,
-  MAX_PATCH_OUTPUT,
   MAX_REPLY_BYTES,
   LEGACY_MAP_KEY,
   NO_UPDATE_KEY,
@@ -1989,7 +1988,7 @@ describe("base record", () => {
       "record",
       "is not in the form",
     ],
-    ["an extra key", update.replace(/}$/, ',"note":"x"}'), "note", "is not a field"],
+    ["an extra key", update.replace(/}$/, ',"note":"x"}'), "record", "is not in the form"],
     ["a missing key", update.replace(',"platform":"ios"', ""), "platform", ""],
     ["a trailing newline", `${update}\n`, "record", "is not in the form"],
     ["inner whitespace", update.replace('"version":1,', '"version": 1,'), "record", "is not in"],
@@ -2009,8 +2008,20 @@ describe("base record", () => {
       "",
     ],
     ["an unknown kind", update.replace('"update"', '"build"'), "kind", ""],
-    ["an update with assets", update.replace(/}$/, ',"assets":[]}'), "assets", "is not a field"],
-    ["an embedded build without assets", emb.replace(/,"assets":.*}$/, "}"), "assets", "missing"],
+    ["an update with assets", update.replace(/}$/, ',"assets":[]}'), "record", "is not in the"],
+    [
+      "an extra launchAsset key",
+      update.replace(`"hash":"${LAUNCH_HASH}"`, `"hash":"${LAUNCH_HASH}","x":1`),
+      "record",
+      "is not in the form",
+    ],
+    [
+      "an extra asset key",
+      emb.replace(`{"key":"ab12","hash":"${PNG_HASH}"`, `{"key":"ab12","hash":"${PNG_HASH}","x":1`),
+      "record",
+      "is not in the form",
+    ],
+    ["an embedded build without assets", emb.replace(/,"assets":.*}$/, "}"), "assets", "an array"],
     [
       "unsorted assets",
       emb.replace('{"key":"Ab12"', '{"key":"zz","hash":"' + PNG_HASH + '"},{"key":"Ab12"'),
@@ -2078,7 +2089,6 @@ describe("base record", () => {
     ],
     ["assets that are not an array", {}, "assets", "must be an array"],
     ["an asset that is not an object", ["a"], "assets[0]", "must be an object"],
-    ["an asset with an extra field", [{ key: "a", hash: PNG_HASH, x: 1 }], "assets[0].x", ""],
     ["a bad asset key", [{ key: "a.b", hash: PNG_HASH }], "assets[0].key", ""],
     ["an asset without a hash", [{ key: "a" }], "assets[0].hash", ""],
     [
@@ -2094,12 +2104,8 @@ describe("base record", () => {
   test.each<[string, Record<string, unknown>, string]>([
     ["a numeric runtime version", { runtimeVersion: 1 }, "runtimeVersion"],
     ["a launch asset that is not an object", { launchAsset: "x" }, "launchAsset"],
-    ["a launch asset with an extra field", { launchAsset: { hash: LAUNCH_HASH, url: "x" } }, ""],
   ])("encode refuses %s", async (_, change, field) => {
-    await rejects(
-      () => encodeBaseRecord(loose({ ...UPDATE, ...change })),
-      field || "launchAsset.url",
-    );
+    await rejects(() => encodeBaseRecord(loose({ ...UPDATE, ...change })), field);
   });
 
   test(`decode(encode(r)) sorts assets and collapses repeats (seed ${seed})`, () => {
@@ -2156,6 +2162,7 @@ describe("base record", () => {
 });
 
 describe("applyBsdiff", () => {
+  const MAX_OUTPUT = 128 * 1024 * 1024;
   const sha256 = async (bytes: Uint8Array<ArrayBuffer>) =>
     hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
   const GOLDEN = ["text", "binary", "identical", "empty-base", "empty-target"];
@@ -2186,7 +2193,7 @@ describe("applyBsdiff", () => {
     const out = applyBsdiff(
       fixture("patch-text.base"),
       fixture("patch-text-extra-group.bsdiff"),
-      MAX_PATCH_OUTPUT,
+      MAX_OUTPUT,
     );
     expect(await sha256(out)).toBe(await sha256(fixture("patch-text.target")));
   });
@@ -2198,7 +2205,7 @@ describe("applyBsdiff", () => {
     ["negative-new-size", "patch", "has a negative output size"],
     ["ctrl-len-past-patch", "patch", "is shorter than its header's block lengths"],
     ["length-2-53", "patch", "has a diff length of 2^53 or more"],
-    ["oversize-new-size", "patch", `declares an output over ${MAX_PATCH_OUTPUT} bytes`],
+    ["oversize-new-size", "patch", `declares an output over ${MAX_OUTPUT} bytes`],
     ["negative-add", "patch.ctrl", "has a negative length"],
     ["negative-zero-seek", "patch.ctrl", "has a negative zero"],
     ["add-past-output", "patch.ctrl", "adds past the output's end"],
@@ -2218,19 +2225,8 @@ describe("applyBsdiff", () => {
     ["second-stream", "patch.extra", "has data after the stream end"],
   ])("refuses patch-bad-%s.bsdiff", async (name, field, message) => {
     const patch = fixture(`patch-bad-${name}.bsdiff`);
-    await rejects(
-      () => applyBsdiff(fixture("patch-text.base"), patch, MAX_PATCH_OUTPUT),
-      field,
-      message,
-    );
+    await rejects(() => applyBsdiff(fixture("patch-text.base"), patch, MAX_OUTPUT), field, message);
   });
-
-  test.each([MAX_PATCH_OUTPUT + 1, Number.MAX_SAFE_INTEGER, -1, 1.5, Number.NaN])(
-    "refuses maxOutput %d before reading the patch",
-    async (max) => {
-      await rejects(() => applyBsdiff(new Uint8Array(), new Uint8Array(), max), "maxOutput");
-    },
-  );
 
   /** bspatch's loop over KNOWN_PATCH, written out for one base. */
   function knownTarget(base: Uint8Array): Uint8Array {
@@ -2285,7 +2281,7 @@ describe("applyBsdiff", () => {
               ? join([patch.subarray(0, i), new Uint8Array([mask]), patch.subarray(i)])
               : patch.slice(0, i);
         try {
-          expect(applyBsdiff(fixture(`patch-${n}.base`), edited, MAX_PATCH_OUTPUT)).toBeInstanceOf(
+          expect(applyBsdiff(fixture(`patch-${n}.base`), edited, MAX_OUTPUT)).toBeInstanceOf(
             Uint8Array,
           );
         } catch (e) {

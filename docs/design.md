@@ -131,7 +131,7 @@ Protocol `applyBsdiff(base, patch, maxOutput)` runs in the CLI, which applies an
 upload; the server only serves stored bytes. It is stricter than reference bspatch, and accepts every patch bsdiff
 writes:
 
-- `maxOutput` is at most 128 MiB; a larger declared output is refused before anything is allocated. Header lengths
+- A declared output over `maxOutput` is refused before anything is allocated. Header lengths
   are non-negative and below 2^53, and the ctrl and diff blocks fit in the patch.
 - Each triple is checked before it is used: add and copy are non-negative, no value is negative zero or 2^53 or more,
   writes stay inside the output, reads stay inside the base (bspatch skips adds outside it; bsdiff never writes one),

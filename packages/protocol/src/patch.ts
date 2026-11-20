@@ -1,7 +1,7 @@
 import { bunzip2 } from "./bzip2.ts";
 import { ProtocolError, assetHash } from "./hash.ts";
-import { ASSET_KEY, UUID } from "./manifest.ts";
-import { checkName } from "./reply.ts";
+import { ASSET_KEY } from "./manifest.ts";
+import { checkName, checkUpdateId } from "./reply.ts";
 
 /** One asset of an embedded build, as the asset key identity check compares it. */
 export interface BaseAsset {
@@ -23,14 +23,8 @@ export type BaseRecord =
 
 /** The largest base record the server reads; encode refuses a larger one. */
 export const MAX_BASE_BYTES = 256 * 1024;
-/** The largest output `applyBsdiff` may be allowed to build. */
-export const MAX_PATCH_OUTPUT = 128 * 1024 * 1024;
 
 const VERSION = 1;
-const FIELDS = {
-  update: ["kind", "updateId", "runtimeVersion", "platform", "launchAsset"],
-  embedded: ["kind", "updateId", "runtimeVersion", "platform", "launchAsset", "assets"],
-} as const;
 
 const encoder = new TextEncoder();
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -72,15 +66,7 @@ function encode(input: unknown): { record: BaseRecord; bytes: Uint8Array<ArrayBu
   if (kind !== "update" && kind !== "embedded") {
     throw new ProtocolError("kind", "must be update or embedded");
   }
-  for (const key of Object.keys(input)) {
-    if (!(FIELDS[kind] as readonly string[]).includes(key)) {
-      throw new ProtocolError(key, `is not a field of an ${kind} base`);
-    }
-  }
   const { updateId, runtimeVersion, platform, launchAsset } = input;
-  if (typeof updateId !== "string" || !UUID.test(updateId)) {
-    throw new ProtocolError("updateId", "must be a lowercase UUID");
-  }
   if (typeof runtimeVersion !== "string") {
     throw new ProtocolError("runtimeVersion", "must be a string");
   }
@@ -89,11 +75,8 @@ function encode(input: unknown): { record: BaseRecord; bytes: Uint8Array<ArrayBu
     throw new ProtocolError("platform", "must be ios or android");
   }
   if (!isObject(launchAsset)) throw new ProtocolError("launchAsset", "must be an object");
-  for (const key of Object.keys(launchAsset)) {
-    if (key !== "hash") throw new ProtocolError(`launchAsset.${key}`, "is not a field");
-  }
   const fields = {
-    updateId,
+    updateId: checkUpdateId(updateId),
     runtimeVersion,
     platform,
     launchAsset: { hash: assetHash(launchAsset.hash, "launchAsset.hash") },
@@ -109,22 +92,17 @@ function encode(input: unknown): { record: BaseRecord; bytes: Uint8Array<ArrayBu
 
 /** Returns a sorted copy of the embedded assets, exact repeats collapsed. */
 function baseAssets(input: Record<string, unknown>): BaseAsset[] {
-  if (!Object.hasOwn(input, "assets")) throw new ProtocolError("assets", "is missing");
   const assets = input.assets;
   if (!Array.isArray(assets)) throw new ProtocolError("assets", "must be an array");
   const entries = assets.map((a: unknown, i) => {
     const field = `assets[${i}]`;
     if (!isObject(a)) throw new ProtocolError(field, "must be an object");
-    for (const key of Object.keys(a)) {
-      if (key !== "key" && key !== "hash")
-        throw new ProtocolError(`${field}.${key}`, "is not a field");
-    }
     if (typeof a.key !== "string" || !ASSET_KEY.test(a.key)) {
       throw new ProtocolError(`${field}.key`, "must be 1 to 64 of A-Z, a-z, 0-9, _ and -");
     }
     return { key: a.key, hash: assetHash(a.hash, `${field}.hash`), i };
   });
-  entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i));
+  entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const out: BaseAsset[] = [];
   // iOS keeps asset files on a case-insensitive disk, so keys equal but for case must name the same bytes.
   const folded = new Map<string, string>();
@@ -150,9 +128,6 @@ export function applyBsdiff(
   patch: Uint8Array,
   maxOutput: number,
 ): Uint8Array<ArrayBuffer> {
-  if (!Number.isSafeInteger(maxOutput) || maxOutput < 0 || maxOutput > MAX_PATCH_OUTPUT) {
-    throw new ProtocolError("maxOutput", `must be an integer from 0 to ${MAX_PATCH_OUTPUT}`);
-  }
   if (patch.length < 32) throw new ProtocolError("patch", "is shorter than its 32-byte header");
   if (String.fromCharCode(...patch.subarray(0, 8)) !== "BSDIFF40") {
     throw new ProtocolError("patch", "does not start with BSDIFF40");

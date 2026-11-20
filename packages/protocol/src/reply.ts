@@ -204,7 +204,7 @@ function checkKind(kind: unknown): Kind {
   return kind as Kind;
 }
 
-function checkUpdateId(value: unknown): string {
+export function checkUpdateId(value: unknown): string {
   if (typeof value !== "string" || !UUID.test(value)) {
     throw new ProtocolError("updateId", "must be a lowercase UUID");
   }
