@@ -59,13 +59,15 @@ Once per environment, in this order.
    `https://assets.example.com/assets/<hex>` then serves the object `assets/<hex>`. Every object in the bucket
    becomes public; Tide stores nothing secret there. Connect it before the first publish.
 5. **Signing identity.** A self-signed certificate per environment with its `keyid` (`design.md`, Keys). Tide
-   rejects unsigned apps. The key goes only to the publisher, as `TIDE_SIGNING_KEY_FILE`, `TIDE_SIGNING_KEY` or
-   `TIDE_KMS_KEY_ID`, with `TIDE_BUILD_KEYID` and `TIDE_BUILD_CERTIFICATE_SHA256` pinning the builds' identity.
+   rejects unsigned apps. The key goes only to the writer job (Publishing), as `TIDE_SIGNING_KEY_FILE`,
+   `TIDE_SIGNING_KEY` or `TIDE_KMS_KEY_ID`. Every writer, `register-build` included, and `tide probe` read the
+   builds' identity from `TIDE_BUILD_KEYID` and one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`,
+   taken from a shipped binary.
 6. **Publisher credential.** An R2 Object Read & Write token scoped to the bucket, given to the publish workflow as
    the five `TIDE_S3_*` variables in a protected CI secret (`design.md`, Bucket configuration). The publisher's
    `TIDE_SERVER_URL` is the server origin and `TIDE_ASSET_URL` the asset origin.
-7. **Check before shipping builds.** Run `tide publish` (an empty bucket answers `/manifest` with 503; publish also
-   writes `reply/no-update`), then `tide probe` with the builds' channel and runtime version for each published
+7. **Check before shipping builds.** Run `tide export`, then `tide publish --from` (an empty bucket answers
+   `/manifest` with 503; publish also writes `reply/no-update`), then `tide probe` with the builds' channel and runtime version for each published
    platform, and expect a manifest each time. The probe does not fetch non-launch assets, so fetch one asset URL
    from the served manifest too. Only then ship builds pointing at the origins.
 
@@ -76,7 +78,7 @@ above, the production app config holds:
 
 ```js
 {
-  runtimeVersion: "1.0.0", // Or a policy; it must resolve to the runtime tide publish targets.
+  runtimeVersion: "1.0.0", // Or a policy; it must resolve to the runtime tide export records.
   updates: {
     url: "https://updates.example.com/manifest",
     requestHeaders: { "expo-channel-name": "main" }, // The channel tide publish --channel writes.
@@ -88,6 +90,62 @@ above, the production app config holds:
 
 A request without `expo-channel-name` is a 400. A runtime with nothing published gets a signed `noUpdateAvailable`,
 so a mismatched runtime looks healthy until the probe, run with the build's own values, finds no manifest.
+
+## Publishing
+
+Only `tide export` runs project code (the app config, Babel and Metro), and it reads no credential. The writers
+(`publish --from`, `rollback`, `republish`, `register-build`) start no process. A child of a process holding the key
+could read it as the same user, so the two run in separate jobs of one workflow:
+
+- **Export job.** A GitHub-hosted runner; `permissions: contents: read`; no `environment`, no `secrets.*`, no
+  `id-token`, and no credential in its environment, files or profiles. It checks out the app and Tide at a pinned
+  commit, runs `tide export --out <dir>`, and uploads `<dir>` with `actions/upload-artifact`, exposing its
+  `artifact-id` output as a job output. Expo's tools see only `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAGE`, `LC_*`,
+  `TZ`, `CI`, `EXPO_PUBLIC_*` and each `--pass-env` name; `TIDE_*`, `AWS_*` and `ACTIONS_*` cannot be passed.
+- **Writer job.** `needs` the export job and runs in the protected environment holding the key and bucket secrets.
+  - **Runner.** GitHub-hosted, or a self-hosted runner freshly provisioned or reset for each job: a just-in-time
+    registration limits a runner to one job, but a reused host keeps files and processes from earlier ones. Never a
+    runner that could have run an export job. GitHub, Security hardening: hosted runners "execute code within
+    ephemeral and clean isolated virtual machines"; self-hosted runners "can be persistently compromised by untrusted
+    code in a workflow".
+  - **Trusted CLI.** It checks out only Tide, at a commit SHA written in the workflow file (never one the export job
+    chose), with `persist-credentials: false`. Node comes from that checkout's `.nvmrc` and pnpm from its
+    `package.json` (`pnpm/action-setup` with `package_json_file`; Node 26 does not bundle Corepack). From that
+    checkout it runs `pnpm install --frozen-lockfile --prod --ignore-scripts --filter "@tide/cli..."`, then
+    `node packages/cli/src/main.ts publish --from <path> --channel <name>`. The app is never checked out; it is
+    present only as artifact data.
+  - **Binding.** A step fails when the export job's `artifact-id` is empty. `actions/download-artifact` takes it as
+    `artifact-ids` (not `name`), with `digest-mismatch: error` and `path` a fresh directory under
+    `${{ runner.temp }}`, outside the Tide checkout. A single artifact by ID is "extracted directly to the specified
+    path" (`actions/download-artifact` v8.0.2 README).
+  - **Head check.** On a run's first attempt, before downloading, a publish checks through the GitHub API that its
+    commit is still the branch head, as [`examples/deploy-workers.yml`](examples/deploy-workers.yml) does for
+    deploys, so a late approval cannot publish older code over newer.
+  - **KMS through OIDC.** `id-token: write` lets the job request a token; Tide needs the AWS session it is exchanged
+    for. `aws-actions/configure-aws-credentials` with `role-to-assume`, `output-credentials: true` and
+    `output-env-credentials: false`; then pass its `aws-access-key-id`, `aws-secret-access-key` and
+    `aws-session-token` outputs as `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY` and
+    `TIDE_KMS_SESSION_TOKEN`, beside `TIDE_KMS_KEY_ID` and `TIDE_KMS_REGION`.
+
+The writer job also reads `TIDE_BUILD_KEYID` and the build certificate, and refuses an export whose certificate or
+`keyid` is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
+binding above.
+
+**One concurrency group.** Every writer for a bucket, in every workflow, is a job in one repository with the same
+`concurrency` group, `cancel-in-progress: false` and `queue: max`; the export job is outside it. GitHub, Workflow
+syntax (`concurrency`, checked 2026-11-20): a job waits while another "using the same concurrency group in the
+repository" is in progress, so the same name in two repositories serialises nothing. By default "any existing
+`pending` job or workflow in the same concurrency group will be canceled"; `queue: max` keeps up to 100 pending and
+"is not allowed" with `cancel-in-progress: true`. Pending runs start first in, first out, but "ordering is not
+guaranteed", so the head check, not the queue, keeps an older commit from publishing over a newer one. The page
+asks for names unique across workflows so one workflow cannot cancel another's runs; sharing one group is the
+point here, and with `cancel-in-progress: false` and `queue: max` a writer only waits.
+
+**Recovery.** A writer that exits 1 failed after writes began; one that exits 2 wrote nothing. Rerun the failed job
+(Re-run failed jobs) before any other writer runs: it downloads the same artifact by ID and publishes to the same
+channel, and starts from what the bucket holds. The rerun skips the head check, so it is not refused because the
+branch moved on; never rerun a writer once a later one has completed, since that would publish older code over
+newer. A writer whose pending run was cancelled is rerun by hand.
 
 ## Routine deploys
 
