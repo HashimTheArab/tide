@@ -283,6 +283,21 @@ describe("on S3", () => {
     });
   });
 
+  test("a prefix with more objects than a call takes arguments is reported in full", async () => {
+    s3.listPage(1000); // S3's own page size.
+    const keys = Array.from(
+      { length: 130_000 },
+      (_, i) => `assets/${i.toString(16).padStart(64, "0")}`,
+    );
+    const empty = new Uint8Array();
+    for (const key of keys) s3.objects.set(key, empty);
+    const { code, stdout, stderr } = await storage(STORES.s3());
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    const expected = `${keys.map((k) => `${k} 0\n`).join("")}${SUMMARY(keys.length, 0)}\n`;
+    expect(stdout.length).toBe(expected.length);
+    expect(stdout === expected).toBe(true); // A boolean, so a failure does not diff megabytes.
+  });
+
   test("a record committed after updates/ is listed protects nothing in that run, and does in the next", async () => {
     const store = STORES.s3();
     const app = project();
@@ -314,6 +329,19 @@ describe("on disk", () => {
       await storage(store),
       `assets/ cannot be listed: disk bucket ${store.root} failed: ENOTDIR`,
     );
+  });
+
+  test("a record stored under a directory named in another case still protects its content", async () => {
+    const store = STORES.disk();
+    // On a case-insensitive volume the writer accepts this directory as updates/.
+    mkdirSync(join(store.root, "Updates"));
+    const args = ["--channel", "main", "--platform", "ios", "--runtime-version", "1.0.0"];
+    await write(
+      "publish",
+      [...args, "--export-dir", EXPORT, "--project-root", project().root],
+      env(store.env),
+    );
+    expect(await storage(store)).toEqual({ code: 0, stdout: `${SUMMARY(0, 0)}\n`, stderr: "" });
   });
 
   test("a directory at a record key fails the report", async () => {

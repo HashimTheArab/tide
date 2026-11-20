@@ -41,8 +41,9 @@ export async function storage(
  * record, which is retained, so pointers add no root.
  */
 async function scan(bucket: Pick<Bucket, "get" | "list">): Promise<ListEntry[]> {
-  const listed: ListEntry[] = [];
-  for (const prefix of REPORTED) listed.push(...(await listing(bucket, prefix)));
+  let listed: ListEntry[] = [];
+  // Not push(...): a prefix can hold more entries than a call takes arguments.
+  for (const prefix of REPORTED) listed = listed.concat(await listing(bucket, prefix));
   const referenced = new Set(await legacyKeys(bucket));
   for (const e of listed) {
     if (!("key" in e) || !e.key.startsWith(RECORD_PREFIX)) continue;

@@ -42,6 +42,8 @@ export interface FakeS3 {
   behave(key: string, behaviour: Behaviour): void;
   failAll(failure: Failure | undefined): void;
   listFault(fault: ListFault | undefined): void;
+  /** Keys per page from now on, up to the request's max-keys; undefined restores `LIST_PAGE`. */
+  listPage(size: number | undefined): void;
   setNow(ms: number | undefined): void;
   /** Listings report `text` as `key`'s Size, so a huge size needs no body. */
   listSize(key: string, text: string): void;
@@ -69,7 +71,7 @@ const NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/";
  * which needs no signature.
  */
 export async function startFakeS3(): Promise<FakeS3> {
-  const objects = new Map<string, Uint8Array>();
+  const objects = new Objects();
   // Content-Type and Cache-Control from each PUT, served on GET as a bucket's public domain would.
   const headersOf = new WeakMap<Uint8Array, Record<string, string>>();
   const puts: string[] = [];
@@ -94,6 +96,14 @@ export async function startFakeS3(): Promise<FakeS3> {
   let requests = 0;
   let failure: Failure | undefined;
   let fault: ListFault | undefined;
+  let pageSize = LIST_PAGE;
+  let sorted: { readonly version: number; readonly keys: readonly string[] } | undefined;
+  const sortedKeys = () => {
+    if (sorted?.version !== objects.version) {
+      sorted = { version: objects.version, keys: [...objects.keys()].sort(byteOrder) };
+    }
+    return sorted.keys;
+  };
   let now: number | undefined;
   const events = new Map<string, PromiseWithResolvers<void>>();
   const event = (name: FakeEvent, key: string) => {
@@ -285,11 +295,16 @@ export async function startFakeS3(): Promise<FakeS3> {
       after = issued.get(token);
       if (after === undefined) return s3Error(res, 400, "InvalidArgument");
     }
-    const keys = [...objects.keys()]
-      .filter((k) => k.startsWith(prefix) && (after === undefined || byteOrder(k, after) > 0))
-      .sort(byteOrder);
-    const page = keys.slice(0, Math.min(LIST_PAGE, maxKeys));
-    const truncated = keys.length > page.length;
+    // A prefix's keys are contiguous in byte order.
+    const keys = sortedKeys();
+    const page: string[] = [];
+    const matches = (i: number) => i < keys.length && keys[i]!.startsWith(prefix);
+    let i = Math.max(
+      bound(keys, prefix, true),
+      after === undefined ? 0 : bound(keys, after, false),
+    );
+    for (; matches(i) && page.length < Math.min(pageSize, maxKeys); i++) page.push(keys[i]!);
+    const truncated = matches(i);
     if (!truncated) {
       listHooks.get(prefix)?.();
       listHooks.delete(prefix);
@@ -355,6 +370,9 @@ export async function startFakeS3(): Promise<FakeS3> {
     listFault: (f) => {
       fault = f;
     },
+    listPage: (size) => {
+      pageSize = size ?? LIST_PAGE;
+    },
     setNow: (ms) => {
       now = ms;
     },
@@ -371,6 +389,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       behaviours = scripted();
       failure = undefined;
       fault = undefined;
+      pageSize = LIST_PAGE;
       now = undefined;
       sizes.clear();
       listHooks.clear();
@@ -438,6 +457,35 @@ async function signedCorrectly(
 const urlEncode = (s: string) => encodeURIComponent(s).replaceAll("%20", "+");
 
 const byteOrder = (a: string, b: string) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+
+/** Returns the index of the first of the sorted `keys` after `key`, or at it when `inclusive`. */
+function bound(keys: readonly string[], key: string, inclusive: boolean): number {
+  let [lo, hi] = [0, keys.length];
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const c = byteOrder(keys[mid]!, key);
+    if (c < 0 || (c === 0 && !inclusive)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** The stored objects, counting changes so a listing sorts the keys once per change, not once per page. */
+class Objects extends Map<string, Uint8Array> {
+  version = 0;
+  override set(key: string, value: Uint8Array): this {
+    this.version++;
+    return super.set(key, value);
+  }
+  override delete(key: string): boolean {
+    this.version++;
+    return super.delete(key);
+  }
+  override clear(): void {
+    this.version++;
+    super.clear();
+  }
+}
 
 function errorDocument(code: string, leak = false): string {
   // A provider's Message is free text; `leak` puts both credentials in it, which no error may repeat.

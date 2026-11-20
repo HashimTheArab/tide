@@ -270,7 +270,14 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
         const key = diskKey(path);
         // A subtree that cannot hold a match is skipped, so its failures cannot fail this listing.
         if (key === undefined && d.isDirectory()) {
-          if (reaches(path) || reaches(unescapeDiskPath(path))) walk(path);
+          const lower = path.toLowerCase();
+          if (
+            reaches(path) ||
+            reaches(unescapeDiskPath(path)) ||
+            (reaches(lower) && sameEntry(path, lower))
+          ) {
+            walk(path);
+          }
         } else found.push({ path, key });
       }
     };
@@ -308,12 +315,14 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
   function aliasOf(path: string, listed: ReadonlySet<string | undefined>): string | undefined {
     const lower = path.toLowerCase();
     const key = diskKey(lower);
-    if (key === undefined || listed.has(key)) return undefined;
+    return key !== undefined && !listed.has(key) && sameEntry(path, lower) ? key : undefined;
+  }
+
+  /** True when both paths name one directory entry, as differently cased names do on a case-insensitive volume. */
+  function sameEntry(a: string, b: string): boolean {
     try {
-      const [a, b] = [path, lower].map((p) => lstatSync(join(root, p), { throwIfNoEntry: false }));
-      return a !== undefined && b !== undefined && a.ino === b.ino && a.dev === b.dev
-        ? key
-        : undefined;
+      const [x, y] = [a, b].map((p) => lstatSync(join(root, p), { throwIfNoEntry: false }));
+      return x !== undefined && y !== undefined && x.ino === y.ino && x.dev === y.dev;
     } catch (e) {
       throw fail(`failed: ${code(e)}`);
     }

@@ -216,6 +216,15 @@ describe("disk bucket", () => {
     expect((await bucket.get(key, 10))?.bytes).toEqual(insensitive ? utf8("abc") : undefined);
   });
 
+  test("a key under a directory that opens as its prefix on a case-insensitive volume is listed", async () => {
+    const root = tempRoot();
+    const key = "updates/6f9619ff-8b86-4d01-b42d-00cf4fc964ff.json";
+    mkdirSync(join(root, "Updates"));
+    const bucket = diskBucket(root);
+    await bucket.put(key, utf8("abc"));
+    expect(await bucket.list("updates/")).toEqual([{ key, size: 3 }]);
+  });
+
   test("putIfMatch on an absent key is a lost race", async () => {
     const root = tempRoot();
     expect(await diskBucket(root).putIfMatch(KEY, utf8("x"), '"a"')).toBeUndefined();
