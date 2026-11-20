@@ -1,4 +1,5 @@
 import { ProtocolError } from "./hash.ts";
+import { UUID } from "./manifest.ts";
 import { BOUNDARY } from "./multipart.ts";
 import { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
 
@@ -38,11 +39,12 @@ const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   rollBackToEmbedded: ["version", "kind", "contentType", "body"],
   noUpdateAvailable: ["version", "kind", "contentType", "body"],
 };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** A content-addressed bundle or asset key; lowercase, so it is safe on case-insensitive disks. */
 export const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
-// A release record key, lowercase for the same reason.
+// Release record, base record and patch keys, lowercase for the same reason.
 const RECORD_KEY = new RegExp(`^updates/${UUID.source.slice(1, -1)}\\.json$`);
+const BASE_KEY = new RegExp(`^bases/${UUID.source.slice(1, -1)}$`);
+const PATCH_KEY = /^patches\/[0-9a-f]{64}\/[0-9a-f]{64}$/;
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
 // Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.
 const NAME = /^[A-Za-z0-9._+():-]{1,64}$/;
@@ -150,7 +152,9 @@ export function diskPath(key: string): string {
     key === NO_UPDATE_KEY ||
     key === LEGACY_MAP_KEY ||
     CONTENT_KEY.test(key) ||
-    RECORD_KEY.test(key)
+    RECORD_KEY.test(key) ||
+    BASE_KEY.test(key) ||
+    PATCH_KEY.test(key)
   ) {
     return key;
   }
@@ -183,7 +187,7 @@ function escapeName(name: string): string {
   return name.replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
-function checkName(value: string, field: string): void {
+export function checkName(value: string, field: string): void {
   // Dot segments would resolve in an S3 URL or a path join.
   if (!NAME.test(value) || value === "." || value === "..") {
     throw new ProtocolError(

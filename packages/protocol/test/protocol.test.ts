@@ -96,6 +96,28 @@ const PNG_HEX = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e158
 const LAUNCH_HASH = "Z3WH11U_Wifv5ipwZ31aEqIgbdrhYS4nISY3Z6YVAlQ";
 const LAUNCH_HEX = "677587d7553f5a27efe62a70677d5a12a2206ddae1612e2721263767a6150254";
 const ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
+// Base and patch key variants outside the grammar.
+const BAD_PATCH_KEYS = [
+  `bases/${ID.toUpperCase()}`,
+  `bases/${ID}.json`,
+  `bases/${ID.slice(1)}`,
+  `bases/${ID}/x`,
+  `Bases/${ID}`,
+  "bases/",
+  "bases/..",
+  "bases/../reply/no-update",
+  `patches/${PNG_HEX.toUpperCase()}/${LAUNCH_HEX}`,
+  `patches/${PNG_HEX}/${LAUNCH_HEX.toUpperCase()}`,
+  `patches/${PNG_HEX.slice(1)}/${LAUNCH_HEX}`,
+  `patches/${PNG_HEX}/${LAUNCH_HEX.slice(1)}`,
+  `patches/${PNG_HEX}/${LAUNCH_HEX}/x`,
+  `patches/${PNG_HEX}/${LAUNCH_HEX}.bsdiff`,
+  `Patches/${PNG_HEX}/${LAUNCH_HEX}`,
+  `patches/${PNG_HEX}`,
+  `patches/${PNG_HEX}/`,
+  `patches/${PNG_HEX}/../${LAUNCH_HEX}`,
+  `patches/../bundles/${PNG_HEX}`,
+];
 
 describe("hash", () => {
   test("a fixture file hashes to its SHA-256 and content key", async () => {
@@ -1598,6 +1620,8 @@ describe("stored reply", () => {
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
     ],
+    [`bases/${ID}`, `bases/${ID}`],
+    [`patches/${PNG_HEX}/${LAUNCH_HEX}`, `patches/${PNG_HEX}/${LAUNCH_HEX}`],
   ])("diskPath maps %s to %s", (key, path) => {
     expect(diskPath(key)).toBe(path);
   });
@@ -1619,6 +1643,7 @@ describe("stored reply", () => {
     "legacy/map",
     "lock",
     "",
+    ...BAD_PATCH_KEYS,
   ])("diskPath rejects %j", async (key) => {
     await rejects(() => diskPath(key), "key");
   });
@@ -1809,6 +1834,8 @@ describe("s3", () => {
     ["reply/_4dain/1_2e0_2e0/ios", "reply/Main/1.0.0/ios"],
     ["reply/main/exposdk_3a57_2e0_2e0/android", "reply/main/exposdk:57.0.0/android"],
     ["reply/no_2dupdate/1/ios", "reply/no-update/1/ios"],
+    [`bases/${ID}`, `bases/${ID}`],
+    [`patches/${PNG_HEX}/${LAUNCH_HEX}`, `patches/${PNG_HEX}/${LAUNCH_HEX}`],
   ])("diskKey maps %s back to %s", (path, key) => {
     expect(diskKey(path)).toBe(key);
     expect(diskPath(key)).toBe(path);
@@ -1823,6 +1850,7 @@ describe("s3", () => {
     ".tide/mutex.sqlite",
     "updates/x.json",
     "reply/Main/1/ios", // the key, not its path
+    `patches/${PNG_HEX}`, // a directory the disk walker descends into
   ])("diskKey rejects %j", (path) => {
     expect(diskKey(path)).toBeUndefined();
   });
