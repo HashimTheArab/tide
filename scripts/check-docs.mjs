@@ -1,4 +1,4 @@
-// Fails when docs/ holds a file outside an assets/ folder that is not an indexed markdown doc with status front matter.
+// Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status front matter.
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
     if (!entry.isDirectory()) return [path];
-    return entry.name === "assets" ? [] : walk(path);
+    return entry.name === "assets" || entry.name === "examples" ? [] : walk(path);
   });
 
 const errors = [];
@@ -19,7 +19,9 @@ for (const path of walk(docsDir)) {
   const rel = relative(docsDir, path);
   if (rel === "README.md" || rel.endsWith(".DS_Store")) continue;
   if (!rel.endsWith(".md")) {
-    errors.push(`${rel}: only markdown docs belong here; put files in an assets/ folder`);
+    errors.push(
+      `${rel}: only markdown docs belong here; put files in an assets/ or examples/ folder`,
+    );
     continue;
   }
   if (!index.includes(`](${rel})`)) {
