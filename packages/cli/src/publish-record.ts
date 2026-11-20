@@ -1,5 +1,14 @@
-import type { JsonObject } from "@tide/protocol";
-import { MAX_REPLY_BYTES, ProtocolError, assetHash, contentKey, replyKey } from "@tide/protocol";
+import type { BaseRecord, JsonObject } from "@tide/protocol";
+import {
+  MAX_BASE_BYTES,
+  MAX_REPLY_BYTES,
+  ProtocolError,
+  assetHash,
+  baseKey,
+  contentKey,
+  decodeBaseRecord,
+  replyKey,
+} from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { isKey } from "./bucket.ts";
@@ -37,6 +46,7 @@ interface RecordedAsset {
 }
 
 export const RECORD_PREFIX = "updates/";
+export const BASE_PREFIX = "bases/";
 const VERSION = 1;
 const KEY = /^[A-Za-z0-9_-]{1,64}$/;
 const FILE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/;
@@ -166,6 +176,26 @@ export async function readReleaseRecord(
     throw new PublishError(`${key} is unreadable: ${e.message}`);
   }
   if (recordKey(record.updateId) !== key) {
+    throw new PublishError(`${key} is unreadable: its updateId differs from its name`);
+  }
+  return record;
+}
+
+/** Returns the base record at `key`, undefined when absent; one that does not decode or names another ID refuses. */
+export async function readBaseRecord(
+  bucket: Pick<Bucket, "get">,
+  key: string,
+): Promise<BaseRecord | undefined> {
+  const object = await bucket.get(key, MAX_BASE_BYTES);
+  if (object === undefined) return undefined;
+  let record;
+  try {
+    record = decodeBaseRecord(object.bytes);
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw new PublishError(`${key} is unreadable: ${e.message}`);
+  }
+  if (baseKey(record.updateId) !== key) {
     throw new PublishError(`${key} is unreadable: its updateId differs from its name`);
   }
   return record;

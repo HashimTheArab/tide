@@ -5,7 +5,10 @@ import { describe, expect, test } from "vitest";
 
 import {
   NO_UPDATE_KEY,
+  baseKey,
   certificatePublicKey,
+  decodeBaseRecord,
+  encodeBaseRecord,
   decodeStoredReply,
   parseMultipart,
   s3Fetch,
@@ -30,6 +33,8 @@ import { run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
   ASSET_URL,
+  COLLIDING,
+  COLLIDING_MD5,
   EXPORT,
   IOS,
   MAIN,
@@ -55,9 +60,6 @@ import {
 } from "./publish-fixture.ts";
 
 useFixture();
-
-const MD5_COLLISION =
-  "d131dd02c5e6eec4693d9a0698aff95c2fcab58712467eab4004583eb8fb7f8955ad340609f4b30283e488832571415a085125e8f7cdc99fd91dbdf280373c5bd8823e3156348f5bae6dacd436c919c6dd53e2b487da03fd02396306d248cda0e99f33420f577ee8ce54b67080a80d1ec69821bcb6a8839396f9652b6ff72a70";
 
 /** Publishes in process to channel `main`; returns the exit code and output lines. */
 async function publishIn(
@@ -88,6 +90,13 @@ async function expectPublished(objects: Objects, key: string) {
   expect(manifest.metadata).toEqual({ channel: "main" });
   const record = decodeRecord(objects.get(`updates/${manifest.id}.json`)!);
   expect(record.updateId).toBe(manifest.id);
+  expect(decodeBaseRecord(objects.get(baseKey(manifest.id))!)).toEqual({
+    kind: "update",
+    updateId: manifest.id,
+    runtimeVersion: manifest.runtimeVersion,
+    platform: key.split("/")[3],
+    launchAsset: { hash: manifest.launchAsset.hash },
+  });
   expect(record.createdAt).toBe(manifest.createdAt);
   expect(record.extra).toEqual(manifest.extra);
   expect(launchUrl(record.serverUrl, record.launchAsset.hash)).toBe(manifest.launchAsset.url);
@@ -277,6 +286,49 @@ describe("publish to disk", () => {
         err: [
           `tide: asset key ${PNG_MD5} names different bytes in updates/${first}.json and updates/${last}.json: a key must never change its bytes`,
         ],
+      });
+      expect(tree(root)).toEqual(before);
+    });
+
+    test("a key a registered build records for another SHA-256 is refused before any write", async () => {
+      const root = tempRoot();
+      const id = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
+      await diskBucket(root).put(
+        baseKey(id),
+        encodeBaseRecord({
+          kind: "embedded",
+          updateId: id,
+          runtimeVersion: "1.0.0",
+          platform: "android",
+          launchAsset: { hash: await sha256Base64Url(utf8("embedded")) },
+          assets: [{ key: PNG_MD5, hash: await sha256Base64Url(utf8("other bytes")) }],
+        }),
+      );
+      const before = tree(root);
+      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+        code: 2,
+        err: [
+          `tide: asset key ${PNG_MD5} names different bytes in ${baseKey(id)} and this export (ios): a key must never change its bytes`,
+        ],
+      });
+      expect(tree(root)).toEqual(before);
+    });
+
+    test("a base record that names another ID is refused", async () => {
+      const root = tempRoot();
+      const id = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
+      const base = encodeBaseRecord({
+        kind: "update",
+        updateId: "00000000-0000-4000-8000-000000000000",
+        runtimeVersion: "1.0.0",
+        platform: "ios",
+        launchAsset: { hash: await sha256Base64Url(utf8("launch")) },
+      });
+      await diskBucket(root).put(baseKey(id), base);
+      const before = tree(root);
+      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+        code: 2,
+        err: [`tide: ${baseKey(id)} is unreadable: its updateId differs from its name`],
       });
       expect(tree(root)).toEqual(before);
     });
@@ -543,18 +595,9 @@ describe("publish to disk", () => {
       [
         "one MD5 key on two files with different bytes",
         (dir) => {
-          // A known MD5 collision: two 128-byte blocks with one digest.
-          const block = (diff: Record<number, number>) => {
-            const bytes = Buffer.from(MD5_COLLISION, "hex");
-            for (const [i, b] of Object.entries(diff)) bytes[Number(i)] = b;
-            return bytes;
-          };
-          const key = "79054025255fb1a26e4bc422aef54eb4";
-          writeFileSync(join(dir, "assets", key), block({}));
-          writeFileSync(
-            join(dir, "www.bundle", `${key}.bin`),
-            block({ 19: 0x07, 45: 0xf1, 59: 0x72, 83: 0x34, 109: 0x28, 123: 0xab }),
-          );
+          const key = COLLIDING_MD5;
+          writeFileSync(join(dir, "assets", key), COLLIDING[0]);
+          writeFileSync(join(dir, "www.bundle", `${key}.bin`), COLLIDING[1]);
           const m = metadataOf(dir);
           m.fileMetadata.ios!.assets.push(
             { path: `assets/${key}`, ext: "bin" },
@@ -601,9 +644,11 @@ describe("publish to S3", () => {
     const named = async (objects: Objects) => {
       const ids = new Map<string, string>();
       for (const key of [IOS, ANDROID]) {
-        ids.set(`updates/${(await expectPublished(objects, key)).manifest.id}.json`, key);
+        const { id } = (await expectPublished(objects, key)).manifest;
+        ids.set(recordKey(id), `record of ${key}`);
+        ids.set(baseKey(id), `base of ${key}`);
       }
-      return [...objects.keys()].map((k) => (ids.has(k) ? `record of ${ids.get(k)}` : k)).sort();
+      return [...objects.keys()].map((k) => ids.get(k) ?? k).sort();
     };
     expect(await named(s3.objects)).toEqual(await named(diskObjects(disk)));
 
@@ -630,8 +675,10 @@ describe("publish to S3", () => {
     };
     s3.puts.length = 0;
     expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
-    expect(s3.puts.filter((k) => !k.startsWith("updates/"))).toEqual([IOS, ANDROID]);
+    // Repeat publishes upload no bundle or asset.
+    expect(s3.puts.filter((k) => !/^(?:updates|bases)\//.test(k))).toEqual([IOS, ANDROID]);
     expect(s3.puts.filter((k) => k.startsWith("updates/"))).toHaveLength(2);
+    expect(s3.puts.filter((k) => k.startsWith("bases/"))).toHaveLength(2);
     expect((await createdAt(s3.objects, IOS)) > first.ios).toBe(true);
     expect((await createdAt(s3.objects, ANDROID)) > first.android).toBe(true);
   });
@@ -767,6 +814,31 @@ describe("publish to S3", () => {
         ],
       });
       expect(s3.puts.filter((k) => k.startsWith("reply/main/"))).toEqual([]);
+    });
+
+    test("each update's release and base records are written before its pointer", async () => {
+      expect((await publishIn(project().root, env(s3Env()))).code).toBe(0);
+      for (const key of [IOS, ANDROID]) {
+        const { id } = (await signedManifest(s3.objects, key)).manifest;
+        const order = [recordKey(id), baseKey(id), key].map((k) => s3.puts.indexOf(k));
+        expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!))).toBe(true);
+      }
+    });
+
+    test("a failed base write leaves every pointer unchanged", async () => {
+      const app = project();
+      expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
+      const before = [IOS, ANDROID].map((k) => s3.objects.get(k));
+      s3.puts.length = 0;
+      s3.dropAfterPut("bases/");
+      const result = await publishIn(app.root, env(s3Env()));
+      expect(result.code).toBe(1);
+      expect(result.err).toHaveLength(1);
+      expect(result.err[0]).toMatch(
+        /^tide: bases\/[0-9a-f-]{36}: S3 PutObject failed: network error; outcome unknown; no pointer names it yet$/,
+      );
+      expect([IOS, ANDROID].map((k) => s3.objects.get(k))).toEqual(before);
+      expect(s3.puts.filter((k) => k.startsWith("reply/"))).toEqual([]);
     });
 
     test("a pointer whose response is lost may be live, and references only stored objects", async () => {

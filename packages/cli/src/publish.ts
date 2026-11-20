@@ -7,10 +7,12 @@ import {
   NO_UPDATE_KEY,
   ProtocolError,
   assetContentType,
+  baseKey,
   buildManifest,
   buildNoUpdateAvailable,
   contentKey,
   encodeMultipart,
+  encodeBaseRecord,
   encodeSfvDictionary,
   encodeStoredReply,
   expoSignature,
@@ -27,11 +29,13 @@ import { KeyError, isObject, member, openWriter } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
 import { expoEnv, expoJson, exportFor } from "./publish-export.ts";
 import {
+  BASE_PREFIX,
   PublishError,
   RECORD_PREFIX,
   assetUrl,
   encodeRecord,
   launchUrl,
+  readBaseRecord,
   readReleaseRecord,
   recordKey,
   urlBase,
@@ -59,12 +63,14 @@ interface PointerWrite {
 export interface Plan {
   readonly writer: Writer;
   readonly noUpdate: Uint8Array<ArrayBuffer> | undefined; // Absent when the bucket already holds one.
-  readonly records: readonly (readonly [string, Uint8Array<ArrayBuffer>])[];
+  readonly records: readonly (readonly [string, Uint8Array<ArrayBuffer>])[]; // Release and base records.
   readonly pointers: readonly PointerWrite[];
   /** Refuses unless the certificate is valid by both clocks, each read afresh. */
   readonly checkCertificate: () => Promise<void>;
-  readonly upload?: () => Promise<void>; // Stores content before any record or pointer is written.
 }
+
+/** A write command's writes, returned once every refusal has been made; every failure in it follows a write. */
+export type WriteStep = () => Promise<void>;
 
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
@@ -82,26 +88,28 @@ export async function publish(
   env: Env,
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
-  return await execute(options, () => prepare(args, env, options));
+  return await execute(options, async () => {
+    const { ready, exported } = await prepare(args, env, options);
+    return async () => {
+      await uploadObjects(ready.writer.bucket, exported);
+      await commit(ready, options.out);
+    };
+  });
 }
 
-/**
- * Runs a write command: 0 once every pointer is written, 2 when `prepare` refuses before any write, 1 when a write
- * fails.
- */
+/** Runs a write command: 0 once its write step succeeds, 2 when `prepare` refuses, 1 when a write fails. */
 export async function execute(
   options: PublishOptions,
-  prepare: () => Promise<Plan>,
+  prepare: () => Promise<WriteStep>,
 ): Promise<0 | 1 | 2> {
-  let ready;
+  let write;
   try {
-    ready = await prepare();
+    write = await prepare();
   } catch (e) {
     return report(e, options, 2);
   }
   try {
-    await ready.upload?.();
-    await commit(ready, options.out);
+    await write();
   } catch (e) {
     return report(e, options, 1);
   }
@@ -128,7 +136,7 @@ async function prepare(
   args: readonly string[],
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
-): Promise<Plan> {
+) {
   const { channel, platforms, runtimeVersion, exportDir, projectRoot } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
@@ -190,13 +198,10 @@ async function prepare(
       extra: { expoClient: expoClient as JsonObject },
     };
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
-    records.push(c.record);
+    records.push(...c.records);
     writes.push(c.pointer);
   }
-  return {
-    ...(await plan(writer, checkCertificate, records, writes)),
-    upload: () => uploadObjects(writer.bucket, exported),
-  };
+  return { ready: await plan(writer, checkCertificate, records, writes), exported };
 }
 
 /**
@@ -244,10 +249,11 @@ export async function plan(
 }
 
 /**
- * Writes `reply/no-update` if needed, the release records, then each pointer. The certificate is re-checked before a
- * pointer only once a PUT has been attempted since the plan's final check, so every failure here follows a write.
+ * Writes `reply/no-update` if needed, the release and base records, then each pointer. The certificate is re-checked
+ * before a pointer only once a PUT has been attempted since the plan's final check, so every failure here follows a
+ * write.
  */
-async function commit(
+export async function commit(
   { writer, noUpdate, records, pointers, checkCertificate }: Plan,
   out: (line: string) => void,
 ): Promise<void> {
@@ -332,27 +338,38 @@ function configuredBase(env: Env, name: string): string {
 }
 
 /**
- * Returns the asset keys every retained release record names, and the records stored at `wanted` keys. A record that
- * cannot be read refuses, since the key check cannot be proven without it.
+ * Returns the asset keys every retained release record and registered build names, and the release records stored at
+ * `wanted` keys. A record that cannot be read refuses, since the key check cannot be proven without it.
  */
 export async function recordedKeys(bucket: Bucket, wanted: readonly string[] = []) {
   const keys: KeyHashes = new Map();
   const records = new Map<string, ReleaseRecord>();
-  for (const entry of await bucket.list(RECORD_PREFIX)) {
-    if (!("key" in entry)) {
-      throw new PublishError(`${RECORD_PREFIX}: an object name outside the key grammar`);
-    }
-    const record = await readReleaseRecord(bucket, entry.key);
+  for (const key of await keysUnder(bucket, RECORD_PREFIX)) {
+    const record = await readReleaseRecord(bucket, key);
     if (record === undefined) continue;
-    for (const a of record.assets) addKey(keys, a.key, a.hash, entry.key);
+    for (const a of record.assets) addKey(keys, a.key, a.hash, key);
     // Others are dropped, so memory follows the key index rather than the release history.
-    if (wanted.includes(entry.key)) records.set(entry.key, record);
+    if (wanted.includes(key)) records.set(key, record);
+  }
+  for (const key of await keysUnder(bucket, BASE_PREFIX)) {
+    const base = await readBaseRecord(bucket, key);
+    if (base?.kind !== "embedded") continue;
+    for (const a of base.assets) addKey(keys, a.key, a.hash, key);
   }
   return { keys, records };
 }
 
+/** Returns the keys listed under `prefix`; a name outside the key grammar refuses. */
+async function keysUnder(bucket: Bucket, prefix: string): Promise<string[]> {
+  return (await bucket.list(prefix)).map((entry) => {
+    if (!("key" in entry))
+      throw new PublishError(`${prefix}: an object name outside the key grammar`);
+    return entry.key;
+  });
+}
+
 /** Records that `key` names `hash`; a key seen with another hash is refused, whichever source came first. */
-function addKey(keys: KeyHashes, key: string, hash: string, source: string): void {
+export function addKey(keys: KeyHashes, key: string, hash: string, source: string): void {
   const seen = keys.get(key.toLowerCase());
   if (seen === undefined) keys.set(key.toLowerCase(), { hash, source });
   else if (seen.hash !== hash) {
@@ -362,13 +379,16 @@ function addKey(keys: KeyHashes, key: string, hash: string, source: string): voi
   }
 }
 
-/** Builds and signs a new update from `draft` under a fresh ID: its release record and its write to `target`. */
+/**
+ * Builds and signs a new update from `draft` under a fresh ID: its release and base records and its write to
+ * `target`.
+ */
 export async function compose(
   writer: Writer,
   draft: DraftRecord,
   createdAtMs: number,
   { key, previous }: { readonly key: string; readonly previous: PointerState },
-): Promise<{ record: Plan["records"][number]; pointer: PointerWrite }> {
+): Promise<{ records: Plan["records"]; pointer: PointerWrite }> {
   const updateId = randomUUID();
   const date = new Date(createdAtMs);
   const createdAt = date.toISOString();
@@ -401,8 +421,18 @@ export async function compose(
     manifestFilters: encodeSfvDictionary({ channel: draft.channel }),
     body,
   });
+  const base = encodeBaseRecord({
+    kind: "update",
+    updateId,
+    runtimeVersion: draft.runtimeVersion,
+    platform: draft.platform,
+    launchAsset: draft.launchAsset,
+  });
   return {
-    record: [recordKey(updateId), encodeRecord({ ...draft, updateId, createdAt })],
+    records: [
+      [recordKey(updateId), encodeRecord({ ...draft, updateId, createdAt })],
+      [baseKey(updateId), base],
+    ],
     pointer: { key, previous, reply, line: `${key} ${updateId} ${createdAt}` },
   };
 }
