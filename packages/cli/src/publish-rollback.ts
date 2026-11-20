@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import {
@@ -15,23 +14,22 @@ import type { Plan, PublishOptions } from "./publish.ts";
 import { isKey } from "./bucket.ts";
 import { openWriter } from "./keys.ts";
 import { createdAtFloor } from "./pointer.ts";
-import { expoEnv, expoJson } from "./publish-export.ts";
-import { PublishError, recordKey } from "./publish-record.ts";
+import { PublishError, platformsOf, recordKey } from "./publish-record.ts";
 import {
   commit,
   compose,
   execute,
+  parsed,
   plan,
-  platformsOf,
   readTargets,
   recordedKeys,
   storedContent,
 } from "./publish.ts";
 
-export const ROLLBACK_USAGE = `usage: tide rollback --embedded --channel <name> --runtime-version <version> [--platform ios|android]... [--project-root <dir>]
-       tide rollback --to <updateId> [--to <updateId>]... [--project-root <dir>]`;
+export const ROLLBACK_USAGE = `usage: tide rollback --embedded --channel <name> --runtime-version <version> [--platform ios|android]...
+       tide rollback --to <updateId> [--to <updateId>]...`;
 export const REPUBLISH_USAGE =
-  "usage: tide republish <updateId>... [--channel <name>] [--runtime-version <version>] [--project-root <dir>]";
+  "usage: tide republish <updateId>... [--channel <name>] [--runtime-version <version>]";
 
 /** What a write command does once its arguments are parsed, given the opened writer. */
 type Prepare = (writer: Writer, now: () => number) => Promise<Plan>;
@@ -45,7 +43,7 @@ export async function rollback(
   env: Env,
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
-  return await run(env, options, (cwd) => {
+  return await run(env, options, () => {
     const { values } = parsed(ROLLBACK_USAGE, () =>
       parseArgs({
         args: [...args],
@@ -55,7 +53,6 @@ export async function rollback(
           channel: { type: "string" },
           "runtime-version": { type: "string" },
           platform: { type: "string", multiple: true },
-          "project-root": { type: "string" },
         },
         strict: true,
         allowPositionals: false,
@@ -63,7 +60,6 @@ export async function rollback(
     );
     const { embedded, to, channel, platform } = values;
     const runtime = values["runtime-version"];
-    const projectRoot = resolve(cwd, values["project-root"] ?? ".");
     if (embedded === true && to !== undefined) {
       throw new PublishError(`give --embedded or --to, not both; ${ROLLBACK_USAGE}`);
     }
@@ -73,14 +69,14 @@ export async function rollback(
           "--to rolls each update back on its own pointer: it takes no --channel, --runtime-version or --platform",
         );
       }
-      return { projectRoot, prepare: republishing(updateIds(to)) };
+      return republishing(updateIds(to));
     }
     if (embedded !== true) throw new PublishError(`give --embedded or --to; ${ROLLBACK_USAGE}`);
     if (channel === undefined || runtime === undefined) {
       throw new PublishError(`--embedded needs --channel and --runtime-version; ${ROLLBACK_USAGE}`);
     }
     const keys = platformsOf(platform).map((p) => replyKey(channel, runtime, p));
-    return { projectRoot, prepare: rollingBack(keys) };
+    return rollingBack(keys);
   });
 }
 
@@ -93,14 +89,13 @@ export async function republish(
   env: Env,
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
-  return await run(env, options, (cwd) => {
+  return await run(env, options, () => {
     const { values, positionals } = parsed(REPUBLISH_USAGE, () =>
       parseArgs({
         args: [...args],
         options: {
           channel: { type: "string" },
           "runtime-version": { type: "string" },
-          "project-root": { type: "string" },
         },
         strict: true,
         allowPositionals: true,
@@ -111,39 +106,22 @@ export async function republish(
     }
     const { channel } = values;
     const runtime = values["runtime-version"];
-    // Refuses a bad channel or runtime before Expo runs.
+    // Refuses a bad channel or runtime before the writer opens.
     if (channel !== undefined) replyKey(channel, "1", "ios");
     if (runtime !== undefined) replyKey("main", runtime, "ios");
-    return {
-      projectRoot: resolve(cwd, values["project-root"] ?? "."),
-      prepare: republishing(updateIds(positionals), channel, runtime),
-    };
+    return republishing(updateIds(positionals), channel, runtime);
   });
 }
 
-/** Parses before Expo runs, opens the writer from the app config, prepares, then commits. */
-async function run(
-  env: Env,
-  options: PublishOptions,
-  parse: (cwd: string) => { readonly projectRoot: string; readonly prepare: Prepare },
-): Promise<0 | 1 | 2> {
-  const { now = Date.now, cwd = process.cwd() } = options;
+/** Parses, opens the writer for the shipped builds' identity, prepares, then commits. */
+async function run(env: Env, options: PublishOptions, parse: () => Prepare): Promise<0 | 1 | 2> {
+  const { now = Date.now } = options;
   return await execute(options, async () => {
-    const { projectRoot, prepare } = parse(cwd);
-    // The app config is project code, so it runs without TIDE_ variables or dotenv files.
-    const config = await expoJson(projectRoot, expoEnv(env), "expo", ["config", "--json"]);
-    const ready = await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
+    const prepare = parse();
+    const writer = await openWriter(env, { now });
+    const ready = await prepare(writer, now);
     return () => commit(ready, options.out);
   });
-}
-
-/** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
-export function parsed<T>(usage: string, parse: () => T): T {
-  try {
-    return parse();
-  } catch {
-    throw new PublishError(`unrecognised arguments; ${usage}`);
-  }
 }
 
 /** Returns the IDs, each a lowercase UUID, given once. */

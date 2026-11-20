@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -20,7 +20,8 @@ import {
   SERVER_URL,
   diskObjects,
   env,
-  project,
+  artifact,
+  pins,
   s3,
   s3Env,
   s3Snapshot,
@@ -90,10 +91,10 @@ function report(rows: readonly (readonly [string, string, Uint8Array])[]): strin
   return `${[...lines, SUMMARY(sorted.length, total)].join("\n")}\n`;
 }
 
-/** A copy of the fixture export whose iOS bundle has other bytes and whose iOS update drops the font. */
+/** An iOS export whose bundle has other bytes and whose update drops the font. */
 function exportB(): string {
-  const dir = join(tempRoot(), "export");
-  cpSync(EXPORT, dir, { recursive: true });
+  const out = artifact({ fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } } });
+  const dir = join(out, "dist");
   writeFileSync(join(dir, "_expo", "static", "js", "ios", "index-ios.hbc"), "// B\n");
   const metadata = JSON.parse(readFileSync(join(dir, "metadata.json"), "utf8")) as {
     fileMetadata: { ios: { assets: { ext: string }[] } };
@@ -101,7 +102,7 @@ function exportB(): string {
   const ios = metadata.fileMetadata.ios;
   ios.assets = ios.assets.filter((a) => a.ext !== "ttf");
   writeFileSync(join(dir, "metadata.json"), JSON.stringify(metadata));
-  return dir;
+  return out;
 }
 
 /** A release record for `UPDATE_ID` naming `launch` as its bundle. */
@@ -132,25 +133,13 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 
   test("after publishes, a rollback and a republish, exactly the unreferenced objects are listed and nothing changes", async () => {
     const store = open();
-    const app = project();
-    const common = ["--runtime-version", "1.0.0", "--project-root", app.root];
     // R1 (iOS) and R2 (Android), then R3 on iOS without the font, then Android rolled back.
-    await write(
-      "publish",
-      ["--channel", "main", "--export-dir", EXPORT, ...common],
-      env(store.env),
-    );
-    const b = exportB();
-    const ios = ["--channel", "main", "--platform", "ios", "--export-dir", b, ...common];
-    await write("publish", ios, env(store.env));
-    const embedded = ["--embedded", "--channel", "main", "--platform", "android", ...common];
-    await write("rollback", embedded, writerEnv(store));
+    await write("publish", ["--channel", "main", "--from", artifact()], env(store.env));
+    await write("publish", ["--channel", "main", "--from", exportB()], env(store.env));
+    const embedded = ["--embedded", "--channel", "main", "--platform", "android"];
+    await write("rollback", [...embedded, "--runtime-version", "1.0.0"], writerEnv(store));
     const r3 = (await signedManifest(store.objects(), IOS)).manifest.id;
-    await write(
-      "republish",
-      [r3, "--channel", "beta", "--project-root", app.root],
-      writerEnv(store),
-    );
+    await write("republish", [r3, "--channel", "beta"], writerEnv(store));
     const build = tempRoot();
     writeFileSync(join(build, "app.manifest"), JSON.stringify({ id: UPDATE_ID, assets: [] }));
     writeFileSync(join(build, "main.jsbundle"), "embedded");
@@ -160,7 +149,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
         ...["--platform", "ios", "--runtime-version", "1.0.0"],
         ...["--manifest", join(build, "app.manifest"), "--bundle", join(build, "main.jsbundle")],
       ],
-      store.env,
+      { ...pins(), ...store.env },
     );
 
     // Each object below is protected by one traversal alone, so dropping any traversal changes the report. Every
@@ -326,13 +315,8 @@ describe("on S3", () => {
 
   test("a record committed after updates/ is listed protects nothing in that run, and does in the next", async () => {
     const store = STORES.s3();
-    const app = project();
-    const args = ["--channel", "main", "--platform", "ios", "--runtime-version", "1.0.0"];
-    await write(
-      "publish",
-      [...args, "--export-dir", EXPORT, "--project-root", app.root],
-      env(store.env),
-    );
+    const ios = artifact({ fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } } });
+    await write("publish", ["--channel", "main", "--from", ios], env(store.env));
     const key = [...s3.objects.keys()].find((k) => k.startsWith("updates/"))!;
     const bytes = s3.objects.get(key)!;
     s3.objects.delete(key);
@@ -363,12 +347,8 @@ describe("on disk", () => {
     const store = STORES.disk();
     // On a case-insensitive volume the writer accepts this directory as updates/.
     mkdirSync(join(store.root, "Updates"));
-    const args = ["--channel", "main", "--platform", "ios", "--runtime-version", "1.0.0"];
-    await write(
-      "publish",
-      [...args, "--export-dir", EXPORT, "--project-root", project().root],
-      env(store.env),
-    );
+    const ios = artifact({ fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } } });
+    await write("publish", ["--channel", "main", "--from", ios], env(store.env));
     expect(await storage(store)).toEqual({ code: 0, stdout: `${SUMMARY(0, 0)}\n`, stderr: "" });
   });
 

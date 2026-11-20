@@ -1,6 +1,6 @@
-import { chmodSync, cpSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
 import type { BaseAsset } from "@tide/protocol";
 import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide/protocol";
@@ -18,12 +18,18 @@ import {
   MAIN,
   PNG_MD5,
   SERVER_URL,
+  artifact,
   diskObjects,
   env,
-  project,
+  identity,
+  main,
+  noUpdateBy,
+  other as otherIdentity,
+  pins,
   s3,
   s3Env,
   s3Snapshot,
+  serveMain,
   tree,
   useFixture,
 } from "./publish-fixture.ts";
@@ -50,6 +56,14 @@ const STORES = {
   s3: () => ({ env: s3Env(), objects: () => s3.objects, snapshot: s3Snapshot }),
 };
 type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
+
+/** A `kind` store serving the main identity, as after the first publish; the S3 fake's puts list starts empty. */
+async function served(kind: keyof typeof STORES): Promise<Store> {
+  const store = STORES[kind]();
+  await serveMain(store.env);
+  s3.puts.length = 0;
+  return store;
+}
 
 interface Build {
   readonly id?: unknown;
@@ -93,14 +107,22 @@ const args = (b: ReturnType<typeof build>, platform = "android") => [
   ...["--manifest", b.manifest, "--bundle", b.bundle, "--assets-dir", b.assets],
 ];
 
-/** Runs register-build in process; returns the exit code and output lines. */
-async function register(argv: readonly string[], store: Store) {
+/** Runs register-build in process with the main build pins, or `identity`; returns the exit code and output lines. */
+async function register(
+  argv: readonly string[],
+  store: Store,
+  identity: Record<string, string | undefined> = pins(),
+) {
   const out: string[] = [];
   const err: string[] = [];
-  const code = await registerBuild(argv, store.env, {
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-  });
+  const code = await registerBuild(
+    argv,
+    { ...identity, ...store.env },
+    {
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+    },
+  );
   return { code, out, err };
 }
 
@@ -129,14 +151,16 @@ const bundleKey = async (bytes: Uint8Array<ArrayBuffer> = BUNDLE) =>
 
 describe("register-build to disk", () => {
   test("the bin stores the exact bundle and a base record of the build, finding nested assets by MD5", async () => {
-    const root = tempRoot();
+    const store = await served("disk");
+    const before = store.objects();
     const b = build();
     writeFileSync(join(b.assets, "raw", "unrelated.txt"), "not an asset");
-    const result = await run(MAIN, ["register-build", ...args(b)], { TIDE_DISK_DIR: root });
+    const result = await run(MAIN, ["register-build", ...args(b)], { ...pins(), ...store.env });
     const bundle = await bundleKey();
     expect(result).toEqual({ code: 0, stdout: `${baseKey(ID)} ${bundle}\n`, stderr: "" });
-    expect(diskObjects(root)).toEqual(
+    expect(store.objects()).toEqual(
       new Map([
+        ...before,
         [baseKey(ID), await expectedBase(await defaultAssets())],
         [bundle, BUNDLE],
       ]),
@@ -144,7 +168,7 @@ describe("register-build to disk", () => {
   });
 
   test("a manifest without assets needs no --assets-dir", async () => {
-    const root = tempRoot();
+    const store = await served("disk");
     const b = build({ keys: [] });
     const result = await register(
       [
@@ -157,32 +181,19 @@ describe("register-build to disk", () => {
         "--bundle",
         b.bundle,
       ],
-      {
-        env: { TIDE_DISK_DIR: root },
-        objects: () => diskObjects(root),
-        snapshot: () => tree(root),
-      },
+      store,
     );
     expect(result.code).toBe(0);
-    expect(diskObjects(root).get(baseKey(ID))).toEqual(await expectedBase([]));
+    expect(store.objects().get(baseKey(ID))).toEqual(await expectedBase([]));
   });
 
   test("a build whose assets match an export's passes that publish's key check", async () => {
-    const root = tempRoot();
-    const store = {
-      env: { TIDE_DISK_DIR: root },
-      objects: () => diskObjects(root),
-      snapshot: () => tree(root),
-    };
+    const store = await served("disk");
     expect((await register(args(build()), store)).code).toBe(0);
-    const published = await publish(
-      [
-        ...["--channel", "main", "--runtime-version", "1.0.0", "--export-dir", EXPORT],
-        ...["--project-root", project().root],
-      ],
-      env(store.env),
-      { out: () => undefined, err: () => undefined },
-    );
+    const published = await publish(["--channel", "main", "--from", artifact()], env(store.env), {
+      out: () => undefined,
+      err: () => undefined,
+    });
     expect(published).toBe(0);
   });
 
@@ -194,10 +205,99 @@ describe("register-build to disk", () => {
 });
 
 describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) => {
-  const open = (): Store => STORES[kind]();
+  const open = () => served(kind);
+
+  test("either build certificate source registers, with no signing key", async () => {
+    const path = join(tempRoot(), "certificate.pem");
+    writeFileSync(path, main.certificate);
+    for (const identity of [
+      pins(),
+      { TIDE_BUILD_KEYID: "main", TIDE_BUILD_CERTIFICATE_FILE: path },
+    ]) {
+      expect(await register(args(build()), await open(), identity)).toEqual({
+        code: 0,
+        out: [`${baseKey(ID)} ${await bundleKey()}`],
+        err: [],
+      });
+    }
+  });
+
+  test.each<[string, () => Promise<Record<string, string | undefined>>, string]>([
+    [
+      "no TIDE_BUILD_KEYID",
+      () => Promise.resolve({ ...pins(), TIDE_BUILD_KEYID: undefined }),
+      "TIDE_BUILD_KEYID is not set: set it to the keyid the builds embed",
+    ],
+    [
+      "neither certificate source",
+      () => Promise.resolve({ ...pins(), TIDE_BUILD_CERTIFICATE: undefined }),
+      "set exactly one of TIDE_BUILD_CERTIFICATE_FILE and TIDE_BUILD_CERTIFICATE",
+    ],
+    [
+      "both certificate sources",
+      () => Promise.resolve({ ...pins(), TIDE_BUILD_CERTIFICATE_FILE: join(tempRoot(), "x.pem") }),
+      "set exactly one of TIDE_BUILD_CERTIFICATE_FILE and TIDE_BUILD_CERTIFICATE",
+    ],
+    [
+      "an unreadable certificate file",
+      () =>
+        Promise.resolve({
+          TIDE_BUILD_KEYID: "main",
+          TIDE_BUILD_CERTIFICATE_FILE: join(tempRoot(), "absent.pem"),
+        }),
+      "TIDE_BUILD_CERTIFICATE_FILE unreadable: not a regular file of at most 64 KiB",
+    ],
+    [
+      "an invalid certificate",
+      () => Promise.resolve({ ...pins(), TIDE_BUILD_CERTIFICATE: main.pkcs8 }),
+      "TIDE_BUILD_CERTIFICATE: certificate must be exactly one PEM CERTIFICATE block",
+    ],
+    [
+      "an expired certificate",
+      async () => pins(await identity(new Date("2021-01-01T00:00:00Z"))),
+      "TIDE_BUILD_CERTIFICATE: certificate has expired",
+    ],
+  ])("%s is refused before the bucket is read", async (_, identityOf, message) => {
+    const store = await open();
+    const before = store.snapshot();
+    const requests = s3.requests;
+    expect(await register(args(build()), store, await identityOf())).toEqual({
+      code: 2,
+      out: [],
+      err: [`tide: ${message}`],
+    });
+    expect(s3.requests).toBe(requests);
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  test("a bucket whose replies are signed under another identity is refused", async () => {
+    const store = await open();
+    await bucketFromEnv(store.env).put("reply/no-update", await noUpdateBy(otherIdentity));
+    const before = store.snapshot();
+    expect(await register(args(build()), store)).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        "tide: this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
+      ],
+    });
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  test("a bucket that serves no identity yet is refused, so the first publish cannot pin another", async () => {
+    const store = STORES[kind]();
+    expect(await register(args(build()), store)).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        "tide: reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
+      ],
+    });
+    expect([...store.objects().keys()]).toEqual([]);
+  });
 
   test("an identical re-run succeeds and writes nothing", async () => {
-    const store = open();
+    const store = await open();
     const b = build();
     expect((await register(args(b), store)).code).toBe(0);
     const before = store.snapshot();
@@ -212,7 +312,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     ["another bundle", { bundle: utf8("another bundle") }],
     ["other assets", { keys: [PNG_MD5] }],
   ])("%s under a registered ID is refused before any write", async (_, other) => {
-    const store = open();
+    const store = await open();
     expect((await register(args(build()), store)).code).toBe(0);
     const before = store.snapshot();
     s3.puts.length = 0;
@@ -341,12 +441,13 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       "--bundle is missing or unreadable",
     ],
   ])("%s is refused before any bucket request", async (_, argv, message) => {
-    const store = open();
+    const store = await open();
+    const before = store.snapshot();
     const given = argv();
     const requests = s3.requests;
     expect(await register(given, store)).toEqual({ code: 2, out: [], err: [`tide: ${message}`] });
     expect(s3.requests).toBe(requests);
-    expect(store.snapshot()).toEqual(new Map());
+    expect(store.snapshot()).toEqual(before);
   });
 
   test.each([
@@ -384,7 +485,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
   ])(
     "an asset key %s records with another SHA-256 is refused before any write",
     async (_, key, seed) => {
-      const store = open();
+      const store = await open();
       await bucketFromEnv(store.env).put(
         key,
         await seed(await sha256Base64Url(utf8("other bytes"))),
@@ -405,7 +506,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
   );
 
   test("an unreadable base record refuses, since the key check cannot be proven", async () => {
-    const store = open();
+    const store = await open();
     await bucketFromEnv(store.env).put(baseKey(OTHER_ID), utf8("{}"));
     expect(await register(args(build()), store)).toEqual({
       code: 2,
@@ -417,6 +518,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 
 describe("register-build on S3", () => {
   const store = () => STORES.s3();
+  beforeEach(() => served("s3"));
 
   test("a bases/ listing that fails is a refusal with no PUT", async () => {
     s3.onList("updates/", () => s3.failAll({ status: 500, code: "InternalError" }));
@@ -443,6 +545,7 @@ describe("register-build on S3", () => {
     expect(s3.puts).toEqual([await bundleKey(), baseKey(ID)]);
 
     s3.reset();
+    await served("s3");
     s3.raceOnPut(baseKey(ID), theirs);
     expect(await register(args(b), store())).toEqual({
       code: 1,
@@ -494,25 +597,20 @@ describe("register-build on S3", () => {
   test("a late base that lands after a conflicting publish makes the next publish refuse, naming both", async () => {
     // The build embeds one of two files with one MD5; the export ships the other.
     const b = build({ keys: [COLLIDING_MD5], files: { "raw/block.bin": COLLIDING[0] } });
-    const exported = join(tempRoot(), "export");
-    cpSync(EXPORT, exported, { recursive: true });
+    const dir = artifact({ fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } } });
+    const exported = join(dir, "dist");
     writeFileSync(join(exported, "assets", COLLIDING_MD5), COLLIDING[1]);
     const metadata = JSON.parse(readFileSync(join(exported, "metadata.json"), "utf8")) as {
       fileMetadata: { ios: { assets: object[] } };
     };
     metadata.fileMetadata.ios.assets.push({ path: `assets/${COLLIDING_MD5}`, ext: "bin" });
     writeFileSync(join(exported, "metadata.json"), JSON.stringify(metadata));
-    const app = project();
     const errors: string[] = [];
     const publishIos = () =>
-      publish(
-        [
-          ...["--channel", "main", "--platform", "ios", "--runtime-version", "1.0.0"],
-          ...["--export-dir", exported, "--project-root", app.root],
-        ],
-        env(s3Env()),
-        { out: () => undefined, err: (l) => errors.push(l) },
-      );
+      publish(["--channel", "main", "--from", dir], env(s3Env()), {
+        out: () => undefined,
+        err: (l) => errors.push(l),
+      });
 
     s3.holdPut("bases/");
     expect((await register(args(b), store())).code).toBe(1);

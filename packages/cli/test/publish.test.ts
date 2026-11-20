@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -28,7 +28,7 @@ import {
   launchUrl,
   recordKey,
 } from "../src/publish-record.ts";
-import { publish, recordedKeys } from "../src/publish.ts";
+import { PUBLISH_USAGE, publish, recordedKeys } from "../src/publish.ts";
 import { run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
@@ -42,6 +42,7 @@ import {
   PNG_MD5,
   SERVER_URL,
   T,
+  artifact,
   diskObjects,
   env,
   identity,
@@ -49,6 +50,7 @@ import {
   main,
   noUpdateBy,
   other,
+  pins,
   project,
   s3,
   s3Env,
@@ -61,16 +63,16 @@ import {
 
 useFixture();
 
-/** Publishes in process to channel `main`; returns the exit code and output lines. */
+/** Publishes the export directory `dir` in process to channel `main`; returns the exit code and output lines. */
 async function publishIn(
-  root: string,
+  dir: string,
   environment: Record<string, string>,
   args: string[] = [],
   now?: () => number,
 ) {
   const out: string[] = [];
   const err: string[] = [];
-  const code = await publish(["--channel", "main", "--project-root", root, ...args], environment, {
+  const code = await publish(["--channel", "main", "--from", dir, ...args], environment, {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
     ...(now && { now }),
@@ -139,25 +141,33 @@ const createdAt = async (objects: Objects, key: string) =>
   (await signedManifest(objects, key)).manifest.createdAt;
 
 describe("publish to disk", () => {
-  test("the tide bin publishes from another directory, and the real Node server serves each pointer", async () => {
+  test("the tide bin exports and publishes from another directory, and the real Node server serves each pointer", async () => {
     // A workspace: the tools are installed at its root, two levels above the app.
     const workspace = tempRoot();
     installFakeExpo(workspace);
     const app = project({ root: join(workspace, "apps", "app") });
     const bucket = tempRoot();
+    const cwd = tempRoot();
+    const exported = await run(
+      MAIN,
+      ["export", "--project-root", app.root, "--out", "out"],
+      { PATH: process.env.PATH ?? "" },
+      cwd,
+    );
+    expect(exported.code).toBe(0);
     const result = await run(
       MAIN,
-      ["publish", "--channel", "main", "--project-root", app.root],
+      ["publish", "--from", "out", "--channel", "main"],
       env({ TIDE_DISK_DIR: bucket }),
-      tempRoot(),
+      cwd,
     );
-    expect(result.stderr).not.toContain("tide:");
+    expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
 
     const objects = diskObjects(bucket);
     const ios = await expectPublished(objects, IOS);
     const android = await expectPublished(objects, ANDROID);
-    // Export progress goes to stderr; stdout is one line per pointer written.
+    // stdout is one line per pointer written.
     expect(result.stdout).toBe(
       `${IOS} ${ios.manifest.id} ${ios.manifest.createdAt}\n${ANDROID} ${android.manifest.id} ${android.manifest.createdAt}\n`,
     );
@@ -222,7 +232,7 @@ describe("publish to disk", () => {
     const bucket = diskBucket(root);
     await bucket.put(IOS, await seededPointer("manifest", ahead));
     await bucket.put(ANDROID, await seededPointer("rollback", ahead + 5000));
-    const { code } = await publishIn(project().root, env({ TIDE_DISK_DIR: root }));
+    const { code } = await publishIn(artifact(), env({ TIDE_DISK_DIR: root }));
     expect(code).toBe(0);
     const objects = diskObjects(root);
     expect(await createdAt(objects, IOS)).toBe(new Date(ahead + 1).toISOString());
@@ -231,15 +241,15 @@ describe("publish to disk", () => {
 
   test("publish refuses with no signing key or a mismatched key, leaving the bucket byte for byte", async () => {
     const root = tempRoot();
-    const app = project();
-    expect((await publishIn(app.root, env({ TIDE_DISK_DIR: root }))).code).toBe(0);
+    const app = artifact();
+    expect((await publishIn(app, env({ TIDE_DISK_DIR: root }))).code).toBe(0);
     const before = tree(root);
     const { TIDE_SIGNING_KEY: _, ...noKey } = env({ TIDE_DISK_DIR: root });
-    expect(await publishIn(app.root, noKey)).toMatchObject({
+    expect(await publishIn(app, noKey)).toMatchObject({
       code: 2,
       err: ["tide: no signing key: set TIDE_SIGNING_KEY_FILE, TIDE_SIGNING_KEY or TIDE_KMS_KEY_ID"],
     });
-    expect(await publishIn(app.root, env({ TIDE_DISK_DIR: root }, other))).toMatchObject({
+    expect(await publishIn(app, env({ TIDE_DISK_DIR: root }, other))).toMatchObject({
       code: 2,
       err: [`tide: ${MISMATCH}`],
     });
@@ -255,7 +265,7 @@ describe("publish to disk", () => {
         await seededRecord(id, await sha256Base64Url(utf8("other bytes"))),
       );
       const before = tree(root);
-      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).toMatchObject({
         code: 2,
         err: [
           `tide: asset key ${PNG_MD5} names different bytes in updates/${id}.json and this export (ios): a key must never change its bytes`,
@@ -281,7 +291,7 @@ describe("publish to disk", () => {
         await seededRecord(last, await sha256Base64Url(new Uint8Array(png))),
       );
       const before = tree(root);
-      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).toMatchObject({
         code: 2,
         err: [
           `tide: asset key ${PNG_MD5} names different bytes in updates/${first}.json and updates/${last}.json: a key must never change its bytes`,
@@ -305,7 +315,7 @@ describe("publish to disk", () => {
         }),
       );
       const before = tree(root);
-      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).toMatchObject({
         code: 2,
         err: [
           `tide: asset key ${PNG_MD5} names different bytes in ${baseKey(id)} and this export (ios): a key must never change its bytes`,
@@ -326,7 +336,7 @@ describe("publish to disk", () => {
       });
       await diskBucket(root).put(baseKey(id), base);
       const before = tree(root);
-      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).toMatchObject({
         code: 2,
         err: [`tide: ${baseKey(id)} is unreadable: its updateId differs from its name`],
       });
@@ -339,101 +349,11 @@ describe("publish to disk", () => {
       const record = await seededRecord(id, await sha256Base64Url(utf8("x")));
       await diskBucket(root).put(`updates/${id}.json`, new Uint8Array([...record, 0x0a]));
       const before = tree(root);
-      expect(await publishIn(project().root, env({ TIDE_DISK_DIR: root }))).toMatchObject({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).toMatchObject({
         code: 2,
         err: [`tide: updates/${id}.json is unreadable: record is not in the form tide writes`],
       });
       expect(tree(root)).toEqual(before);
-    });
-  });
-
-  describe("Expo environment and runtime", () => {
-    test("every Expo tool runs in production mode without TIDE_ variables or dotenv files", async () => {
-      const root = tempRoot();
-      const app = project();
-      expect((await publishIn(app.root, env({ TIDE_DISK_DIR: root }))).code).toBe(0);
-      const log = app.log();
-      expect(log.map((l) => [l.tool, l.args[0]])).toEqual([
-        ["expo", "config"],
-        ["expo", "config"],
-        ["expo-updates", "runtimeversion:resolve"],
-        ["expo-updates", "runtimeversion:resolve"],
-        ["expo", "export"],
-      ]);
-      for (const { env: seen } of log) {
-        expect(Object.keys(seen).filter((k) => k.startsWith("TIDE_"))).toEqual([]);
-        expect([seen.EXPO_NO_DOTENV, seen.NODE_ENV, seen.BABEL_ENV]).toEqual([
-          "1",
-          "production",
-          "production",
-        ]);
-      }
-      // The app config gives "dev" and development values outside production mode.
-      const { manifest } = await expectPublished(diskObjects(root), IOS);
-      expect(manifest.extra.expoClient.extra).toEqual({ mode: "production" });
-      expect(manifest.extra.expoClient.updates).toEqual({
-        url: "https://updates.example.com/manifest",
-      });
-    });
-
-    test("a caller's BABEL_ENV reaches every Expo tool alike", async () => {
-      const root = tempRoot();
-      const app = project();
-      const result = await publishIn(app.root, {
-        ...env({ TIDE_DISK_DIR: root }),
-        BABEL_ENV: "staging",
-      });
-      expect(result.code).toBe(0);
-      expect(new Set(app.log().map((l) => l.env.BABEL_ENV))).toEqual(new Set(["staging"]));
-      // Config, runtime and export agree on the non-production branch.
-      const { manifest } = await expectPublished(diskObjects(root), "reply/main/dev/ios");
-      expect(manifest.extra.expoClient.extra).toEqual({ mode: "development" });
-    });
-
-    test("each platform's runtime version lands on its own pointer", async () => {
-      const root = tempRoot();
-      const app = project({
-        overrides: { ios: { runtimeVersion: "2.0.0" }, android: { runtimeVersion: "3.0.0(1)" } },
-      });
-      expect((await publishIn(app.root, env({ TIDE_DISK_DIR: root }))).code).toBe(0);
-      const objects = diskObjects(root);
-      await expectPublished(objects, "reply/main/2.0.0/ios");
-      await expectPublished(objects, "reply/main/3.0.0(1)/android");
-    });
-
-    test("--runtime-version overrides every platform without running the resolver", async () => {
-      const root = tempRoot();
-      const app = project();
-      const result = await publishIn(app.root, env({ TIDE_DISK_DIR: root }), [
-        "--runtime-version",
-        "9.9.9",
-      ]);
-      expect(result.code).toBe(0);
-      const objects = diskObjects(root);
-      await expectPublished(objects, "reply/main/9.9.9/ios");
-      await expectPublished(objects, "reply/main/9.9.9/android");
-      expect(app.log().filter((l) => l.tool === "expo-updates")).toEqual([]);
-    });
-
-    test.each<[string, object, string]>([
-      [
-        "no runtime version",
-        { runtimeVersion: null },
-        "no ios runtime version: set runtimeVersion or pass --runtime-version",
-      ],
-      [
-        "a runtime version outside the key grammar",
-        { runtimeVersion: "1.0/2" },
-        "runtimeVersion must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
-      ],
-    ])("%s is refused with nothing written", async (_, overrides, message) => {
-      const root = tempRoot();
-      expect(await publishIn(project({ overrides }).root, env({ TIDE_DISK_DIR: root }))).toEqual({
-        code: 2,
-        out: [],
-        err: [`tide: ${message}`],
-      });
-      expect(tree(root)).toEqual(new Map());
     });
   });
 
@@ -454,38 +374,33 @@ describe("publish to disk", () => {
         { TIDE_SERVER_URL: "https://updates.example.com/?v=1" },
         "TIDE_SERVER_URL must be an https URL with no credentials, query or fragment (http only to a loopback IP)",
       ],
-    ])("%s is refused before Expo runs", async (_, change, message) => {
+    ])("%s is refused before the export is read", async (_, change, message) => {
       const root = tempRoot();
-      const app = project();
-      expect(await publishIn(app.root, { ...env({ TIDE_DISK_DIR: root }), ...change })).toEqual({
-        code: 2,
-        out: [],
-        err: [`tide: ${message}`],
-      });
-      expect(readdirSync(app.root)).not.toContain("fake-expo.log");
+      expect(
+        await publishIn(join(tempRoot(), "absent"), { ...env({ TIDE_DISK_DIR: root }), ...change }),
+      ).toEqual({ code: 2, out: [], err: [`tide: ${message}`] });
       expect(tree(root)).toEqual(new Map());
     });
 
-    test("a channel outside the key grammar is refused before Expo runs", async () => {
+    test("a channel outside the key grammar is refused", async () => {
       const root = tempRoot();
-      const app = project();
-      expect(await publishIn(app.root, env({ TIDE_DISK_DIR: root }), ["--channel", ".."])).toEqual({
+      expect(
+        await publishIn(artifact(), env({ TIDE_DISK_DIR: root }), ["--channel", ".."]),
+      ).toEqual({
         code: 2,
         out: [],
         err: [
           "tide: channel must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
         ],
       });
-      expect(readdirSync(app.root)).not.toContain("fake-expo.log");
       expect(tree(root)).toEqual(new Map());
     });
 
     test("an http URL to a loopback IP is accepted and its trailing / dropped", async () => {
       const root = tempRoot();
       const result = await publishIn(
-        project().root,
+        artifact({ fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } } }),
         { ...env({ TIDE_DISK_DIR: root }), TIDE_ASSET_URL: "http://127.0.0.1:9000/cdn/" },
-        ["--platform", "ios", "--runtime-version", "1.0.0", "--export-dir", EXPORT],
       );
       expect(result.code).toBe(0);
       const { manifest } = await signedManifest(diskObjects(root), IOS);
@@ -493,33 +408,178 @@ describe("publish to disk", () => {
         expect(a.url).toMatch(/^http:\/\/127\.0\.0\.1:9000\/cdn\/assets\/[0-9a-f]{64}$/);
       }
     });
+  });
 
-    test("a project without Expo installed is refused", async () => {
+  describe("export directory refusals", () => {
+    const write = (dir: string, text: string) => {
+      writeFileSync(join(dir, "tide-export.json"), text);
+    };
+    const fields = (change: Record<string, unknown>) => (dir: string) => {
+      const value = JSON.parse(readFileSync(join(dir, "tide-export.json"), "utf8")) as object;
+      write(dir, JSON.stringify({ ...value, ...change }));
+    };
+    const RUNTIME =
+      "runtimeVersion must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..";
+    const PLATFORMS =
+      "tide-export.json platforms must map ios or android to only a string runtimeVersion";
+
+    test.each<[string, (dir: string) => void, string]>([
+      [
+        "a missing tide-export.json",
+        (dir) => rmSync(join(dir, "tide-export.json")),
+        "export tide-export.json is missing or unreadable",
+      ],
+      [
+        "a tide-export.json that is not JSON",
+        (dir) => write(dir, "{"),
+        "tide-export.json is not UTF-8 JSON",
+      ],
+      ["another version", fields({ version: 2 }), "tide-export.json version must be 1"],
+      [
+        "an unknown field",
+        fields({ key: "x" }),
+        "tide-export.json must hold only version, certificate, codeSigningMetadata, expoClient, platforms",
+      ],
+      [
+        "a certificate that is not a string",
+        fields({ certificate: 1 }),
+        "tide-export.json certificate must be a string of at most 64 KiB",
+      ],
+      [
+        "a certificate over 64 KiB",
+        fields({ certificate: "x".repeat(64 * 1024 + 1) }),
+        "tide-export.json certificate must be a string of at most 64 KiB",
+      ],
+      [
+        "a private key as the certificate",
+        (dir) => fields({ certificate: main.pkcs8 })(dir),
+        "tide-export.json certificate: certificate must be exactly one PEM CERTIFICATE block",
+      ],
+      [
+        "another certificate",
+        (dir) => fields({ certificate: other.certificate })(dir),
+        "tide-export.json certificate differs from TIDE_BUILD_CERTIFICATE",
+      ],
+      [
+        "a malformed keyid",
+        fields({ codeSigningMetadata: { keyid: { nested: "x" } } }),
+        "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
+      ],
+      [
+        "an unprintable keyid",
+        fields({ codeSigningMetadata: { keyid: "ma\u00efn" } }),
+        "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
+      ],
+      [
+        "no keyid",
+        fields({ codeSigningMetadata: { alg: "rsa-v1_5-sha256" } }),
+        "tide-export.json codeSigningMetadata.keyid is missing",
+      ],
+      [
+        "an unsupported alg",
+        fields({ codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha512" } }),
+        "tide-export.json codeSigningMetadata.alg must be rsa-v1_5-sha256",
+      ],
+      [
+        "another keyid",
+        fields({ codeSigningMetadata: { keyid: "other" } }),
+        "tide-export.json codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
+      ],
+      [
+        "an expoClient that is not an object",
+        fields({ expoClient: [] }),
+        "tide-export.json expoClient must be an object",
+      ],
+      [
+        "no platform",
+        fields({ platforms: {} }),
+        "tide-export.json platforms must name at least one platform",
+      ],
+      ["an unknown platform", fields({ platforms: { web: { runtimeVersion: "1" } } }), PLATFORMS],
+      [
+        "a platform with another member",
+        fields({ platforms: { ios: { runtimeVersion: "1", channel: "x" } } }),
+        PLATFORMS,
+      ],
+      [
+        "a runtime that is not a string",
+        fields({ platforms: { ios: { runtimeVersion: 1 } } }),
+        PLATFORMS,
+      ],
+      [
+        "a runtime outside the key grammar",
+        fields({ platforms: { ios: { runtimeVersion: ".." } } }),
+        RUNTIME,
+      ],
+      [
+        "tide-export.json symlinked outside the directory",
+        (dir) => {
+          const outside = join(tempRoot(), "tide-export.json");
+          cpSync(join(dir, "tide-export.json"), outside);
+          rmSync(join(dir, "tide-export.json"));
+          symlinkSync(outside, join(dir, "tide-export.json"));
+        },
+        "export tide-export.json resolves outside the export directory",
+      ],
+      [
+        "dist symlinked outside the directory",
+        (dir) => {
+          const outside = join(tempRoot(), "dist");
+          cpSync(join(dir, "dist"), outside, { recursive: true });
+          rmSync(join(dir, "dist"), { recursive: true });
+          symlinkSync(outside, join(dir, "dist"));
+        },
+        "export dist resolves outside the export directory",
+      ],
+      [
+        "dist a file",
+        (dir) => {
+          rmSync(join(dir, "dist"), { recursive: true });
+          writeFileSync(join(dir, "dist"), "");
+        },
+        "export dist is not a directory",
+      ],
+    ])("%s is refused, leaving the bucket byte for byte", async (_, damage, message) => {
       const root = tempRoot();
-      const app = project({ root: join(tempRoot(), "app") });
-      expect(await publishIn(app.root, env({ TIDE_DISK_DIR: root }))).toEqual({
+      expect((await publishIn(artifact(), env({ TIDE_DISK_DIR: root }))).code).toBe(0);
+      const before = tree(root);
+      const dir = artifact();
+      damage(dir);
+      expect(await publishIn(dir, env({ TIDE_DISK_DIR: root }))).toEqual({
         code: 2,
         out: [],
-        err: [
-          "tide: expo is not installed in the project: add expo and expo-updates to its dependencies",
-        ],
+        err: [`tide: ${message}`],
       });
+      expect(tree(root)).toEqual(before);
     });
 
-    test("an Expo tool that fails refuses the publish", async () => {
+    test.each([
+      ["--platform", "ios"],
+      ["--runtime-version", "1.0.0"],
+      ["--export-dir", "dist"],
+      ["--project-root", "."],
+    ])("the removed %s is a usage error", async (...flag) => {
       const root = tempRoot();
-      const app = project();
-      writeFileSync(join(app.root, "app.config.mjs"), 'throw new Error("broken config");\n');
-      expect(await publishIn(app.root, env({ TIDE_DISK_DIR: root }))).toEqual({
+      expect(await publishIn(artifact(), env({ TIDE_DISK_DIR: root }), flag)).toEqual({
         code: 2,
         out: [],
-        err: ["tide: expo config failed with exit code 1"],
+        err: [`tide: unrecognised arguments; ${PUBLISH_USAGE}`],
       });
       expect(tree(root)).toEqual(new Map());
     });
+
+    test("--from is required", async () => {
+      const result = await publish(["--channel", "main"], env({ TIDE_DISK_DIR: tempRoot() }), {
+        out: () => undefined,
+        err: (l) => {
+          expect(l).toBe(`tide: --from and --channel are required; ${PUBLISH_USAGE}`);
+        },
+      });
+      expect(result).toBe(2);
+    });
   });
 
-  describe("export refusals", () => {
+  describe("dist refusals", () => {
     const metadataOf = (dir: string) =>
       JSON.parse(readFileSync(join(dir, "metadata.json"), "utf8")) as {
         fileMetadata: Record<string, { bundle: string; assets: { path: string; ext: string }[] }>;
@@ -608,16 +668,10 @@ describe("publish to disk", () => {
         "export metadata.json fileMetadata.ios.assets[5] lists key 79054025255fb1a26e4bc422aef54eb4 for two different files",
       ],
     ])("%s is refused with nothing written", async (_, damage, message) => {
-      const dir = join(tempRoot(), "export");
-      cpSync(EXPORT, dir, { recursive: true });
-      damage(dir);
+      const dir = artifact();
+      damage(join(dir, "dist"));
       const root = tempRoot();
-      const result = await publishIn(project().root, env({ TIDE_DISK_DIR: root }), [
-        "--runtime-version",
-        "1.0.0",
-        "--export-dir",
-        dir,
-      ]);
+      const result = await publishIn(dir, env({ TIDE_DISK_DIR: root }));
       expect(result).toEqual({ code: 2, out: [], err: [`tide: ${message}`] });
       expect(tree(root)).toEqual(new Map());
     });
@@ -636,10 +690,10 @@ describe("publish to disk", () => {
 
 describe("publish to S3", () => {
   test("the same publish stores the disk publish's keys, and a second one uploads no existing object", async () => {
-    const app = project();
+    const app = artifact();
     const disk = tempRoot();
-    expect((await publishIn(app.root, env({ TIDE_DISK_DIR: disk }))).code).toBe(0);
-    expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
+    expect((await publishIn(app, env({ TIDE_DISK_DIR: disk }))).code).toBe(0);
+    expect((await publishIn(app, env(s3Env()))).code).toBe(0);
     // Update IDs are fresh per publish, so each record is named by the pointer that serves it.
     const named = async (objects: Objects) => {
       const ids = new Map<string, string>();
@@ -674,7 +728,7 @@ describe("publish to S3", () => {
       android: await createdAt(s3.objects, ANDROID),
     };
     s3.puts.length = 0;
-    expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
+    expect((await publishIn(app, env(s3Env()))).code).toBe(0);
     // Repeat publishes upload no bundle or asset.
     expect(s3.puts.filter((k) => !/^(?:updates|bases)\//.test(k))).toEqual([IOS, ANDROID]);
     expect(s3.puts.filter((k) => k.startsWith("updates/"))).toHaveLength(2);
@@ -688,7 +742,7 @@ describe("publish to S3", () => {
       s3.setNow(T);
       // The local clock moves on once writing starts; createdAt must not follow it.
       const now = () => (s3.puts.length === 0 ? T + 60_000 : T + 90_000);
-      expect((await publishIn(project().root, env(s3Env()), [], now)).code).toBe(0);
+      expect((await publishIn(artifact(), env(s3Env()), [], now)).code).toBe(0);
       const expected = new Date(T + 60_000).toISOString();
       expect(await createdAt(s3.objects, IOS)).toBe(expected);
       expect(await createdAt(s3.objects, ANDROID)).toBe(expected);
@@ -698,7 +752,7 @@ describe("publish to S3", () => {
       "a local clock at %d refuses the publish",
       async (local) => {
         s3.setNow(T);
-        expect(await publishIn(project().root, env(s3Env()), [], () => local)).toMatchObject({
+        expect(await publishIn(artifact(), env(s3Env()), [], () => local)).toMatchObject({
           code: 2,
           err: [
             "tide: the local clock differs from the bucket's by more than a minute: fix the clock",
@@ -711,17 +765,17 @@ describe("publish to S3", () => {
     test("a certificate that has expired by the bucket's clock but not the local one is refused", async () => {
       const expiry = T + 3_600_000;
       const expiring = await identity(new Date(expiry));
-      const app = project({ cert: expiring.certificate });
+      const app = artifact({ fields: { certificate: expiring.certificate } });
       s3.setNow(expiry + 20_000);
       const result = await publishIn(
-        app.root,
-        { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
+        app,
+        { ...env(s3Env(), expiring), ...pins(expiring) },
         [],
         () => expiry - 20_000,
       );
       expect(result).toMatchObject({
         code: 2,
-        err: ["tide: updates.codeSigningCertificate: certificate has expired"],
+        err: ["tide: TIDE_BUILD_CERTIFICATE: certificate has expired"],
       });
       expect(s3.puts).toEqual([]);
     });
@@ -731,21 +785,19 @@ describe("publish to S3", () => {
       async (clock) => {
         const expiry = T + 3_600_000;
         const expiring = await identity(new Date(expiry));
-        const app = project({ cert: expiring.certificate });
+        const app = artifact({ fields: { certificate: expiring.certificate } });
         s3.setNow(T);
         // Once the first pointer lands, one clock passes expiry while the other stays behind it.
         if (clock === "bucket") s3.onPut(IOS, () => s3.setNow(expiry + 1000));
         const now = () => (clock === "local" && s3.puts.includes(IOS) ? expiry + 1000 : T);
         const result = await publishIn(
-          app.root,
-          { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
+          app,
+          { ...env(s3Env(), expiring), ...pins(expiring) },
           [],
           now,
         );
         expect(result.code).toBe(1);
-        expect(result.err).toEqual([
-          "tide: updates.codeSigningCertificate: certificate has expired",
-        ]);
+        expect(result.err).toEqual(["tide: TIDE_BUILD_CERTIFICATE: certificate has expired"]);
         expect(result.out).toHaveLength(1);
         expect(result.out[0]).toMatch(/^reply\/main\/1\.0\.0\/ios /);
         expect(s3.objects.has(IOS)).toBe(true);
@@ -756,7 +808,7 @@ describe("publish to S3", () => {
     test("a certificate that expires by the local clock while the bucket's time is read stops the next pointer", async () => {
       const expiry = T + 3_600_000;
       const expiring = await identity(new Date(expiry));
-      const app = project({ cert: expiring.certificate });
+      const app = artifact({ fields: { certificate: expiring.certificate } });
       s3.setNow(T);
       let landed: number | undefined;
       s3.onPut(IOS, () => {
@@ -765,14 +817,14 @@ describe("publish to S3", () => {
       // The local clock passes expiry during the first request after the iOS pointer: the bucket time read.
       const now = () => (landed !== undefined && s3.requests > landed ? expiry + 1000 : T);
       const result = await publishIn(
-        app.root,
-        { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
+        app,
+        { ...env(s3Env(), expiring), ...pins(expiring) },
         [],
         now,
       );
       expect(result).toMatchObject({
         code: 1,
-        err: ["tide: updates.codeSigningCertificate: certificate has expired"],
+        err: ["tide: TIDE_BUILD_CERTIFICATE: certificate has expired"],
       });
       expect(s3.objects.has(IOS)).toBe(true);
       expect(s3.puts).not.toContain(ANDROID);
@@ -783,10 +835,10 @@ describe("publish to S3", () => {
     const theirs = utf8("another writer's reply");
 
     test("a pointer changed after it was read fails the publish and keeps the other writer's bytes", async () => {
-      const app = project();
-      expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
+      const app = artifact();
+      expect((await publishIn(app, env(s3Env()))).code).toBe(0);
       s3.raceOnPut(IOS, theirs);
-      const result = await publishIn(app.root, env(s3Env()));
+      const result = await publishIn(app, env(s3Env()));
       expect(result).toMatchObject({
         code: 1,
         out: [],
@@ -798,7 +850,7 @@ describe("publish to S3", () => {
 
     test("a pointer created by another writer during a first publish is kept", async () => {
       s3.raceOnPut(IOS, theirs);
-      const result = await publishIn(project().root, env(s3Env()));
+      const result = await publishIn(artifact(), env(s3Env()));
       expect(result.code).toBe(1);
       expect(s3.objects.get(IOS)).toEqual(theirs);
       expect(s3.puts).not.toContain(ANDROID);
@@ -806,7 +858,7 @@ describe("publish to S3", () => {
 
     test("a reply/no-update created under another key fails the publish before any pointer", async () => {
       s3.raceOnPut(NO_UPDATE_KEY, await noUpdateBy(other));
-      const result = await publishIn(project().root, env(s3Env()));
+      const result = await publishIn(artifact(), env(s3Env()));
       expect(result).toMatchObject({
         code: 1,
         err: [
@@ -817,7 +869,7 @@ describe("publish to S3", () => {
     });
 
     test("each update's release and base records are written before its pointer", async () => {
-      expect((await publishIn(project().root, env(s3Env()))).code).toBe(0);
+      expect((await publishIn(artifact(), env(s3Env()))).code).toBe(0);
       for (const key of [IOS, ANDROID]) {
         const { id } = (await signedManifest(s3.objects, key)).manifest;
         const order = [recordKey(id), baseKey(id), key].map((k) => s3.puts.indexOf(k));
@@ -826,12 +878,12 @@ describe("publish to S3", () => {
     });
 
     test("a failed base write leaves every pointer unchanged", async () => {
-      const app = project();
-      expect((await publishIn(app.root, env(s3Env()))).code).toBe(0);
+      const app = artifact();
+      expect((await publishIn(app, env(s3Env()))).code).toBe(0);
       const before = [IOS, ANDROID].map((k) => s3.objects.get(k));
       s3.puts.length = 0;
       s3.dropAfterPut("bases/");
-      const result = await publishIn(app.root, env(s3Env()));
+      const result = await publishIn(app, env(s3Env()));
       expect(result.code).toBe(1);
       expect(result.err).toHaveLength(1);
       expect(result.err[0]).toMatch(
@@ -843,7 +895,7 @@ describe("publish to S3", () => {
 
     test("a pointer whose response is lost may be live, and references only stored objects", async () => {
       s3.dropAfterPut(IOS);
-      const result = await publishIn(project().root, env(s3Env()));
+      const result = await publishIn(artifact(), env(s3Env()));
       expect(result.code).toBe(1);
       expect(result.err).toEqual([
         `tide: ${IOS}: S3 PutObject failed: network error; outcome unknown; check with tide status`,
@@ -854,11 +906,13 @@ describe("publish to S3", () => {
     });
   });
 
-  test("a repeated --platform is refused before any bucket call", async () => {
+  test("a malformed export is refused before any bucket call", async () => {
     const requests = s3.requests;
-    expect(
-      await publishIn(project().root, env(s3Env()), ["--platform", "ios", "--platform", "ios"]),
-    ).toEqual({ code: 2, out: [], err: ["tide: --platform ios is given twice"] });
+    expect(await publishIn(artifact({ fields: { version: 2 } }), env(s3Env()))).toEqual({
+      code: 2,
+      out: [],
+      err: ["tide: tide-export.json version must be 1"],
+    });
     expect(s3.requests).toBe(requests);
     expect(s3Snapshot()).toEqual(new Map());
   });

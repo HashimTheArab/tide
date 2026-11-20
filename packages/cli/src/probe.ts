@@ -8,7 +8,6 @@ import {
   ProtocolError,
   UUID,
   assetHash,
-  codeSigningCertificate,
   encodeSfvDictionary,
   parseMultipart,
   parseSfvDictionary,
@@ -18,7 +17,7 @@ import {
 } from "@tide/protocol";
 
 import type { Env } from "./keys.ts";
-import { isObject, member, read, readSmallFile } from "./keys.ts";
+import { BUILD_KEYID, KeyError, buildIdentity, isObject, member } from "./keys.ts";
 import { urlBase } from "./publish-record.ts";
 
 /** Exit codes by failure class; 1 is left to Node's exit on an uncaught error, so it always means a bug. */
@@ -39,9 +38,6 @@ export const PROBE_USAGE =
 /** Per-request deadlines: the manifest's matches a stock client's read timeout; a bundle may be megabytes. */
 const MANIFEST_TIMEOUT_MS = 10_000;
 const BUNDLE_TIMEOUT_MS = 60_000;
-const CERTIFICATE_FILE = "TIDE_BUILD_CERTIFICATE_FILE";
-const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
-const KEYID = "TIDE_BUILD_KEYID";
 const DIRECTIVES = {
   rollBackToEmbedded: true,
   noUpdateAvailable: true,
@@ -134,26 +130,14 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
     throw usage("--app-id must be printable ASCII without edge whitespace");
   }
 
-  const keyId = read(env, KEYID);
-  if (keyId === undefined) throw usage(`${KEYID} is not set: set it to the keyid the builds embed`);
-  if (!/^[\x20-\x7E]+$/.test(keyId)) throw usage(`${KEYID} must be printable ASCII`);
-  const file = read(env, CERTIFICATE_FILE);
-  const value = read(env, CERTIFICATE_PEM);
-  if ((file === undefined) === (value === undefined)) {
-    throw usage(`set exactly one of ${CERTIFICATE_FILE} and ${CERTIFICATE_PEM}`);
-  }
-  const source = file === undefined ? CERTIFICATE_PEM : CERTIFICATE_FILE;
-  const pem = file === undefined ? value : readSmallFile(file)?.toString("utf8");
-  if (pem === undefined) {
-    throw usage(`${CERTIFICATE_FILE} unreadable: not a regular file of at most 64 KiB`);
-  }
-  let key: CryptoKey;
+  let identity;
   try {
-    ({ key } = await codeSigningCertificate(pem, new Date()));
+    identity = await buildIdentity(env, Date.now());
   } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    throw usage(`${source}: ${e.message}`);
+    if (!(e instanceof KeyError)) throw e;
+    throw usage(e.message);
   }
+  const { key, keyId } = identity;
 
   return {
     manifestUrl: `${base}/manifest`,
@@ -268,7 +252,7 @@ async function verify(part: Part, { key, keyId }: Probe): Promise<void> {
     if (!(e instanceof ProtocolError)) throw e;
     throw fail(
       e.field === "signature.keyid"
-        ? `is signed under another keyid than ${KEYID}`
+        ? `is signed under another keyid than ${BUILD_KEYID}`
         : e.field === "signature.sig"
           ? "does not verify under the pinned certificate"
           : "has a malformed expo-signature",

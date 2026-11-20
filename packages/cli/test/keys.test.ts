@@ -1,5 +1,5 @@
 import { KeyObject, createHash, generateKeyPairSync } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
@@ -16,6 +16,7 @@ import {
 
 import type { CertificateOptions } from "../../protocol/test/fixtures.ts";
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
+import type { SigningMetadata } from "../src/keys.ts";
 import type { FakeKms, KmsFault } from "./fake-kms.ts";
 import { EXTENSION, RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
@@ -48,7 +49,6 @@ const OTHER_IDENTITY =
 interface Identity {
   readonly keys: KeyPair;
   readonly certificate: string;
-  readonly fingerprint: string; // Lowercase hex SHA-256 of the certificate DER.
   readonly pkcs8: string;
   readonly pkcs1: string;
   readonly keyObject: KeyObject;
@@ -57,12 +57,6 @@ interface Identity {
 const generate = (modulusLength = 2048) =>
   crypto.subtle.generateKey({ ...RSA_SHA256, modulusLength }, true, ["sign", "verify"]);
 
-/** Returns the lowercase hex SHA-256 of a PEM certificate's DER. */
-const fingerprintOf = (pem: string) =>
-  createHash("sha256")
-    .update(Buffer.from(pem.replace(/-----[^-]+-----|\s/g, ""), "base64"))
-    .digest("hex");
-
 async function identity(keys?: KeyPair, options: CertificateOptions = {}): Promise<Identity> {
   const pair = keys ?? (await generate());
   const cert = await certificate(pair.publicKey, pair.privateKey, new Date(), options);
@@ -70,7 +64,6 @@ async function identity(keys?: KeyPair, options: CertificateOptions = {}): Promi
   return {
     keys: pair,
     certificate: cert,
-    fingerprint: fingerprintOf(cert),
     pkcs8: keyObject.export({ type: "pkcs8", format: "pem" }).toString(),
     pkcs1: keyObject.export({ type: "pkcs1", format: "pem" }).toString(),
     keyObject,
@@ -94,25 +87,19 @@ afterEach(() => {
   kms.signWith(main.keyObject);
 });
 
-/** Writes `cert` into a fresh project and returns its root and Expo config. */
-function project(cert: string, metadata: unknown = { keyid: "main", alg: "rsa-v1_5-sha256" }) {
-  const projectRoot = tempRoot();
-  mkdirSync(join(projectRoot, "keys"));
-  writeFileSync(join(projectRoot, "keys", "certificate.pem"), cert);
-  const config = {
-    updates: {
-      url: "https://updates.example.com/manifest",
-      codeSigningCertificate: "./keys/certificate.pem",
-      codeSigningMetadata: metadata,
-    },
-  };
-  return { projectRoot, config };
-}
+/** The identity an export of `cert` carries. */
+const app = (
+  cert: string,
+  metadata: SigningMetadata = { keyid: "main", alg: "rsa-v1_5-sha256" },
+) => ({
+  certificate: cert,
+  codeSigningMetadata: metadata,
+});
 
 /** The build pins for `id` under `keyid`. */
 const pins = (id: Identity, keyid = "main") => ({
   TIDE_BUILD_KEYID: keyid,
-  TIDE_BUILD_CERTIFICATE_SHA256: id.fingerprint,
+  TIDE_BUILD_CERTIFICATE: id.certificate,
 });
 
 /** Writes `pem` to a temp file and returns the file source's variable. */
@@ -234,15 +221,14 @@ describe("signatures", () => {
   ])(
     "a manifest part signed through %s verifies against the generated certificate",
     async (_, source) => {
-      const { projectRoot, config } = project(main.certificate);
       const dir = tempRoot();
-      writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+      writeFileSync(join(dir, "app.json"), JSON.stringify(app(main.certificate)));
       writeFileSync(join(dir, "manifest.json"), PART);
-      const result = await run(
-        DRIVER,
-        [join(dir, "config.json"), projectRoot, join(dir, "manifest.json")],
-        { ...pins(main), ...source(), TIDE_DISK_DIR: tempRoot() },
-      );
+      const result = await run(DRIVER, [join(dir, "app.json"), join(dir, "manifest.json")], {
+        ...pins(main),
+        ...source(),
+        TIDE_DISK_DIR: tempRoot(),
+      });
       expectNoPem(result.stdout + result.stderr, main.pkcs8);
       expectNoPem(result.stdout + result.stderr, main.pkcs1);
       expectSuccess(result);
@@ -256,13 +242,9 @@ describe("signatures", () => {
 
   test("a part over 8 KiB signs identically through KMS and a file", async () => {
     const large = utf8(JSON.stringify({ padding: "x".repeat(9000) }));
-    const { projectRoot, config } = project(main.certificate);
     const headers = [];
     for (const source of [kmsEnv(), keyFile(main.pkcs8)]) {
-      const { signer } = await openWriter(
-        { ...pins(main), ...source, TIDE_DISK_DIR: tempRoot() },
-        { projectRoot, config },
-      );
+      const { signer } = await openWriter({ ...pins(main), ...source, TIDE_DISK_DIR: tempRoot() });
       headers.push(await expoSignature(large, signer));
     }
     expect(headers[0]).toBe(headers[1]);
@@ -271,16 +253,12 @@ describe("signatures", () => {
   });
 
   test("the KMS request carries the part's SHA-256 as a DIGEST, and a signed session token", async () => {
-    const { projectRoot, config } = project(main.certificate);
-    const { signer } = await openWriter(
-      {
-        ...pins(main),
-        ...kmsEnv(),
-        TIDE_KMS_SESSION_TOKEN: "tide-session-token",
-        TIDE_DISK_DIR: tempRoot(),
-      },
-      { projectRoot, config },
-    );
+    const { signer } = await openWriter({
+      ...pins(main),
+      ...kmsEnv(),
+      TIDE_KMS_SESSION_TOKEN: "tide-session-token",
+      TIDE_DISK_DIR: tempRoot(),
+    });
     await signer.sign(PART);
     const last = kms.last!;
     expect(JSON.parse(Buffer.from(last.body).toString("utf8"))).toEqual({
@@ -298,9 +276,9 @@ describe("signatures", () => {
 interface Refusal {
   readonly kms?: true; // Starts from a complete KMS setup instead of the key file.
   readonly env?: Record<string, string | undefined>;
-  readonly cert?: Identity; // The app's certificate, which the pins name.
-  readonly metadata?: unknown;
-  readonly config?: (config: { updates: Record<string, unknown> }) => unknown;
+  readonly cert?: Identity; // The certificate the pins name and, unless `exported` is given, the export carries.
+  readonly exported?: string; // The export's certificate.
+  readonly metadata?: SigningMetadata; // The export's codeSigningMetadata.
   readonly fault?: KmsFault;
   readonly message: string;
 }
@@ -391,50 +369,43 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   }),
   "TIDE_BUILD_KEYID unset": () => ({
     env: { TIDE_BUILD_KEYID: undefined },
-    message: "TIDE_BUILD_KEYID is not set: set it to the keyid the store builds embed",
+    message: "TIDE_BUILD_KEYID is not set: set it to the keyid the builds embed",
   }),
-  "TIDE_BUILD_CERTIFICATE_SHA256 empty": () => ({
-    env: { TIDE_BUILD_CERTIFICATE_SHA256: "" },
-    message:
-      "TIDE_BUILD_CERTIFICATE_SHA256 is not set: set it to the fingerprint of the certificate the store builds embed",
+  "an unprintable TIDE_BUILD_KEYID": () => ({
+    env: { TIDE_BUILD_KEYID: "ma\u00efn" },
+    message: "TIDE_BUILD_KEYID must be printable ASCII",
   }),
-  "a malformed fingerprint": () => ({
-    env: { TIDE_BUILD_CERTIFICATE_SHA256: "sha256:abc" },
-    message: "TIDE_BUILD_CERTIFICATE_SHA256 must be a SHA-256 fingerprint: 64 hex digits",
+  "no build certificate": () => ({
+    env: { TIDE_BUILD_CERTIFICATE: "" },
+    message: "set exactly one of TIDE_BUILD_CERTIFICATE_FILE and TIDE_BUILD_CERTIFICATE",
   }),
-  "an app keyid that differs from the build's": () => ({
-    metadata: { keyid: "mian" },
-    message: "app config updates.codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
+  "a directory as the build certificate file": () => ({
+    env: { TIDE_BUILD_CERTIFICATE: undefined, TIDE_BUILD_CERTIFICATE_FILE: tempRoot() },
+    message: "TIDE_BUILD_CERTIFICATE_FILE unreadable: not a regular file of at most 64 KiB",
   }),
-  "no codeSigningCertificate": () => ({
-    config: ({ updates }) => ({ updates: { ...updates, codeSigningCertificate: undefined } }),
-    message: "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
-  }),
-  "a missing certificate file": () => ({
-    config: ({ updates }) => ({
-      updates: { ...updates, codeSigningCertificate: "./nowhere.pem" },
-    }),
-    message: "updates.codeSigningCertificate is unreadable or over 64 KiB",
-  }),
-  "a matching certificate not valid yet": async () => ({
+  "a build certificate not valid yet": async () => ({
     cert: await identity(main.keys, { notBefore: new Date(Date.now() + DAY) }),
-    message: "updates.codeSigningCertificate: certificate is not valid yet",
+    message: "TIDE_BUILD_CERTIFICATE: certificate is not valid yet",
   }),
-  "a matching certificate without the codeSigning usage": async () => ({
+  "a build certificate without the codeSigning usage": async () => ({
     cert: await identity(main.keys, { extensions: [EXTENSION.digitalSignature] }),
-    message: "updates.codeSigningCertificate: certificate must have Extended Key Usage codeSigning",
+    message: "TIDE_BUILD_CERTIFICATE: certificate must have Extended Key Usage codeSigning",
   }),
-  "a missing keyid": () => ({
-    metadata: { alg: "rsa-v1_5-sha256" },
-    message: "app config has no updates.codeSigningMetadata.keyid",
+  "a matching key with an expired build certificate": async () => ({
+    cert: await expiredCertificate(),
+    message: "TIDE_BUILD_CERTIFICATE: certificate has expired",
   }),
-  "an unprintable keyid": () => ({
-    metadata: { keyid: "ma\u00efn" },
-    message: "app config updates.codeSigningMetadata.keyid must be printable ASCII",
+  "an export keyid that differs from the build's": () => ({
+    metadata: { keyid: "mian" },
+    message: "tide-export.json codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
   }),
-  "an unsupported alg": () => ({
-    metadata: { keyid: "main", alg: "rsa-v1_5-sha512" },
-    message: "app config updates.codeSigningMetadata.alg must be rsa-v1_5-sha256",
+  "an export certificate that is not a certificate": () => ({
+    exported: "not a certificate",
+    message: "tide-export.json certificate: certificate must be exactly one PEM CERTIFICATE block",
+  }),
+  "an export certificate other than the build's": () => ({
+    exported: other.certificate,
+    message: "tide-export.json certificate differs from TIDE_BUILD_CERTIFICATE",
   }),
   "a directory as the key file": () => ({
     env: { TIDE_SIGNING_KEY_FILE: tempRoot() },
@@ -464,16 +435,11 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
     env: keyFile(other.pkcs8),
     message: MISMATCH,
   }),
-  "a matching key with an expired certificate": async () => ({
-    cert: await expiredCertificate(),
-    message: "updates.codeSigningCertificate: certificate has expired",
-  }),
 };
 
-/** Returns the environment and project for `refusal` on a store; the pins name the app's certificate. */
+/** Returns the environment and export identity for `refusal` on a store. */
 function setup(refusal: Refusal, storeEnv: Record<string, string>) {
   const cert = refusal.cert ?? main;
-  const app = project(cert.certificate, refusal.metadata);
   const env: Record<string, string | undefined> = {
     ...pins(cert),
     ...(refusal.kms ? kmsEnv() : keyFile(main.pkcs8)),
@@ -481,7 +447,7 @@ function setup(refusal: Refusal, storeEnv: Record<string, string>) {
     ...refusal.env,
   };
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
-  return { env, project: { ...app, config: refusal.config?.(app.config) ?? app.config } };
+  return { env, app: app(refusal.exported ?? cert.certificate, refusal.metadata) };
 }
 
 describe.each(["disk", "s3"] as const)("refusals before the bucket on %s", (kind) => {
@@ -501,8 +467,8 @@ describe.each(["disk", "s3"] as const)("refusals before the bucket on %s", (kind
     const item = await REFUSALS[name]!();
     if (item.fault !== undefined) kms.fault(item.fault);
     const opened = await store(kind, await seed());
-    const { env, project: app } = setup(item, opened.env);
-    await refusal(openWriter(env, app), item.message);
+    const { env, app: exported } = setup(item, opened.env);
+    await refusal(openWriter(env, { app: exported }), item.message);
     opened.unchanged(0);
   });
 
@@ -510,62 +476,88 @@ describe.each(["disk", "s3"] as const)("refusals before the bucket on %s", (kind
     const opened = await store(kind, await seed());
     await openWriter(
       { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
-      project(main.certificate),
+      { app: app(main.certificate) },
     );
     opened.unchanged(kind === "s3" ? 1 : 0);
   });
 });
 
 test("a signing error wins over a missing TIDE_DISK_DIR", async () => {
-  const { projectRoot, config } = project(main.certificate);
   await refusal(
-    openWriter(
-      { ...pins(main), ...keyFile(other.pkcs8), TIDE_DISK_DIR: join(tempRoot(), "missing") },
-      { projectRoot, config },
-    ),
+    openWriter({
+      ...pins(main),
+      ...keyFile(other.pkcs8),
+      TIDE_DISK_DIR: join(tempRoot(), "missing"),
+    }),
     MISMATCH,
   );
 });
 
-// 0xA0 is no-break space in Latin-1, which the PEM pattern's \s would accept.
-test("a certificate file that is not UTF-8 is refused", async () => {
-  const { projectRoot, config } = project(main.certificate);
-  const bytes = Buffer.concat([Buffer.from([0xa0]), Buffer.from(main.certificate)]);
-  writeFileSync(join(projectRoot, "keys", "certificate.pem"), bytes);
+test("a build certificate file passes like the same PEM in the environment", async () => {
+  const path = join(tempRoot(), "certificate.pem");
+  writeFileSync(path, main.certificate);
+  const { signer } = await openWriter(
+    {
+      TIDE_BUILD_KEYID: "main",
+      TIDE_BUILD_CERTIFICATE_FILE: path,
+      ...keyFile(main.pkcs8),
+      TIDE_DISK_DIR: tempRoot(),
+    },
+    { app: app(main.certificate) },
+  );
+  expect(signer.keyId).toBe("main");
   await refusal(
-    openWriter({ ...pins(main), ...keyFile(main.pkcs8) }, { projectRoot, config }),
-    "updates.codeSigningCertificate: certificate must be exactly one PEM CERTIFICATE block",
+    openWriter({ ...pins(main), TIDE_BUILD_CERTIFICATE_FILE: path, ...keyFile(main.pkcs8) }),
+    "set exactly one of TIDE_BUILD_CERTIFICATE_FILE and TIDE_BUILD_CERTIFICATE",
+  );
+});
+
+// 0xA0 is no-break space in Latin-1, which the PEM pattern's \s would accept.
+test("a build certificate file that is not UTF-8 is refused", async () => {
+  const path = join(tempRoot(), "certificate.pem");
+  writeFileSync(path, Buffer.concat([Buffer.from([0xa0]), Buffer.from(main.certificate)]));
+  await refusal(
+    openWriter({
+      TIDE_BUILD_KEYID: "main",
+      TIDE_BUILD_CERTIFICATE_FILE: path,
+      ...keyFile(main.pkcs8),
+    }),
+    "TIDE_BUILD_CERTIFICATE_FILE: certificate must be exactly one PEM CERTIFICATE block",
   );
 });
 
 describe.each(["disk", "s3"] as const)("build pins on an empty %s bucket", (kind) => {
-  test("a renewed certificate is refused while the builds pin an expired one of the same key", async () => {
-    const expired = await expiredCertificate();
+  test("an export of a renewed certificate is refused while the builds pin the old one of the same key", async () => {
+    const renewed = await identity(main.keys);
     const opened = await store(kind, {});
-    const { projectRoot, config } = project(main.certificate);
+    await refusal(
+      openWriter(
+        { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
+        { app: app(renewed.certificate) },
+      ),
+      "tide-export.json certificate differs from TIDE_BUILD_CERTIFICATE",
+    );
+    opened.unchanged(0);
+    // Builds pinning an expired certificate are refused whatever the export holds.
+    const expired = await expiredCertificate();
     await refusal(
       openWriter(
         { ...pins(expired), ...keyFile(main.pkcs8), ...opened.env },
-        { projectRoot, config },
+        { app: app(renewed.certificate) },
       ),
-      "app code-signing certificate differs from TIDE_BUILD_CERTIFICATE_SHA256",
-    );
-    opened.unchanged(0);
-    // With the app and the pin both naming the expired certificate, the profile refuses it.
-    const app = project(expired.certificate);
-    await refusal(
-      openWriter({ ...pins(expired), ...keyFile(main.pkcs8), ...opened.env }, app),
-      "updates.codeSigningCertificate: certificate has expired",
+      "TIDE_BUILD_CERTIFICATE: certificate has expired",
     );
     opened.unchanged(0);
   });
 
-  test("an app keyid of mian is refused while the builds pin main", async () => {
+  test("an export keyid of mian is refused while the builds pin main", async () => {
     const opened = await store(kind, {});
-    const { projectRoot, config } = project(main.certificate, { keyid: "mian" });
     await refusal(
-      openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }, { projectRoot, config }),
-      "app config updates.codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
+      openWriter(
+        { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
+        { app: app(main.certificate, { keyid: "mian" }) },
+      ),
+      "tide-export.json codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
     );
     opened.unchanged(0);
   });
@@ -604,9 +596,8 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
   ])("%s is refused after one read", async (_, reply, id, keyid, message) => {
     const opened = await store(kind, { "reply/no-update": await reply() });
     const moved = id();
-    const app = project(moved.certificate, { keyid });
     await refusal(
-      openWriter({ ...pins(moved, keyid), ...keyFile(moved.pkcs8), ...opened.env }, app),
+      openWriter({ ...pins(moved, keyid), ...keyFile(moved.pkcs8), ...opened.env }),
       message,
     );
     opened.unchanged(kind === "s3" ? 1 : 0);
@@ -618,10 +609,7 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
       [{}, 2], // reply/no-update, then the empty reply/ listing.
     ] as const) {
       const opened = await store(kind, seed);
-      const { signer } = await openWriter(
-        { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
-        project(main.certificate),
-      );
+      const { signer } = await openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env });
       expect(signer.keyId).toBe("main");
       opened.unchanged(kind === "s3" ? reads : 0);
     }
@@ -630,7 +618,7 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
 
 describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (kind) => {
   const open = (env: Record<string, string>) =>
-    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...env }, project(main.certificate));
+    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...env });
 
   test("opens to be repaired when every pointer verifies under the identity", async () => {
     const opened = await store(kind, {
@@ -660,7 +648,7 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
 test("a name outside the key grammar under reply/ refuses a bucket without reply/no-update", async () => {
   const opened = await store("s3", { "reply/main/1 0/ios": utf8("x") });
   await refusal(
-    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }, project(main.certificate)),
+    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }),
     "reply/ is unreadable: an object name outside the key grammar",
   );
   opened.unchanged(2);
@@ -671,7 +659,6 @@ describe("KMS failures", () => {
   const open = (env: Record<string, string> = {}, kmsTimeoutMs?: number) =>
     openWriter(
       { ...pins(main), ...kmsEnv(), TIDE_DISK_DIR: tempRoot(), ...env },
-      project(main.certificate),
       kmsTimeoutMs === undefined ? {} : { kmsTimeoutMs },
     );
   const secrets = [FAKE_KMS.secretAccessKey, FAKE_KMS.accessKeyId];
@@ -840,11 +827,10 @@ describe("KMS failures", () => {
 describe("no PEM text in output", () => {
   /** Runs the driver against an empty disk bucket unless `env` names another. */
   async function drive(env: Record<string, string>, cert: string) {
-    const { projectRoot, config } = project(cert);
     const dir = tempRoot();
-    writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+    writeFileSync(join(dir, "app.json"), JSON.stringify(app(cert)));
     writeFileSync(join(dir, "manifest.json"), PART);
-    return run(DRIVER, [join(dir, "config.json"), projectRoot, join(dir, "manifest.json")], {
+    return run(DRIVER, [join(dir, "app.json"), join(dir, "manifest.json")], {
       TIDE_DISK_DIR: tempRoot(),
       ...env,
     });
@@ -865,12 +851,12 @@ describe("no PEM text in output", () => {
           [encryptedPem(), main, {}, `${source} holds an encrypted key: Tide needs it unencrypted`],
           [main.pkcs8.slice(0, 900), main, {}, `${source} is not a PEM private key`],
           [other.pkcs8, main, {}, MISMATCH],
-          [main.pkcs8, expired, {}, "updates.codeSigningCertificate: certificate has expired"],
+          [main.pkcs8, expired, {}, "TIDE_BUILD_CERTIFICATE: certificate has expired"],
           [
             main.pkcs8,
             main,
             pins(other),
-            "app code-signing certificate differs from TIDE_BUILD_CERTIFICATE_SHA256",
+            "tide-export.json certificate differs from TIDE_BUILD_CERTIFICATE",
           ],
           [main.pkcs8, main, { TIDE_DISK_DIR: bucket }, OTHER_IDENTITY],
         ];

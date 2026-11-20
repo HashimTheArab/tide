@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import type { JsonObject } from "@tide/protocol";
 import {
   NO_UPDATE_KEY,
   ProtocolError,
@@ -26,9 +25,9 @@ import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
-import { KeyError, isObject, member, openWriter } from "./keys.ts";
+import { KeyError, openWriter } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
-import { expoEnv, expoJson, exportFor } from "./publish-export.ts";
+import { readProjectExport } from "./publish-export.ts";
 import { preparePatches, uploadPatches } from "./publish-patch.ts";
 import {
   BASE_PREFIX,
@@ -77,8 +76,7 @@ export type WriteStep = () => Promise<void>;
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
 
-export const PUBLISH_USAGE =
-  "usage: tide publish --channel <name> [--platform ios|android]... [--runtime-version <version>] [--export-dir <dir>] [--project-root <dir>]";
+export const PUBLISH_USAGE = "usage: tide publish --from <dir> --channel <name>";
 const MAX_SKEW_MS = 60_000;
 
 /**
@@ -120,7 +118,7 @@ export async function execute(
 }
 
 /** Prints a write command's own error and returns `code`; anything else is a bug and is rethrown. */
-function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
+export function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
   if (
     !(
       e instanceof PublishError ||
@@ -140,48 +138,18 @@ async function prepare(
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
-  const { channel, platforms, runtimeVersion, exportDir, projectRoot } = parse(args, cwd);
+  const { channel, from } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
 
-  const toolEnv = expoEnv(env);
-  const config = await expoJson(projectRoot, toolEnv, "expo", ["config", "--json"]);
-  const expoClient = await expoJson(projectRoot, toolEnv, "expo", [
-    "config",
-    "--type",
-    "public",
-    "--json",
-  ]);
-  if (!isObject(expoClient)) {
-    throw new PublishError("expo config --type public did not print an object");
-  }
-  const pointers = [];
-  for (const platform of platforms) {
-    const runtime =
-      runtimeVersion ??
-      member(
-        await expoJson(projectRoot, toolEnv, "expo-updates", [
-          "runtimeversion:resolve",
-          "--platform",
-          platform,
-        ]),
-        "runtimeVersion",
-      );
-    if (runtime === null || runtime === undefined) {
-      throw new PublishError(
-        `no ${platform} runtime version: set runtimeVersion or pass --runtime-version`,
-      );
-    }
-    if (typeof runtime !== "string") {
-      throw new PublishError(`the ${platform} runtime version is not a string`);
-    }
-    pointers.push({ platform, runtime, key: replyKey(channel, runtime, platform) });
-  }
+  const artifact = await readProjectExport(from);
+  const writer = await openWriter(env, { now, app: artifact });
+  const exported = artifact.platforms.map((p) => ({
+    ...p,
+    key: replyKey(channel, p.runtime, p.platform),
+  }));
 
-  const writer = await openWriter(env, { projectRoot, config }, { now });
-  const exported = await exportFor(projectRoot, toolEnv, exportDir, pointers);
-
-  const { keys, bases } = await recordedKeys(writer.bucket, { targets: pointers });
+  const { keys, bases } = await recordedKeys(writer.bucket, { targets: exported });
   for (const { platform, assets } of exported) {
     for (const a of assets) addKey(keys, a.key, a.hash, `this export (${platform})`);
   }
@@ -198,7 +166,7 @@ async function prepare(
       assetUrl: assetBase,
       launchAsset: { hash: t.bundle.hash },
       assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
-      extra: { expoClient: expoClient as JsonObject },
+      extra: { expoClient: artifact.expoClient },
     };
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
@@ -291,52 +259,29 @@ export async function commit(
 }
 
 function parse(args: readonly string[], cwd: string) {
-  let values;
-  try {
-    ({ values } = parseArgs({
+  const { values } = parsed(PUBLISH_USAGE, () =>
+    parseArgs({
       args: [...args],
-      options: {
-        channel: { type: "string" },
-        platform: { type: "string", multiple: true },
-        "runtime-version": { type: "string" },
-        "export-dir": { type: "string" },
-        "project-root": { type: "string" },
-      },
+      options: { from: { type: "string" }, channel: { type: "string" } },
       strict: true,
       allowPositionals: false,
-    }));
+    }),
+  );
+  const { from, channel } = values;
+  if (from === undefined || channel === undefined) {
+    throw new PublishError(`--from and --channel are required; ${PUBLISH_USAGE}`);
+  }
+  replyKey(channel, "1", "ios"); // Refuses a bad channel before the export is read.
+  return { channel, from: resolve(cwd, from) };
+}
+
+/** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
+export function parsed<T>(usage: string, parse: () => T): T {
+  try {
+    return parse();
   } catch {
-    throw new PublishError(`unrecognised arguments; ${PUBLISH_USAGE}`);
+    throw new PublishError(`unrecognised arguments; ${usage}`);
   }
-  const { channel } = values;
-  if (channel === undefined) throw new PublishError(`--channel is required; ${PUBLISH_USAGE}`);
-  replyKey(channel, "1", "ios"); // Refuses a bad channel before Expo runs.
-  const exportDir = values["export-dir"];
-  return {
-    channel,
-    platforms: platformsOf(values.platform),
-    runtimeVersion: values["runtime-version"],
-    exportDir: exportDir === undefined ? undefined : resolve(cwd, exportDir),
-    projectRoot: resolve(cwd, values["project-root"] ?? "."),
-  };
-}
-
-/** Returns the `--platform` values, both by default; a repeat is refused. */
-export function platformsOf(values: readonly string[] | undefined): Platform[] {
-  const platforms: Platform[] = [];
-  for (const p of (values ?? ["ios", "android"]).map(platformOf)) {
-    // Two writes over one read ETag would fail the run against its own pointer.
-    if (platforms.includes(p)) throw new PublishError(`--platform ${p} is given twice`);
-    platforms.push(p);
-  }
-  return platforms;
-}
-
-/** Returns `value` as a platform, or refuses it. */
-export function platformOf(value: string): Platform {
-  if (value !== "ios" && value !== "android")
-    throw new PublishError("--platform must be ios or android");
-  return value;
 }
 
 function configuredBase(env: Env, name: string): string {

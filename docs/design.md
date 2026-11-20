@@ -235,16 +235,16 @@ with no body and cancels every stream it holds.
 
 ## CLI
 
-**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only from one CI
-workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
+**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only as CI jobs in one
+concurrency group (for example `concurrency: tide-publish`) that runs them one at a time (`deploy.md`, Publishing). There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
 
-When `register-build` exits 1, the workflow keeps its exact inputs and runs it again with them, admitting no other
-writer, until it exits 0. A base PUT whose response was lost can still land; once a re-run has stored the same bytes,
-a late copy can only be refused or identical. Otherwise it could land after another writer had committed another
-SHA-256 for one of its asset keys, on a build already installed. If the rule is broken anyway, the next key check
-refuses, naming both sources.
+When `register-build` exits 1, the writer job retries it in place with its exact inputs (`deploy.md`, Publishing),
+admitting no other writer, until it exits 0. A base PUT whose response was lost can still land; once a retry has
+stored the same bytes, a late copy can only be refused or identical. Otherwise it could land after another writer had
+committed another SHA-256 for one of its asset keys, on a build already installed. If the rule is broken anyway, the
+next key check refuses, naming both sources.
 
 ### Bucket configuration
 
@@ -273,10 +273,45 @@ missing. It exits 1 if any record is unreadable, and 2 on a configuration or lis
 reported by its key, the same name a readable row prints, with a fixed reason; a name outside the key grammar and a
 stored field are never printed.
 
-`tide publish --channel <name> [--platform ios|android]... [--runtime-version <v>] [--export-dir <dir>]
-[--project-root <dir>]`. Platforms default to both, and a repeated one is a usage error. Exit 0 means every pointer
-was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has one
-line per pointer written: `<key> <updateId> <createdAt>`.
+**Project code.** Only `tide export` runs project code, and it reads no credential; the writers (`publish`,
+`rollback`, `republish`, `register-build`) start no process. A child of a process holding a key could read it as the
+same user, so no environment allowlist would protect a writer that ran Expo.
+
+`tide export --out <dir> [--platform ios|android]... [--runtime-version <v>] [--project-root <dir>]
+[--pass-env <name>]...` writes the export directory `publish --from` reads. `--out` and `--project-root` resolve
+against the caller's directory; `--out` must not exist. Platforms default to both. Exit 0, or 2 on any refusal or
+tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
+
+1. `expo config --json` gives `updates.codeSigningMetadata` (`keyid` required printable ASCII, `alg` absent or
+   `rsa-v1_5-sha256`; only those two members are kept) and `updates.codeSigningCertificate` (relative to the project
+   root, a regular file of at most 64 KiB, UTF-8, passing the certificate profile, so it holds one certificate and
+   nothing else).
+2. `expo config --type public --json` (an object) and each platform's runtime: `expo-updates
+   runtimeversion:resolve --platform <p>` (every Expo policy, resolved by Expo) unless `--runtime-version` is given.
+   A runtime must be a string the reply key grammar accepts.
+3. `expo export --output-dir <staging> --platform <p>...` into a temporary directory, read as `publish` reads an
+   export (below). Only `metadata.json` and the files it names for the selected platforms are copied to
+   `<dir>/dist/`: Expo also copies the project's `public/` folder into its output.
+4. `tide-export.json`, at most 16 MiB, written under a temporary name and renamed last, so a failed export leaves no
+   file a writer reads:
+
+```json
+{"version":1,"certificate":"-----BEGIN CERTIFICATE-----\n…","codeSigningMetadata":{"keyid":"main","alg":"rsa-v1_5-sha256"},"expoClient":{…},"platforms":{"ios":{"runtimeVersion":"1.0.0"}}}
+```
+
+Everything in the directory is served publicly (`expoClient` is every manifest's `extra.expoClient`; `dist` is what
+is uploaded) or embedded in every shipped build (certificate, `keyid`, `alg`). Steps 1 and 2 refuse before `<dir>`
+is created.
+
+**Expo.** `expo` and `expo-updates` run from the nearest `node_modules/.bin` at or above the project root, with no
+shell and an allowlisted environment: `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `CI`,
+`EXPO_PUBLIC_*` (Expo inlines them into the bundle), each `--pass-env` name (never a `TIDE_`, `AWS_` or `ACTIONS_`
+one), `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or, when unset or empty, `production`: the
+mode `expo export` forces, so config, runtime and bundle agree.
+
+`tide publish --from <dir> --channel <name>` publishes one update per platform the export names. Exit 0 means every
+pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
+one line per pointer written: `<key> <updateId> <createdAt>`.
 
 **Configuration.** `TIDE_SERVER_URL` (the Tide server) and `TIDE_ASSET_URL` (the bucket's public domain) are each an
 absolute `https:` URL with no credentials, query or fragment, or `http:` to a loopback IP literal; a trailing `/`
@@ -288,21 +323,17 @@ is dropped. Plus the bucket (Bucket configuration) and a key (Keys).
 - asset: `<TIDE_ASSET_URL>/assets/<64 hex>`. Byte-identical files with two extensions share one object and its
   first upload's `Content-Type`; clients check the hash, not the type.
 
-**Expo.** `expo` and `expo-updates` run from the nearest `node_modules/.bin` at or above the project root, with no
-shell, every `TIDE_` variable removed, `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or
-`production`: the mode `expo export` forces, so config, runtime and bundle agree. The runtime is
-`expo-updates runtimeversion:resolve --platform <p>` (every Expo policy, resolved by Expo) unless
-`--runtime-version` is given. The full `expo config` gives the signing identity; `--type public` becomes
-`extra.expoClient`.
-
-**Export.** Without `--export-dir`, `expo export` runs into a temporary directory. A given `--export-dir` must hold
-a production export of the same checkout and stay unchanged while publish runs. Every path in `metadata.json` must
-resolve inside the export to a regular file. An asset path is `assets/<md5>` or `www.bundle/<md5>.<ext>` (DOM
+**Export.** The directory is untrusted input, checked once, by publish. `tide-export.json` (at most 16 MiB, UTF-8
+JSON) holds exactly the fields above with `version` 1, a string certificate of at most 64 KiB, an object
+`expoClient`, and one or more of `ios` and `android`, each only a `runtimeVersion` the key grammar accepts. Its
+certificate must be the builds' (same DER) and its `keyid` theirs (Keys). Neither it nor `dist` may resolve outside
+the directory, which must stay unchanged while publish runs. Every path in `metadata.json` must resolve inside
+`dist` to a regular file. An asset path is `assets/<md5>` or `www.bundle/<md5>.<ext>` (DOM
 components), the MD5 is its key, and the file's bytes must hash to it. Repeated identical entries collapse.
 
 Steps, in order; every refusal comes before the first write, and all replies are signed in memory first:
 
-1. Read the config, runtimes and export, and open the writer (Keys).
+1. Read the export and open the writer (Keys).
 2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build, or in
    two of them, comparing keys case-insensitively. An unreadable release or base record refuses too.
 3. Read each pointer and its ETag, then the bucket's time. Refuse a local clock more than a minute from it, or a
@@ -339,21 +370,21 @@ The two bases and the URL shapes give back every original URL, so a republish ke
 changes; a new URL shape needs a new `version`. `contentType` follows from `fileExtension`; the launch asset is
 always `.bundle`.
 
-**Rollback and republish.** Both run only `expo config --json` (with the Expo environment above) for the
-identity, need no `TIDE_SERVER_URL` or `TIDE_ASSET_URL`, and share publish's exit codes, clock and certificate checks,
+**Rollback and republish.** Both take the identity from the build pins alone (Keys), read no app config, need no
+`TIDE_SERVER_URL` or `TIDE_ASSET_URL`, and share publish's exit codes, clock and certificate checks,
 `reply/no-update` repair and pointer writes. Every refusal, including each argument rule below, comes before the
-first write; arguments are checked before Expo runs.
+first write; arguments are checked before the writer opens.
 
-- `tide rollback --embedded --channel <name> --runtime-version <v> [--platform ios|android]... [--project-root <dir>]`
+- `tide rollback --embedded --channel <name> --runtime-version <v> [--platform ios|android]...`
   writes, per platform, a signed `rollBackToEmbedded` with `commitTime = max(now, previous createdAt or commitTime +
   1 ms)`. The runtime is given, never resolved, and the pointer must exist: a typo must not pass for a rollback. It
   has no release record and no `expo-manifest-filters`. stdout: `<key> - <commitTime>`.
-- `tide republish <updateId>... [--channel <name>] [--runtime-version <v>] [--project-root <dir>]` serves each
+- `tide republish <updateId>... [--channel <name>] [--runtime-version <v>]` serves each
   update's stored code again under a fresh UUID, on `--channel` or the update's own channel. It is rebuilt from the
   release record by publish's own manifest builder, so hashes, keys, extensions, `extra` and URLs are the original's;
   only the ID, `createdAt = max(now, previous + 1 ms, source createdAt + 1 ms)`, `metadata.channel` and the filter
   change. It writes a new release record and base record, and uploads nothing. stdout as publish.
-- `tide rollback --to <updateId> [--to <updateId>]... [--project-root <dir>]` is `republish` onto each update's own
+- `tide rollback --to <updateId> [--to <updateId>]...` is `republish` onto each update's own
   pointer, and takes no `--channel`, `--runtime-version` or `--platform`. `--to A B` is a usage error.
 
 Refused: an ID that is not a lowercase UUID or is given twice; an ID with no release record; a release record that
@@ -380,8 +411,11 @@ listing or read fails or a record or the legacy map does not decode; 2 on a usag
 
 `tide register-build --platform ios|android --runtime-version <v> --manifest <app.manifest> --bundle <file>
 [--assets-dir <dir>]` records a store build as an `embedded` base record, so patches can start from its bundle and
-its asset keys join the identity check. It needs only the bucket: nothing is signed or timestamped. Exit codes as
-publish; stdout `bases/<id> bundles/<64 hex>`.
+its asset keys join the identity check. Nothing is signed or timestamped, so it needs no key, but it reads the build
+pins (Keys) before the bucket is opened and refuses a bucket whose `reply/no-update` is absent or signed under another
+identity: a build is registered only where its own certificate and `keyid` are already served, so a first publish
+cannot pin another identity over its asset keys. Exit codes as publish; stdout
+`bases/<id> bundles/<64 hex>`.
 
 - **Inputs**, all from one build: its update ID is random per build, so mixing builds registers a base no installed
   client has. Android: `assets/app.manifest` and `assets/index.android.bundle` from the built APK (`base/assets/`
@@ -399,11 +433,12 @@ publish; stdout `bases/<id> bundles/<64 hex>`.
   location, since packaging may re-encode them; two files with one MD5 and different bytes refuse.
   `--assets-dir` is required only when the manifest lists assets.
 - **Refused before any write** (exit 2): a missing or repeated option or a positional; a bad runtime or platform;
+  a missing or invalid build pin; a bucket with no `reply/no-update` or signed under another identity;
   an ID that is not a lowercase UUID; an unreadable input; an asset key with no matching file; an asset key that a
   release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
 - **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
   A lost base create succeeds only if the stored bytes are identical. Re-running with identical inputs writes nothing
-  and exits 0. An unknown outcome exits 1, and the re-run starts from the bucket (One writer at a time).
+  and exits 0. An unknown outcome exits 1, and the retry starts from the bucket (One writer at a time).
 
 **Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an
@@ -429,28 +464,31 @@ both give the same signature. Requests are SigV4-signed without an AWS SDK, neve
 `https://kms.<region>.amazonaws.com` or `TIDE_KMS_ENDPOINT`, which must be an `https:` origin (plain `http:` only to
 a loopback IP literal). Throttling, access denied, a disabled key, a timeout or a malformed reply is an error.
 
-**Identity.** The app config gives the certificate (`updates.codeSigningCertificate`, relative to the project root)
-and `updates.codeSigningMetadata`. `keyid` is required, since Expo's implicit `root` is refused, and `alg` must be
-absent or `rsa-v1_5-sha256`. The certificate must be one ASCII PEM block, each delimiter alone on its line, holding
-one self-signed X.509 v3 certificate, valid now, signed with `sha256WithRSAEncryption` (the same identifier inside and
-outside the TBS), with well-formed Key Usage `digitalSignature`, Extended Key Usage `codeSigning`, no repeated
-extension, no Expo project-information extension, and an RSA key of 2048 to 4096 bits.
+**Build pins.** The checkout can drift from what installed builds embed, so every writer and `tide probe` take the
+identity from the store builds, read from a shipped binary rather than the checkout:
 
-**Build pins.** The checkout can drift from what installed builds embed, so two required variables record the store
-builds' identity, read from a shipped binary rather than the checkout:
-
-- `TIDE_BUILD_KEYID`: the builds' `keyid`.
-- `TIDE_BUILD_CERTIFICATE_SHA256`: SHA-256 of the builds' certificate DER, 64 hex digits, colons allowed.
+- `TIDE_BUILD_KEYID`: the builds' `keyid`, printable ASCII. Expo's implicit `root` is never assumed.
+- Exactly one of `TIDE_BUILD_CERTIFICATE_FILE` (a path, a regular file of at most 64 KiB) and
+  `TIDE_BUILD_CERTIFICATE` (the PEM).
 
 In an APK, `aapt2 dump xmltree --file AndroidManifest.xml app.apk` shows the meta-data
 `expo.modules.updates.CODE_SIGNING_CERTIFICATE` and `CODE_SIGNING_METADATA`; in an IPA, `plutil -p
-Payload/<App>.app/Expo.plist` shows `EXUpdatesCodeSigningCertificate` and `EXUpdatesCodeSigningMetadata`. Get the
-fingerprint with `openssl x509 -noout -fingerprint -sha256`. The app config must match both pins; a renewed
-certificate does not pass while the builds hold an expired one.
+Payload/<App>.app/Expo.plist` shows `EXUpdatesCodeSigningCertificate` and `EXUpdatesCodeSigningMetadata`.
+
+**Certificate profile.** One ASCII PEM block, each delimiter alone on its line, holding one self-signed X.509 v3
+certificate, valid now, signed with `sha256WithRSAEncryption` (the same identifier inside and outside the TBS), with
+well-formed Key Usage `digitalSignature`, Extended Key Usage `codeSigning`, no repeated extension, no Expo
+project-information extension, and an RSA key of 2048 to 4096 bits. A renewed certificate does not pass while the
+builds hold an expired one.
+
+**Identity.** `publish` also refuses an export whose `codeSigningMetadata` (`keyid` printable ASCII, `alg` absent or
+`rsa-v1_5-sha256`) names another `keyid`, or whose certificate is not the pinned one, compared by DER SHA-256.
+`tide export` applies the same metadata rule and the profile before writing anything, so a malformed `keyid` or a
+file holding a key never reaches an export.
 
 **Probe.** Before the bucket is opened, the CLI signs `tide signing probe` and verifies it against the certificate
 and `keyid`. Every later signature is verified the same way before it is returned, so a re-pointed KMS alias cannot
-produce a part the app rejects. Every key or config refusal exits before the bucket is opened; the bucket check only
+produce a part the app rejects. Every key, pin or export identity refusal exits before the bucket is opened; the bucket check only
 reads replies. Each refusal has a fixed message that names variables and config fields, never a key,
 credential or provider text.
 
@@ -459,10 +497,9 @@ exists, the CLI requires its directive to be a signed `noUpdateAvailable` that v
 certificate and `keyid`. When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
 the same way (an empty `reply/` is a new bucket), so no writer repairs another identity's bucket. A new key or key
 ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `republish` create a missing
-`reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; they re-check the
-certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
-write; and they run Expo's tools with every `TIDE_` variable removed and `EXPO_NO_DOTENV=1`, so no signing or
-storage secret reaches project code.
+`reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; and they re-check
+the certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
+write. No writer runs project code (CLI).
 
 **KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
 imported:

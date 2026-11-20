@@ -20,10 +20,9 @@ import {
   MAIN,
   diskObjects,
   env,
-  installFakeExpo,
   main,
   other,
-  project,
+  artifact,
   s3,
   s3Env,
   signedManifest,
@@ -134,15 +133,12 @@ async function publishThrough(
   const server = await startServer({ port: 0, store: storeFromEnv(storeEnv), appId: APP_ID });
   cleanup.push(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const app = dir();
-  installFakeExpo(app);
-  project({ root: app });
   const write = { ...env(storeEnv), TIDE_SERVER_URL: base };
-  expect(await publish(["--channel", "main", "--project-root", app], write, quiet)).toBe(0);
-  const embedded = ["--embedded", "--channel", "main", "--runtime-version", "1.0.0"];
   expect(
-    await rollback([...embedded, "--platform", "android", "--project-root", app], write, quiet),
+    await publish(["--channel", "main", "--from", artifact({ parent: dir() })], write, quiet),
   ).toBe(0);
+  const embedded = ["--embedded", "--channel", "main", "--runtime-version", "1.0.0"];
+  expect(await rollback([...embedded, "--platform", "android"], write, quiet)).toBe(0);
   const { manifest } = await signedManifest(objects(), IOS);
   return {
     base,
@@ -438,18 +434,13 @@ describe("tide probe with a launch asset that never arrives", () => {
     const server = await startServer({ port: 0, store: storeFromEnv({ TIDE_DISK_DIR: root }) });
     cleanup.push(() => new Promise((resolve) => server.close(resolve)));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    const app = dir();
-    installFakeExpo(app);
-    project({ root: app });
     // The manifest's launch URL names a server that never answers.
     const write = { ...env({ TIDE_DISK_DIR: root }), TIDE_SERVER_URL: await silent() };
-    expect(
-      await publish(
-        ["--channel", "main", "--platform", "ios", "--project-root", app],
-        write,
-        quiet,
-      ),
-    ).toBe(0);
+    const ios = artifact({
+      fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } },
+      parent: dir(),
+    });
+    expect(await publish(["--channel", "main", "--from", ios], write, quiet)).toBe(0);
   });
 
   test("times out after the signature verifies", async () => {
