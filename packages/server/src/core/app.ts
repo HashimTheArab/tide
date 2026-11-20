@@ -1,37 +1,49 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import type { StoredReply } from "@tide/protocol";
+import type { BaseRecord, StoredReply } from "@tide/protocol";
 import {
   HEADER_VALUE,
+  MAX_BASE_BYTES,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   ProtocolError,
   assetContentType,
+  baseKey,
   contentKey,
+  decodeBaseRecord,
   decodeStoredReply,
+  patchKey,
   replyKey,
 } from "@tide/protocol";
 
-import type { Store } from "./store.ts";
-import { abortable, readBounded } from "./store.ts";
+import type { Store, StoredObject } from "./store.ts";
+import { abortable, discard, readBounded } from "./store.ts";
 
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
 const NO_STORE = { "cache-control": "no-store" };
+const IMMUTABLE = "public, max-age=31536000, immutable";
 const CONTENT_HEX = /^[0-9a-f]{64}$/; // A bundle key's SHA-256, as stored.
 // Media-type parameters and q-values are ignored: stock clients send multipart/mixed, the only type Tide stores.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
+const QVALUE = /^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$/; // RFC 9110 12.4.2.
 
 export interface AppOptions {
   /** When set and not empty, a request whose `expo-app-id` is present and differs is rejected. */
   readonly appId?: string | undefined;
   /** Returns the one deadline covering every store read of a `/manifest` request. */
   readonly replyDeadline?: () => AbortSignal;
+  /** Returns the deadline of a `/bundles` request's patch lookup; past it the full bundle is served. */
+  readonly patchDeadline?: () => AbortSignal;
 }
 
 /** Returns the Tide HTTP app; it uses only web-standard APIs, so every runtime serves the same app. */
 export function createApp(store: Store, options: AppOptions = {}): Hono {
-  const { replyDeadline = () => AbortSignal.timeout(10_000) } = options;
+  // The patch deadline keeps the full-bundle fallback well inside Android's 10 s read timeout.
+  const {
+    replyDeadline = () => AbortSignal.timeout(10_000),
+    patchDeadline = () => AbortSignal.timeout(2_000),
+  } = options;
   const appId = options.appId === "" ? undefined : options.appId; // Empty is unset.
   // A received header value never has edge whitespace, so such an app ID could never match.
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
@@ -120,6 +132,22 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     return new Response(reply.body, { headers });
   });
 
+  /** Returns `object` as the reply; HEAD gets the headers only, and the stream is cancelled without waiting. */
+  const send = (
+    c: Context,
+    object: StoredObject,
+    status: 200 | 226,
+    headers: Record<string, string>,
+  ) => {
+    headers["content-length"] = String(object.size);
+    // Hono answers HEAD through the GET handler and drops the body without cancelling it.
+    if (c.req.method === "HEAD") {
+      discard(object.body);
+      return new Response(null, { status, headers });
+    }
+    return new Response(object.body, { status, headers });
+  };
+
   /** Serves the object at `key` as immutable `contentType`; only a 200 may be cached. */
   const serveObject = async (c: Context, key: string, contentType: string) => {
     let object;
@@ -130,26 +158,127 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("storage unavailable\n", 503, NO_STORE);
     }
     if (object === undefined) return c.text("not found\n", 404, NO_STORE);
-    const headers = {
-      "content-type": contentType,
-      "content-length": String(object.size),
-      "cache-control": "public, max-age=31536000, immutable",
-    };
-    // Hono answers HEAD through this handler and drops the body without cancelling it.
-    if (c.req.method === "HEAD") {
-      await object.body.cancel();
-      return new Response(null, { headers });
-    }
-    return new Response(object.body, { headers });
+    return send(c, object, 200, { "content-type": contentType, "cache-control": IMMUTABLE });
   };
 
-  // Every manifest's launch asset URL; patch negotiation joins it with bundle diffing.
+  /** Returns the base record for `updateId`, or undefined when there is none; a record of another ID rejects. */
+  const readBase = async (
+    updateId: string,
+    signal: AbortSignal,
+  ): Promise<BaseRecord | undefined> => {
+    const key = baseKey(updateId);
+    try {
+      const object = await abortable(store.get(key, signal), signal);
+      if (object === undefined) return undefined;
+      const record = decodeBaseRecord(await readBounded(object, MAX_BASE_BYTES, signal));
+      // The codec never sees the key, so only here can a record filed under another ID be caught.
+      if (record.updateId !== updateId) throw new Error(`it holds update ${record.updateId}`);
+      return record;
+    } catch (e) {
+      throw new Error(`reading ${key} failed`, { cause: e });
+    }
+  };
+
+  /**
+   * Returns the object at `key`, or rejects once `signal` aborts first. The store gets a signal that `signal` aborts
+   * only until the get settles: an adapter may keep it on the body, and the deadline must not cut a patch on the wire.
+   */
+  const getBeforeDeadline = async (key: string, signal: AbortSignal) => {
+    const own = new AbortController();
+    const abort = () => {
+      own.abort(signal.reason);
+    };
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    const get = store.get(key, own.signal).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+    try {
+      return await abortable(get, signal);
+    } catch (e) {
+      throw new Error(`reading ${key} failed`, { cause: e });
+    }
+  };
+
+  /** Resolves the stored patch from `current`'s base to bundle `hex`, or undefined; never rejects. */
+  const findPatch = async (
+    hex: string,
+    { current, requested }: PatchRequest,
+    signal: AbortSignal,
+    answered: AbortSignal,
+  ): Promise<StoredObject | undefined> => {
+    try {
+      const [from, to] = await Promise.all([
+        readBase(current, signal),
+        readBase(requested, signal),
+      ]);
+      if (from === undefined || to === undefined || contentKey(to.launchAsset.hash) !== hex) {
+        return undefined;
+      }
+      return await getBeforeDeadline(patchKey(contentKey(from.launchAsset.hash), hex), signal);
+    } catch (e) {
+      // Every fault falls back to the full bundle, which is always correct; only a patch is lost.
+      if (!answered.aborted) console.error(`patch lookup for bundles/${hex} failed`, e);
+      return undefined;
+    }
+  };
+
+  // Every manifest's launch asset URL. The bundle read alone decides 404 and 503; a patch only replaces a 200.
   app.get("/bundles/:hex", async (c) => {
     const hex = c.req.param("hex");
     if (!CONTENT_HEX.test(hex)) {
       return c.text("the path must end in 64 lowercase hex characters\n", 400, NO_STORE);
     }
-    return await serveObject(c, `bundles/${hex}`, assetContentType("bundle"));
+    const key = `bundles/${hex}`;
+    const read = store.get(key);
+    const request = patchRequest(c);
+    const answered = new AbortController();
+    const lookup =
+      request === undefined
+        ? Promise.resolve(undefined)
+        : findPatch(
+            hex,
+            request,
+            AbortSignal.any([patchDeadline(), answered.signal]),
+            answered.signal,
+          );
+    /** Ends the lookup without waiting; a patch it already found is cancelled. */
+    const abandon = () => {
+      answered.abort();
+      void lookup.then((patch) => {
+        if (patch !== undefined) discard(patch.body);
+      });
+    };
+
+    let object;
+    try {
+      object = await read;
+    } catch (e) {
+      abandon();
+      console.error(`store get ${key} failed`, e);
+      return c.text("storage unavailable\n", 503, NO_STORE);
+    }
+    if (object === undefined) {
+      abandon();
+      return c.text("not found\n", 404, NO_STORE);
+    }
+    const patch = await lookup;
+    answered.abort(); // Ends a base read a failed sibling left running.
+    if (request === undefined || patch === undefined) {
+      return send(c, object, 200, {
+        "content-type": assetContentType("bundle"),
+        "cache-control": IMMUTABLE,
+      });
+    }
+    discard(object.body);
+    // The body is a BSDIFF40 patch, not script; the client does not check its type.
+    return send(c, patch, 226, {
+      "content-type": "application/octet-stream",
+      im: "bsdiff",
+      "expo-base-update-id": request.current,
+      "cache-control": "private, no-store",
+      vary: "A-IM, Expo-Current-Update-ID",
+    });
   });
 
   // Serves URLs earlier servers put in signed manifests: `h` is the asset's unpadded base64url SHA-256.
@@ -171,4 +300,60 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     return c.text("internal error\n", 500, NO_STORE);
   });
   return app;
+}
+
+interface PatchRequest {
+  readonly current: string; // Lowercase update IDs, valid for `baseKey`.
+  readonly requested: string;
+}
+
+/** Returns the update IDs of a request that accepts a bsdiff patch, or undefined. */
+function patchRequest(c: Context): PatchRequest | undefined {
+  if (!acceptsBsdiff(c.req.header("a-im") ?? "")) return undefined;
+  // Clients send lowercase IDs; a repeated header arrives joined with ", " and fails the grammar.
+  const current = c.req.header("expo-current-update-id")?.toLowerCase() ?? "";
+  const requested = c.req.header("expo-requested-update-id")?.toLowerCase() ?? "";
+  try {
+    baseKey(current);
+    baseKey(requested);
+  } catch (e) {
+    if (e instanceof ProtocolError) return undefined;
+    throw e;
+  }
+  return { current, requested };
+}
+
+/**
+ * Returns whether an `A-IM` value lists `bsdiff` with no q parameter or a valid one above zero (RFC 3229 10.5.3).
+ * Other parameters are ignored; a malformed q declines.
+ */
+function acceptsBsdiff(value: string): boolean {
+  return splitOutsideQuotes(value, ",").some((item) => {
+    const [name = "", ...params] = splitOutsideQuotes(item, ";");
+    if (name.trim().toLowerCase() !== "bsdiff") return false;
+    return params.every((param) => {
+      const eq = param.indexOf("=");
+      if ((eq === -1 ? param : param.slice(0, eq)).trim().toLowerCase() !== "q") return true;
+      const q = param.slice(eq + 1).trim();
+      return eq !== -1 && QVALUE.test(q) && Number(q) > 0;
+    });
+  });
+}
+
+/** Splits `value` at each `separator` outside a quoted string, so a quoted parameter cannot list an item. */
+function splitOutsideQuotes(value: string, separator: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (quoted && char === "\\") i++; // A quoted-pair.
+    else if (char === '"') quoted = !quoted;
+    else if (!quoted && char === separator) {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts;
 }

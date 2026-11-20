@@ -1,6 +1,15 @@
 import { describe, expect, inject, test } from "vitest";
 
-import { NO_UPDATE_KEY, replyKey } from "@tide/protocol";
+import {
+  NO_UPDATE_KEY,
+  baseKey,
+  contentKey,
+  patchKey,
+  replyKey,
+  s3Fetch,
+  s3Target,
+  sha256Base64Url,
+} from "@tide/protocol";
 
 import type { Store, StoredObject } from "../../src/core/store.ts";
 import type { Behaviour } from "./fake-s3.ts";
@@ -8,6 +17,7 @@ import { createApp } from "../../src/core/app.ts";
 import { s3Store } from "../../src/core/s3.ts";
 import { abortable, readBounded } from "../../src/core/store.ts";
 import { FAKE_S3, STALL_BODY, fakeS3Control } from "./fake-s3.ts";
+import { baseRecord } from "./server-cases.ts";
 
 const never = () => new Promise<void>(() => undefined);
 
@@ -272,6 +282,166 @@ export function stallCases(): void {
     test("an already expired deadline is a 503 at once", async () => {
       const { res } = start(s3, "stall-expired", AbortSignal.abort(new Error("deadline")));
       await expect503(res);
+    });
+  });
+
+  describe("/bundles patch lookup under its own deadline, over a fake S3", () => {
+    const endpoint = inject("fakeS3Endpoint");
+    const fake = fakeS3Control(endpoint);
+    const s3 = s3Store({ ...FAKE_S3, endpoint });
+    const target = s3Target({ ...FAKE_S3, endpoint });
+    const utf8 = (text: string) => new Uint8Array(new TextEncoder().encode(text));
+    let next = 0;
+    const uuid = () => `00000000-0000-4000-9000-${(++next).toString(16).padStart(12, "0")}`;
+
+    type Part = "bundle" | "current" | "requested" | "patch";
+    /** Stores, with signed PUTs, a bundle, two base records and a patch of `label`'s own, except `skip`. */
+    const seed = async (label: string, skip: readonly Part[] = []) => {
+      const base = utf8(`${label} base`);
+      const bundle = utf8(`${label} bundle`);
+      const patch = utf8(`${label} patch`);
+      const [baseHash, bundleHash] = await Promise.all([
+        sha256Base64Url(base),
+        sha256Base64Url(bundle),
+      ]);
+      const hex = contentKey(bundleHash);
+      const current = uuid();
+      const requested = uuid();
+      const parts: Record<Part, [string, Uint8Array<ArrayBuffer>]> = {
+        bundle: [`bundles/${hex}`, bundle],
+        current: [baseKey(current), baseRecord(current, baseHash)],
+        requested: [baseKey(requested), baseRecord(requested, bundleHash)],
+        patch: [patchKey(contentKey(baseHash), hex), patch],
+      };
+      for (const [part, [key, body]] of Object.entries(parts)) {
+        if (skip.includes(part as Part)) continue;
+        const res = await s3Fetch(
+          target,
+          { method: "PUT", key, body },
+          new AbortController().signal,
+        );
+        await res.body?.cancel();
+        expect([key, res.status]).toEqual([key, 200]);
+      }
+      const key = (part: Part) => parts[part][0];
+      const headers = {
+        "a-im": "bsdiff",
+        "expo-current-update-id": current,
+        "expo-requested-update-id": requested,
+      };
+      return { key, bundle, patch, path: `/${key("bundle")}`, headers };
+    };
+
+    /** Starts a request; `deadlines` counts calls to the patch deadline factory. */
+    const start = (
+      path: string,
+      headers: Record<string, string>,
+      signal: AbortSignal,
+      { method = "GET", store = s3 }: { method?: string; store?: Store } = {},
+    ) => {
+      const deadlines = { calls: 0 };
+      const app = createApp(store, {
+        patchDeadline: () => {
+          deadlines.calls++;
+          return signal;
+        },
+      });
+      return { res: Promise.resolve(app.request(path, { method, headers })), deadlines };
+    };
+    const expectFull = async (res: Promise<Response>, bundle: Uint8Array) => {
+      const r = await res;
+      expect(r.status).toBe(200);
+      expect(r.headers.get("im")).toBeNull();
+      expect(new Uint8Array(await r.arrayBuffer())).toEqual(bundle);
+    };
+
+    test("a 226 body outlives the lookup deadline", async () => {
+      const s = await seed("pause patch");
+      await fake.script(s.key("patch"), "pause-body");
+      const deadline = new AbortController();
+      const r = await start(s.path, s.headers, deadline.signal).res;
+      expect(r.status).toBe(226);
+      deadline.abort(new Error("deadline"));
+      await fake.release(s.key("patch"));
+      expect(new Uint8Array(await r.arrayBuffer())).toEqual(s.patch);
+    });
+
+    test("a 226 cancels the bundle read it does not serve", async () => {
+      const s = await seed("unused bundle", ["bundle"]);
+      await fake.script(s.key("bundle"), "stall-body");
+      const r = await start(s.path, s.headers, new AbortController().signal).res;
+      expect(r.status).toBe(226);
+      expect(new Uint8Array(await r.arrayBuffer())).toEqual(s.patch);
+      await fake.event("abandoned", s.key("bundle"));
+    });
+
+    test.each<[string, Part, number]>([
+      ["226", "patch", 226],
+      ["200", "bundle", 200],
+    ])("HEAD on the %s path cancels the stream it holds", async (_, stalled, status) => {
+      const s = await seed(`head ${status}`, [stalled]);
+      await fake.script(s.key(stalled), "stall-body");
+      const { "a-im": aIm, ...ids } = s.headers;
+      const headers = status === 226 ? { "a-im": aIm, ...ids } : ids;
+      const r = await start(s.path, headers, new AbortController().signal, { method: "HEAD" }).res;
+      expect(r.status).toBe(status);
+      expect(r.headers.get("content-length")).toBe(String(STALL_BODY.size));
+      expect(new Uint8Array(await r.arrayBuffer())).toEqual(new Uint8Array());
+      await fake.event("abandoned", s.key(stalled));
+    });
+
+    // A scripted key that is never seeded can be waited on with `arrived`; a seeded one only with `flushed`.
+    test.each<[string, Part, Behaviour, "arrived" | "flushed"]>([
+      ["a current base that never answers", "current", "hang", "arrived"],
+      ["a requested base whose body stalls", "requested", "stall-body", "flushed"],
+      ["a patch get that never answers", "patch", "hang", "arrived"],
+    ])("%s serves the full bundle at the deadline", async (label, stalled, behaviour, wait) => {
+      const s = await seed(label, [stalled]);
+      await fake.script(s.key(stalled), behaviour);
+      const deadline = new AbortController();
+      const { res, deadlines } = start(s.path, s.headers, deadline.signal);
+      await fake.event(wait, s.key(stalled));
+      deadline.abort(new Error("deadline"));
+      await expectFull(res, s.bundle);
+      expect(deadlines.calls).toBe(1);
+      await fake.event("abandoned", s.key(stalled));
+    });
+
+    test.each<[string, Behaviour | undefined, number]>([
+      ["fails", "internal-error", 503],
+      ["is absent", undefined, 404],
+    ])("a bundle that %s ends a lookup in flight", async (label, behaviour, status) => {
+      const s = await seed(`bundle ${label}`, ["bundle", "current"]);
+      await fake.script(s.key("current"), "hang");
+      if (behaviour !== undefined) await fake.script(s.key("bundle"), behaviour);
+      // The bundle answers only once the base read has reached the fake.
+      const arrived = fake.event("arrived", s.key("current"));
+      const gated: Store = {
+        get: async (key, signal) => {
+          if (key === s.key("bundle")) await arrived;
+          return s3.get(key, signal);
+        },
+      };
+      const deadline = new AbortController();
+      const r = await start(s.path, s.headers, deadline.signal, { store: gated }).res;
+      expect(r.status).toBe(status);
+      expect(r.headers.get("cache-control")).toBe("no-store");
+      await fake.event("abandoned", s.key("current"));
+      expect(deadline.signal.aborted).toBe(false);
+    });
+
+    test("an already expired deadline serves the full bundle at once", async () => {
+      const s = await seed("expired");
+      const { res } = start(s.path, s.headers, AbortSignal.abort(new Error("deadline")));
+      await expectFull(res, s.bundle);
+    });
+
+    test("a base declaring more than the limit serves the full bundle before the deadline", async () => {
+      const s = await seed("oversize base", ["current"]);
+      await fake.script(s.key("current"), "oversize");
+      const { res } = start(s.path, s.headers, new AbortController().signal);
+      await expectFull(res, s.bundle);
+      await fake.event("abandoned", s.key("current"));
     });
   });
 }

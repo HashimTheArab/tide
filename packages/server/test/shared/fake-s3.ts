@@ -26,6 +26,7 @@ export const BEHAVIOURS = [
   "hang", // Never answers
   "stall", // 500 headers flushed, then no body
   "stall-body", // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
+  "pause-body", // 200 with the stored object's first half; the rest follows `release`
   "oversize", // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
   "nested-404", // 404 whose only Code is inside another element
   "duplicate-404", // 404 with two Code children
@@ -56,6 +57,8 @@ export function fakeS3Control(endpoint: string) {
     /** Makes every later request for `key` get `behaviour`. */
     script: (key: string, behaviour: Behaviour) =>
       call("PUT", `script/${encodeURIComponent(key)}`, behaviour),
+    /** Sends the rest of every `pause-body` reply for `key`, now and later. */
+    release: (key: string) => call("PUT", `release/${encodeURIComponent(key)}`),
     /** Resolves once `event` has happened for `key`. */
     event: (event: FakeEvent, key: string) =>
       call("GET", `event/${event}/${encodeURIComponent(key)}`),

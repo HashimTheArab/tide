@@ -2,7 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, expect } from "vitest";
 
 import type { Harness } from "../shared/server-cases.ts";
-import { manifestCases, serverCases } from "../shared/server-cases.ts";
+import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
 
 const harness: Harness = {
   fetch: (path, init) => SELF.fetch(`https://tide.test${path}`, init),
@@ -26,4 +26,7 @@ const harness: Harness = {
 serverCases(harness);
 describe("/manifest", () => {
   manifestCases(harness);
+});
+describe("/bundles patch negotiation", () => {
+  bundleCases(harness);
 });
