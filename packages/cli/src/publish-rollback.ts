@@ -11,7 +11,7 @@ import {
 } from "@tide/protocol";
 
 import type { Env, Writer } from "./keys.ts";
-import type { Plan, PublishOptions } from "./publish.ts";
+import type { Draw, Plan, PublishOptions } from "./publish.ts";
 import { isKey } from "./bucket.ts";
 import { openWriter } from "./keys.ts";
 import { createdAtFloor } from "./pointer.ts";
@@ -20,6 +20,7 @@ import { PublishError, recordKey } from "./publish-record.ts";
 import {
   commit,
   compose,
+  draws,
   execute,
   plan,
   platformsOf,
@@ -34,7 +35,7 @@ export const REPUBLISH_USAGE =
   "usage: tide republish <updateId>... [--channel <name>] [--runtime-version <version>] [--project-root <dir>]";
 
 /** What a write command does once its arguments are parsed, given the opened writer. */
-type Prepare = (writer: Writer, now: () => number) => Promise<Plan>;
+type Prepare = (writer: Writer, now: () => number, draw: Draw) => Promise<Plan>;
 
 /**
  * Rolls pointers back: `--embedded` serves a signed `rollBackToEmbedded`, `--to` republishes each update onto its own
@@ -132,7 +133,8 @@ async function run(
     const { projectRoot, prepare } = parse(cwd);
     // The app config is project code, so it runs without TIDE_ variables or dotenv files.
     const config = await expoJson(projectRoot, expoEnv(env), "expo", ["config", "--json"]);
-    const ready = await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
+    const writer = await openWriter(env, { projectRoot, config }, { now });
+    const ready = await prepare(writer, now, draws(options));
     return () => commit(ready, options.out);
   });
 }
@@ -157,7 +159,7 @@ function updateIds(ids: readonly string[]): readonly string[] {
 
 /** Signs a `rollBackToEmbedded` for each existing pointer, committed after the time it replaces. */
 function rollingBack(keys: readonly string[]): Prepare {
-  return async (writer, now) => {
+  return async (writer, now, draw) => {
     const { targets, local, checkCertificate } = await readTargets(
       writer,
       keys.map((key) => ({ key })),
@@ -172,7 +174,7 @@ function rollingBack(keys: readonly string[]): Prepare {
       const commitTime = new Date(createdAtFloor(local, previous));
       const body = buildRollBackToEmbedded({ commitTime });
       const signature = await expoSignature(body, writer.signer);
-      const multipart = encodeMultipart([{ name: "directive", body, signature }]);
+      const multipart = encodeMultipart([{ name: "directive", body, signature }], draw.boundary);
       pointers.push({
         key,
         previous,
@@ -180,7 +182,7 @@ function rollingBack(keys: readonly string[]): Prepare {
         line: `${key} - ${commitTime.toISOString()}`,
       });
     }
-    return await plan(writer, checkCertificate, [], pointers);
+    return await plan(writer, draw, checkCertificate, [], pointers);
   };
 }
 
@@ -189,7 +191,7 @@ function rollingBack(keys: readonly string[]): Prepare {
  * stored already; nothing is uploaded.
  */
 function republishing(ids: readonly string[], channel?: string, runtime?: string): Prepare {
-  return async (writer, now) => {
+  return async (writer, now, draw) => {
     const { bucket } = writer;
     // Every retained record decodes and agrees on asset keys, the source's included, as a publish requires.
     const { records: retained } = await recordedKeys(bucket, { wanted: ids.map(recordKey) });
@@ -228,10 +230,13 @@ function republishing(ids: readonly string[], channel?: string, runtime?: string
       // Newer than the code it copies too, even when that was stamped by a clock ahead of this one.
       const createdAt = Math.max(createdAtFloor(local, previous), Date.parse(record.createdAt) + 1);
       const { updateId: _, createdAt: __, ...draft } = record;
-      const c = await compose(writer, { ...draft, channel: target }, createdAt, { key, previous });
+      const c = await compose(writer, draw, { ...draft, channel: target }, createdAt, {
+        key,
+        previous,
+      });
       records.push(...c.records);
       pointers.push(c.pointer);
     }
-    return await plan(writer, checkCertificate, records, pointers);
+    return await plan(writer, draw, checkCertificate, records, pointers);
   };
 }
