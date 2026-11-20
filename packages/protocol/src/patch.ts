@@ -128,6 +128,9 @@ export function applyBsdiff(
   patch: Uint8Array,
   maxOutput: number,
 ): Uint8Array<ArrayBuffer> {
+  if (!Number.isSafeInteger(maxOutput) || maxOutput < 0) {
+    throw new ProtocolError("maxOutput", "must be a non-negative safe integer");
+  }
   if (patch.length < 32) throw new ProtocolError("patch", "is shorter than its 32-byte header");
   if (String.fromCharCode(...patch.subarray(0, 8)) !== "BSDIFF40") {
     throw new ProtocolError("patch", "does not start with BSDIFF40");

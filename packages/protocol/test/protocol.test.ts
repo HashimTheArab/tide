@@ -2189,6 +2189,17 @@ describe("applyBsdiff", () => {
     },
   );
 
+  test.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 2 ** 53])(
+    "refuses a maxOutput of %s, which would not cap the output",
+    async (max) => {
+      await rejects(
+        () => applyBsdiff(fixture("patch-text.base"), fixture("patch-text.bsdiff"), max),
+        "maxOutput",
+        "must be a non-negative safe integer",
+      );
+    },
+  );
+
   test("a ctrl block with an unused, valid Huffman group still reproduces the target", async () => {
     const out = applyBsdiff(
       fixture("patch-text.base"),
