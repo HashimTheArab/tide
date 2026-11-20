@@ -48,7 +48,7 @@ export function bzip2(input: Uint8Array): Uint8Array<ArrayBuffer> {
 
 function writeBlock(w: BitWriter, block: Uint8Array, crc: number): void {
   const n = block.length;
-  const { order } = sortRotations(block, false);
+  const order = sortRotations(block, false);
 
   const seq = new Int16Array(256).fill(-1); // Byte to its index among the bytes in use.
   for (const b of block) seq[b] = 0;
@@ -222,183 +222,55 @@ function bitWriter(sizeHint: number): BitWriter {
 }
 
 /**
- * Returns the start of each cyclic rotation of `bytes` in sorted order, and how many ranks the sort read, which is
- * O(n log² n) for any input. With `sentinel`, a symbol below every byte follows `bytes`, so rotation order is suffix
- * order and `order` has `bytes.length + 1` entries, the empty suffix first. Equal rotations, which only a periodic input
- * without a sentinel has, come in an unspecified fixed order.
+ * Returns the start of each cyclic rotation of `bytes` in sorted order, in O(n log n) for any input. With `sentinel`,
+ * a symbol below every byte follows `bytes`, so rotation order is suffix order and the result has `bytes.length + 1`
+ * entries, the empty suffix first. Equal rotations, which only a periodic input without a sentinel has, come in an
+ * unspecified fixed order.
  */
-export function sortRotations(
-  bytes: Uint8Array,
-  sentinel: boolean,
-): { order: Int32Array; reads: number } {
-  // Larsson–Sadakane prefix doubling. `order` holds rotations, or -k at the head of k sorted ones; `group` maps each
-  // rotation to the index in `order` of the last member of its group, which ranks it by its first h symbols.
+export function sortRotations(bytes: Uint8Array, sentinel: boolean): Int32Array {
+  // Prefix doubling: each round counting-sorts by (rank of the first h symbols, rank of the next h).
   const len = bytes.length;
   const n = len + (sentinel ? 1 : 0);
-  const order = new Int32Array(n);
-  const group = new Int32Array(n);
-  if (n === 0) return { order, reads: 0 };
-
-  // Bucket by first symbol; the sentinel is symbol 0, byte b is b + 1.
-  const next = new Int32Array(258);
-  for (const b of bytes) next[b + 2] = (next[b + 2] ?? 0) + 1;
-  if (sentinel) next[1] = 1;
-  for (let s = 1; s < 258; s++) next[s] = (next[s] ?? 0) + (next[s - 1] ?? 0);
-  if (sentinel) {
-    order[0] = len;
-    next[0] = 1;
-  }
-  for (let i = 0; i < len; i++) {
-    const s = (bytes[i] ?? 0) + 1;
-    const at = next[s] ?? 0;
-    order[at] = i;
-    next[s] = at + 1;
-  }
-  // `next[s]` is now the end of symbol s's bucket.
-  for (let i = 0; i < len; i++) group[i] = (next[(bytes[i] ?? 0) + 1] ?? 0) - 1;
-  if (sentinel) group[len] = 0;
-  for (let s = 0; s < 257; s++) {
-    if ((next[s] ?? 0) - (s === 0 ? 0 : (next[s - 1] ?? 0)) === 1) order[(next[s] ?? 0) - 1] = -1;
-  }
-
-  // Rotations still equal after n symbols are identical, so h stops at n.
-  const sort: Sort = { order, group, h: 1, reads: 0 };
-  for (; order[0] !== -n && sort.h < n; sort.h *= 2) {
-    let run = 0;
-    let i = 0;
-    while (i < n) {
-      const v = order[i] ?? 0;
-      if (v < 0) {
-        run -= v;
-        i -= v;
-        continue;
-      }
-      if (run > 0) order[i - run] = -run;
-      run = 0;
-      const size = (group[v] ?? 0) + 1 - i;
-      split(sort, i, size);
-      i += size;
+  const sa = new Int32Array(n);
+  let rank = new Int32Array(n);
+  let tmp = new Int32Array(n);
+  const cnt = new Int32Array(Math.max(258, n + 1));
+  for (let i = 0; i < len; i++) rank[i] = (bytes[i] ?? 0) + 1; // The sentinel is rank 0.
+  for (let i = 0; i < n; i++) tmp[i] = i;
+  let classes = 258;
+  for (let h = 0; ; h = h === 0 ? 1 : 2 * h) {
+    // `tmp` lists rotations in order of their second key; a stable sort by the first key orders them by both.
+    cnt.fill(0, 0, classes);
+    for (let i = 0; i < n; i++) {
+      const r = rank[i] ?? 0;
+      cnt[r] = (cnt[r] ?? 0) + 1;
     }
-    if (run > 0) order[i - run] = -run;
-  }
-
-  // Sorted positions are all negative; each singleton's group is its index. Unsorted groups keep their members.
-  for (let i = 0; i < n; i++) {
-    const g = group[i] ?? 0;
-    if ((order[g] ?? 0) < 0) order[g] = i;
-  }
-  return { order, reads: sort.reads };
-}
-
-interface Sort {
-  order: Int32Array;
-  group: Int32Array;
-  h: number; // Groups rank rotations by their first h symbols.
-  reads: number; // Ranks read so far, for the cost bound.
-}
-
-/**
- * Sorts the group `order[start, start + size)` by the rank of the rotation h symbols on, splitting it into new
- * groups. Recurses on the smaller side and loops on the larger, so the stack is O(log n) deep; after `depth`
- * partitions it heapsorts what is left, so a group costs O(size log size) whatever the pivots.
- */
-function split(sort: Sort, start: number, size: number, depth = 2 * (31 - Math.clz32(size))): void {
-  const { order, group, h } = sort;
-  const n = group.length;
-  const key = (at: number) => {
-    sort.reads++;
-    const j = (order[at] ?? 0) + h;
-    return group[j >= n ? j - n : j] ?? 0;
-  };
-  const swap = (a: number, b: number) => {
-    const t = order[a] ?? 0;
-    order[a] = order[b] ?? 0;
-    order[b] = t;
-  };
-  while (size > 0) {
-    const end = start + size;
-    if (size < 16) {
-      // Selection: move the smallest keys to the front, make them a group, repeat on the rest.
-      for (let k = start, j = 0; k < end; k += j) {
-        let x = key(k);
-        j = 1;
-        for (let i = k + 1; i < end; i++) {
-          const v = key(i);
-          if (v < x) {
-            x = v;
-            j = 0;
-          }
-          if (v === x) swap(k + j++, i);
-        }
-        for (let i = k; i < k + j; i++) group[order[i] ?? 0] = k + j - 1;
-        if (j === 1) order[k] = -1;
-      }
-      return;
+    for (let c = 1; c < classes; c++) cnt[c] = (cnt[c] ?? 0) + (cnt[c - 1] ?? 0);
+    for (let i = n - 1; i >= 0; i--) {
+      const j = tmp[i] ?? 0;
+      const r = rank[j] ?? 0;
+      const at = (cnt[r] ?? 0) - 1;
+      cnt[r] = at;
+      sa[at] = j;
     }
-    if (depth-- === 0) {
-      heapSplit(sort, start, size, key);
-      return;
+    // Renumber densely; a rotation's class is now its first 2h symbols (its first symbol in round 0).
+    let c = 0;
+    for (let i = 0; i < n; i++) {
+      const a = sa[i] ?? 0;
+      const b = sa[i - 1] ?? 0;
+      const ah = a + h < n ? a + h : a + h - n;
+      const bh = b + h < n ? b + h : b + h - n;
+      if (i > 0 && (rank[a] !== rank[b] || (h > 0 && rank[ah] !== rank[bh]))) c++;
+      tmp[a] = c;
     }
-    const a = key(start);
-    const b = key(start + (size >> 1));
-    const c = key(end - 1);
-    const x = a < b ? (b < c ? b : a < c ? c : a) : a < c ? a : b < c ? c : b;
-    let lt = start;
-    let gt = end;
-    for (let i = start; i < gt;) {
-      const v = key(i);
-      if (v < x) swap(lt++, i++);
-      else if (v > x) swap(i, --gt);
-      else i++;
+    [rank, tmp] = [tmp, rank];
+    classes = c + 1;
+    // Rotations still equal after n symbols are identical.
+    const next = h === 0 ? 1 : 2 * h;
+    if (classes >= n || next >= n) return sa;
+    for (let i = 0; i < n; i++) {
+      const j = (sa[i] ?? 0) - next;
+      tmp[i] = j < 0 ? j + n : j;
     }
-    // Each part is numbered by its own end at once, so every number stays consistent with the order whichever part
-    // is refined first. The upper part's members already hold its end.
-    for (let i = start; i < lt; i++) group[order[i] ?? 0] = lt - 1;
-    for (let i = lt; i < gt; i++) group[order[i] ?? 0] = gt - 1;
-    if (gt - lt === 1) order[lt] = -1;
-    if (lt - start < end - gt) {
-      split(sort, start, lt - start, depth);
-      start = gt;
-      size = end - gt;
-    } else {
-      split(sort, gt, end - gt, depth);
-      size = lt - start;
-    }
-  }
-}
-
-/** `split` by heapsort, with every key read before any group is renumbered. */
-function heapSplit(sort: Sort, start: number, size: number, key: (at: number) => number): void {
-  const { order, group } = sort;
-  const keys = new Int32Array(size);
-  for (let i = 0; i < size; i++) keys[i] = key(start + i);
-  const less = (a: number, b: number) => {
-    sort.reads++;
-    return (keys[a] ?? 0) < (keys[b] ?? 0);
-  };
-  const swap = (a: number, b: number) => {
-    const k = keys[a] ?? 0;
-    keys[a] = keys[b] ?? 0;
-    keys[b] = k;
-    const o = order[start + a] ?? 0;
-    order[start + a] = order[start + b] ?? 0;
-    order[start + b] = o;
-  };
-  const sift = (root: number, end: number) => {
-    for (let c = 2 * root + 1; c < end; root = c, c = 2 * root + 1) {
-      if (c + 1 < end && less(c, c + 1)) c++;
-      if (!less(root, c)) return;
-      swap(root, c);
-    }
-  };
-  for (let i = (size >> 1) - 1; i >= 0; i--) sift(i, size);
-  for (let e = size - 1; e > 0; e--) {
-    swap(0, e);
-    sift(0, e);
-  }
-  for (let k = 0, j = 0; k < size; k = j) {
-    for (j = k + 1; j < size && keys[j] === keys[k];) j++;
-    for (let i = k; i < j; i++) group[order[start + i] ?? 0] = start + j - 1;
-    if (j - k === 1) order[start + k] = -1;
   }
 }

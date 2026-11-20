@@ -58,16 +58,31 @@ describe("makeBsdiff", () => {
 
 describe("suffix sorting", () => {
   const n = 2 ** 20;
+  const period = (p: number) => Uint8Array.from({ length: n }, (_, i) => i % p);
+  /** Returns the fastest of three sorts of `bytes`, in milliseconds. */
+  const time = (bytes: Uint8Array) =>
+    Math.min(
+      ...[0, 1, 2].map(() => {
+        const start = performance.now();
+        sortRotations(bytes, true);
+        return performance.now() - start;
+      }),
+    );
+
   test.each([
     ["a run", new Uint8Array(n)],
-    ["a two-byte period", Uint8Array.from({ length: n }, (_, i) => i % 2)],
-  ])("%s reads under 5 n log2 n ranks, where median-of-three pivots alone degrade", (_, base) => {
-    expect(sortRotations(base, true).reads).toBeLessThan(5 * n * Math.log2(n));
-  });
+    ["a two-byte period", period(2)],
+  ])(
+    "%s sorts within 1.5x the time of a 17-byte period, where pivot-based sorts degrade",
+    (_, bytes) => {
+      expect(time(bytes)).toBeLessThan(1.5 * time(period(17)));
+    },
+  );
 
   test("a run's suffixes sort shortest first", () => {
-    const { order } = sortRotations(new Uint8Array(n), true);
-    expect(order).toEqual(Int32Array.from({ length: n + 1 }, (_, i) => n - i));
+    expect(sortRotations(new Uint8Array(n), true)).toEqual(
+      Int32Array.from({ length: n + 1 }, (_, i) => n - i),
+    );
   });
 });
 
@@ -174,7 +189,7 @@ describe(`properties (seed ${inject("fcSeed")})`, () => {
     };
     fc.assert(
       fc.property(fc.oneof(bytes(1024), runs), (b) => {
-        const { order } = sortRotations(b, true);
+        const order = sortRotations(b, true);
         expect([...order].toSorted((x, y) => x - y)).toEqual([...Array(b.length + 1).keys()]);
         for (let i = 1; i <= b.length; i++) {
           expect(before(b, order[i - 1] ?? 0, order[i] ?? 0)).toBe(true);

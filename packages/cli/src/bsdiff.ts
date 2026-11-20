@@ -77,7 +77,7 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array) {
   }
   const oldsize = base.length;
   const newsize = target.length;
-  const I = sortRotations(base, true).order;
+  const I = sortRotations(base, true);
 
   // Every byte `search` compares counts; once the budget is spent, matching stops.
   const budget = WORK_PER_BYTE * (oldsize + newsize) + WORK_FLOOR;
