@@ -26,12 +26,18 @@ export interface FakeS3 {
   readonly requests: number;
   /** Every continuation token a listing sent, in order. */
   readonly tokens: readonly string[];
+  /** Every PUT key that reached handling, in order, refused preconditions included. */
+  readonly puts: string[];
   /** Returns the ETag the fake serves for `key`; tags count up and are never derived from the bytes. */
   etag(key: string): string | undefined;
   behave(key: string, behaviour: Behaviour): void;
   failAll(failure: Failure | undefined): void;
   listFault(fault: ListFault | undefined): void;
   setNow(ms: number | undefined): void;
+  /** The next PUT to `key` finds `bytes` stored first, as another writer's would be. */
+  raceOnPut(key: string, bytes: Uint8Array): void;
+  /** The next PUT to `key` commits, then its connection drops before any response. */
+  dropAfterPut(key: string): void;
   arrived(key: string): Promise<void>;
   flushed(key: string): Promise<void>;
   abandoned(key: string): Promise<void>;
@@ -47,6 +53,11 @@ const NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/";
  */
 export async function startFakeS3(): Promise<FakeS3> {
   const objects = new Map<string, Uint8Array>();
+  // Content-Type and Cache-Control from each PUT, served on GET as a bucket's public domain would.
+  const headersOf = new WeakMap<Uint8Array, Record<string, string>>();
+  const puts: string[] = [];
+  const races = new Map<string, Uint8Array>();
+  const drops = new Set<string>();
   // Keyed by the stored array, so an object a test sets directly gets a fresh tag.
   const etags = new WeakMap<Uint8Array, string>();
   let etagCount = 0;
@@ -116,6 +127,12 @@ export async function startFakeS3(): Promise<FakeS3> {
 
       if (rest.length === 0 && req.method === "GET") return list(url.searchParams, res);
       if (req.method === "PUT") {
+        puts.push(key);
+        const raced = races.get(key);
+        if (raced !== undefined) {
+          races.delete(key);
+          objects.set(key, raced);
+        }
         const existing = objects.get(key);
         const ifNoneMatch = req.headers["if-none-match"];
         const ifMatch = req.headers["if-match"];
@@ -130,6 +147,15 @@ export async function startFakeS3(): Promise<FakeS3> {
           if (etagOf(existing) !== ifMatch) return s3Error(res, 412, "PreconditionFailed");
         }
         objects.set(key, body);
+        headersOf.set(
+          body,
+          Object.fromEntries(
+            ["content-type", "cache-control"].flatMap((h) =>
+              req.headers[h] === undefined ? [] : [[h, String(req.headers[h])]],
+            ),
+          ),
+        );
+        if (drops.delete(key)) return req.socket.destroy();
         return res.writeHead(200, { etag: etagOf(body) }).end();
       }
       if (req.method === "DELETE") {
@@ -212,7 +238,13 @@ export async function startFakeS3(): Promise<FakeS3> {
         break;
     }
     if (stored === undefined) return s3Error(res, 404, "NoSuchKey");
-    res.writeHead(200, { "content-length": stored.length, etag: etagOf(stored) }).end(stored);
+    res
+      .writeHead(200, {
+        ...headersOf.get(stored),
+        "content-length": stored.length,
+        etag: etagOf(stored),
+      })
+      .end(stored);
   }
 
   function list(params: URLSearchParams, res: ServerResponse): void {
@@ -274,6 +306,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       return requests;
     },
     tokens,
+    puts,
     etag: (key) => {
       const stored = objects.get(key);
       return stored === undefined ? undefined : etagOf(stored);
@@ -289,6 +322,12 @@ export async function startFakeS3(): Promise<FakeS3> {
     },
     setNow: (ms) => {
       now = ms;
+    },
+    raceOnPut: (key, bytes) => {
+      races.set(key, bytes);
+    },
+    dropAfterPut: (key) => {
+      drops.add(key);
     },
     arrived: (key) => event("arrived", key).promise,
     flushed: (key) => event("flushed", key).promise,
@@ -311,7 +350,15 @@ async function signedCorrectly(
       String(received.authorization),
     );
   // Every header that changes what the request does must be signed.
-  const required = ["host", "if-match", "if-none-match", "x-amz-content-sha256", "x-amz-date"];
+  const required = [
+    "cache-control",
+    "content-type",
+    "host",
+    "if-match",
+    "if-none-match",
+    "x-amz-content-sha256",
+    "x-amz-date",
+  ];
   const signedHeaders = required.filter((h) => received[h] !== undefined).join(";");
   if (
     auth?.[1] !== FAKE_S3.accessKeyId ||

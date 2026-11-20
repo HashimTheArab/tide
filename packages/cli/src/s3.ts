@@ -12,7 +12,7 @@ import {
   textOf,
 } from "@tide/protocol";
 
-import type { Bucket, ListEntry } from "./bucket.ts";
+import type { Bucket, ListEntry, ObjectHeaders } from "./bucket.ts";
 import { BucketError, STRONG_ETAG, byteOrder, checkEtag, checkKey, isKey } from "./bucket.ts";
 
 const LIST_PAGE_LIMIT = 8 * 1024 * 1024;
@@ -63,16 +63,25 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
     key: string,
     bytes: Uint8Array<ArrayBuffer>,
     condition: Record<string, string>,
+    headers?: ObjectHeaders,
   ): Promise<string | undefined>;
   async function write(
     key: string,
     bytes: Uint8Array<ArrayBuffer>,
     condition?: Record<string, string>,
+    headers?: ObjectHeaders,
   ): Promise<string | undefined> {
     checkKey(key);
+    // Always set and signed: fetch would add an unsigned `cache-control: no-cache` to a conditional request, and S3
+    // stores whatever arrives. Objects without public headers are records the server reads, never to be cached.
+    const sent = {
+      ...condition,
+      "cache-control": headers?.cacheControl ?? "no-store",
+      ...(headers && { "content-type": headers.contentType }),
+    };
     return await call(
       "PutObject",
-      { method: "PUT", key, body: bytes, ...(condition && { headers: condition }) },
+      { method: "PUT", key, body: bytes, headers: sent },
       async (res) => {
         if (res.status === 412 && condition !== undefined) {
           await res.body?.cancel();
@@ -126,7 +135,7 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
 
     put: (key, bytes) => write(key, bytes),
 
-    putIfAbsent: (key, bytes) => write(key, bytes, { "if-none-match": "*" }),
+    putIfAbsent: (key, bytes, headers) => write(key, bytes, { "if-none-match": "*" }, headers),
 
     async putIfMatch(key, bytes, etag) {
       checkEtag(etag);

@@ -5,6 +5,12 @@ interface BucketObject {
   readonly etag: string; // Opaque: compared by exact string equality only.
 }
 
+/** Headers the bucket's public domain serves with an object; disk keeps none. */
+export interface ObjectHeaders {
+  readonly contentType: string;
+  readonly cacheControl: string;
+}
+
 /** A listed name: a store key, or a stored name outside the key grammar. */
 export type ListEntry = { readonly key: string } | { readonly unknown: string };
 
@@ -18,7 +24,11 @@ export interface Bucket {
   /** Returns the new ETag. */
   put(key: string, bytes: Uint8Array<ArrayBuffer>): Promise<string>;
   /** Creates `key` only if nothing is stored there. */
-  putIfAbsent(key: string, bytes: Uint8Array<ArrayBuffer>): Promise<string | undefined>;
+  putIfAbsent(
+    key: string,
+    bytes: Uint8Array<ArrayBuffer>,
+    headers?: ObjectHeaders,
+  ): Promise<string | undefined>;
   /** Replaces `key` only if its stored ETag is exactly `etag`. */
   putIfMatch(
     key: string,
