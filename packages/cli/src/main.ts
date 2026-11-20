@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { PROBE_USAGE, probe } from "./probe.ts";
 import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { REGISTER_BUILD_USAGE, registerBuild } from "./register-build.ts";
@@ -8,15 +9,16 @@ import { status } from "./status.ts";
 import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}`;
-const WRITERS = { publish, rollback, republish, "register-build": registerBuild };
+const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}`;
+// Commands that take arguments and read their own configuration; probe needs no store.
+const COMMANDS = { publish, rollback, republish, "register-build": registerBuild, probe };
 const READERS = { status, storage };
 
 /** Runs one command; each command documents its exit codes, and 2 is always a usage error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const command = args[0];
-  if (command !== undefined && Object.hasOwn(WRITERS, command)) {
-    return await WRITERS[command as keyof typeof WRITERS](args.slice(1), env, {
+  if (command !== undefined && Object.hasOwn(COMMANDS, command)) {
+    return await COMMANDS[command as keyof typeof COMMANDS](args.slice(1), env, {
       out: (line) => process.stdout.write(`${line}\n`),
       err: (line) => process.stderr.write(`${line}\n`),
     });
