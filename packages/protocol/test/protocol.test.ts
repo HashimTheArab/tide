@@ -1,15 +1,26 @@
 import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
-import type { ManifestInput, Part, PartName, Signer, StoredReply } from "../src/index.ts";
+import type {
+  BaseRecord,
+  ManifestInput,
+  Part,
+  PartName,
+  Signer,
+  StoredReply,
+} from "../src/index.ts";
 import type { CertificateOptions } from "./fixtures.ts";
+import { bunzip2 } from "../src/bzip2.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
+  MAX_BASE_BYTES,
   MAX_FILTERS_BYTES,
+  MAX_PATCH_OUTPUT,
   MAX_REPLY_BYTES,
   LEGACY_MAP_KEY,
   NO_UPDATE_KEY,
   ProtocolError,
+  applyBsdiff,
   assetContentType,
   assetHash,
   buildManifest,
@@ -21,10 +32,12 @@ import {
   cryptoKeySigner,
   S3Error,
   childElements,
+  decodeBaseRecord,
   decodeStoredReply,
   diskKey,
   diskPath,
   encodeMultipart,
+  encodeBaseRecord,
   encodeSfvDictionary,
   encodeStoredReply,
   expoSignature,
@@ -47,6 +60,7 @@ import {
   BOUNDARY,
   EXPO_GOLDEN,
   EXTENSION,
+  KNOWN_PATCH,
   RSA_SHA256,
   TIDE_GOLDEN,
   TIDE_REPLY_GOLDEN,
@@ -1931,5 +1945,410 @@ describe("s3", () => {
     const message = new S3Error("GetObject", { problem: problem! }).message;
     expect(message).toBe("S3 GetObject returned 200 with an unsupported content-encoding");
     expect(s3BodyProblem(res({ "content-length": "x1" }))).toBe("length");
+  });
+});
+
+describe("base record", () => {
+  const EMBEDDED_ID = "7c0e1f52-3a9d-4b8e-8f21-5d6c4b3a2e10";
+  const UPDATE: BaseRecord = {
+    kind: "update",
+    updateId: ID,
+    runtimeVersion: "1.0.0",
+    platform: "ios",
+    launchAsset: { hash: LAUNCH_HASH },
+  };
+  const EMBEDDED: BaseRecord = {
+    kind: "embedded",
+    updateId: EMBEDDED_ID,
+    runtimeVersion: "1.0.0(1)",
+    platform: "android",
+    launchAsset: { hash: LAUNCH_HASH },
+    assets: [
+      { key: "Ab12", hash: PNG_HASH }, // Equal to ab12 but for case, with the same hash: both kept.
+      { key: "ab12", hash: PNG_HASH },
+      { key: "icon_2x", hash: EMPTY_HASH },
+    ],
+  };
+  const golden = (file: string) => text(fixture(file));
+  const embedded = (assets: unknown) => loose<BaseRecord>({ ...EMBEDDED, assets });
+
+  test.each<[string, BaseRecord]>([
+    ["base-update.json", UPDATE],
+    ["base-embedded.json", EMBEDDED],
+  ])("%s decodes to its fields and re-encodes to the same bytes", (file, record) => {
+    expect(decodeBaseRecord(fixture(file))).toEqual(record);
+    expect(encodeBaseRecord(record)).toEqual(fixture(file));
+  });
+
+  const update = golden("base-update.json");
+  const emb = golden("base-embedded.json");
+  test.each<[string, string, string, string]>([
+    [
+      "a reordered key",
+      update.replace(`"kind":"update","updateId":"${ID}"`, `"updateId":"${ID}","kind":"update"`),
+      "record",
+      "is not in the form",
+    ],
+    ["an extra key", update.replace(/}$/, ',"note":"x"}'), "note", "is not a field"],
+    ["a missing key", update.replace(',"platform":"ios"', ""), "platform", ""],
+    ["a trailing newline", `${update}\n`, "record", "is not in the form"],
+    ["inner whitespace", update.replace('"version":1,', '"version": 1,'), "record", "is not in"],
+    ["an escaped character", update.replace('"ios"', '"\\u0069os"'), "record", "is not in"],
+    ["a non-canonical number", update.replace('"version":1,', '"version":1.0,'), "record", ""],
+    ["version 2", update.replace('"version":1', '"version":2'), "version", "is not supported"],
+    ['version "1"', update.replace('"version":1', '"version":"1"'), "version", "an integer"],
+    ["no version", update.replace('"version":1,', ""), "version", "an integer"],
+    ["an array", "[]", "record", "must be a JSON object"],
+    ["an uppercase UUID", update.replace(ID, ID.toUpperCase()), "updateId", ""],
+    ["a bad runtime version", update.replace('"1.0.0"', '"1 0"'), "runtimeVersion", ""],
+    ["a bad platform", update.replace('"ios"', '"web"'), "platform", ""],
+    [
+      "a non-canonical hash",
+      update.replace(LAUNCH_HASH, `${LAUNCH_HASH.slice(0, 42)}R`),
+      "launchAsset.hash",
+      "",
+    ],
+    ["an unknown kind", update.replace('"update"', '"build"'), "kind", ""],
+    ["an update with assets", update.replace(/}$/, ',"assets":[]}'), "assets", "is not a field"],
+    ["an embedded build without assets", emb.replace(/,"assets":.*}$/, "}"), "assets", "missing"],
+    [
+      "unsorted assets",
+      emb.replace('{"key":"Ab12"', '{"key":"zz","hash":"' + PNG_HASH + '"},{"key":"Ab12"'),
+      "record",
+      "is not in the form",
+    ],
+    [
+      "a repeated asset",
+      emb.replace('{"key":"Ab12"', `{"key":"Ab12","hash":"${PNG_HASH}"},{"key":"Ab12"`),
+      "record",
+      "is not in the form",
+    ],
+    [
+      "keys equal but for case with two hashes",
+      emb.replace(`{"key":"ab12","hash":"${PNG_HASH}"}`, `{"key":"ab12","hash":"${EMPTY_HASH}"}`),
+      "assets[1].key",
+      "names another hash",
+    ],
+  ])("decode refuses %s", async (_, record, field, message) => {
+    await rejects(() => decodeBaseRecord(ascii(record)), field, message);
+  });
+
+  test("decode refuses a record over the cap before parsing it, and non-UTF-8", async () => {
+    await rejects(
+      () => decodeBaseRecord(new Uint8Array(MAX_BASE_BYTES + 1).fill(0x20)),
+      "record",
+      "is too large",
+    );
+    const bad = ascii(update);
+    bad[bad.indexOf(0x69)] = 0xff; // The `i` of "ios".
+    await rejects(() => decodeBaseRecord(bad), "record", "is not UTF-8 JSON");
+  });
+
+  test("encode collapses repeated key-and-hash entries and leaves its input as it was", () => {
+    const assets = [
+      { key: "icon_2x", hash: EMPTY_HASH },
+      { key: "ab12", hash: PNG_HASH },
+      { key: "Ab12", hash: PNG_HASH },
+      { key: "icon_2x", hash: EMPTY_HASH }, // Expo lists one entry per scale.
+      { key: "Ab12", hash: PNG_HASH },
+    ];
+    const before = structuredClone(assets);
+    expect(encodeBaseRecord(embedded(assets))).toEqual(fixture("base-embedded.json"));
+    expect(assets).toEqual(before);
+  });
+
+  test.each<[string, unknown, string, string]>([
+    [
+      "one key with two hashes",
+      [
+        { key: "a", hash: PNG_HASH },
+        { key: "a", hash: EMPTY_HASH },
+      ],
+      "assets[1].key",
+      "names another hash",
+    ],
+    [
+      "keys equal but for case with two hashes",
+      [
+        { key: "ab", hash: PNG_HASH },
+        { key: "Ab", hash: EMPTY_HASH },
+      ],
+      "assets[0].key",
+      "names another hash",
+    ],
+    ["assets that are not an array", {}, "assets", "must be an array"],
+    ["an asset that is not an object", ["a"], "assets[0]", "must be an object"],
+    ["an asset with an extra field", [{ key: "a", hash: PNG_HASH, x: 1 }], "assets[0].x", ""],
+    ["a bad asset key", [{ key: "a.b", hash: PNG_HASH }], "assets[0].key", ""],
+    ["an asset without a hash", [{ key: "a" }], "assets[0].hash", ""],
+    [
+      "a record over the cap",
+      Array.from({ length: 2100 }, (_, i) => ({ key: `k${i}`.padEnd(64, "x"), hash: PNG_HASH })),
+      "record",
+      "is too large",
+    ],
+  ])("encode refuses %s", async (_, assets, field, message) => {
+    await rejects(() => encodeBaseRecord(embedded(assets)), field, message);
+  });
+
+  test.each<[string, Record<string, unknown>, string]>([
+    ["a numeric runtime version", { runtimeVersion: 1 }, "runtimeVersion"],
+    ["a launch asset that is not an object", { launchAsset: "x" }, "launchAsset"],
+    ["a launch asset with an extra field", { launchAsset: { hash: LAUNCH_HASH, url: "x" } }, ""],
+  ])("encode refuses %s", async (_, change, field) => {
+    await rejects(
+      () => encodeBaseRecord(loose({ ...UPDATE, ...change })),
+      field || "launchAsset.url",
+    );
+  });
+
+  test(`decode(encode(r)) sorts assets and collapses repeats (seed ${seed})`, () => {
+    const asset = fc.record({
+      key: fc.stringMatching(/^[A-Za-z0-9_-]{1,64}$/),
+      hash: fc.constantFrom(PNG_HASH, EMPTY_HASH, LAUNCH_HASH),
+    });
+    // Distinct keys after case folding, then exact repeats of some, in any order.
+    const input = fc
+      .tuple(
+        fc.uniqueArray(asset, { selector: (a) => a.key.toLowerCase(), maxLength: 8 }),
+        fc.array(fc.nat(), { maxLength: 6 }),
+      )
+      .chain(([unique, picks]) => {
+        const repeats = unique.length === 0 ? [] : picks.map((i) => unique[i % unique.length]!);
+        const all = [...unique, ...repeats].map((a) => ({ ...a }));
+        return fc
+          .shuffledSubarray(all, { minLength: all.length, maxLength: all.length })
+          .map((assets) => ({ unique, assets }));
+      });
+    fc.assert(
+      fc.property(input, ({ unique, assets }) => {
+        const before = structuredClone(assets);
+        const sorted = [...unique].sort((a, b) => (a.key < b.key ? -1 : 1));
+        expect(decodeBaseRecord(encodeBaseRecord(embedded(assets)))).toEqual(embedded(sorted));
+        expect(assets).toEqual(before);
+      }),
+      { seed },
+    );
+  });
+
+  test(`a one-byte change to a golden refuses or re-encodes to itself (seed ${seed})`, () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("base-update.json", "base-embedded.json"),
+        fc.nat(),
+        fc.integer({ min: 1, max: 255 }),
+        (file, at, mask) => {
+          const bytes = fixture(file);
+          bytes[at % bytes.length]! ^= mask;
+          let record: BaseRecord;
+          try {
+            record = decodeBaseRecord(bytes);
+          } catch (e) {
+            expect(e).toBeInstanceOf(ProtocolError);
+            return;
+          }
+          expect(encodeBaseRecord(record)).toEqual(bytes);
+        },
+      ),
+      { seed },
+    );
+  });
+});
+
+describe("applyBsdiff", () => {
+  const sha256 = async (bytes: Uint8Array<ArrayBuffer>) =>
+    hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+  const GOLDEN = ["text", "binary", "identical", "empty-base", "empty-target"];
+
+  test.each(GOLDEN)("the reference patch %s reproduces its target", async (name) => {
+    const target = fixture(`patch-${name}.target`);
+    const out = applyBsdiff(
+      fixture(`patch-${name}.base`),
+      fixture(`patch-${name}.bsdiff`),
+      target.length,
+    );
+    expect(await sha256(out)).toBe(await sha256(target));
+  });
+
+  test.each(GOLDEN.filter((name) => name !== "empty-target"))(
+    "the reference patch %s refuses a maxOutput one below its target",
+    async (name) => {
+      const max = fixture(`patch-${name}.target`).length - 1;
+      await rejects(
+        () => applyBsdiff(fixture(`patch-${name}.base`), fixture(`patch-${name}.bsdiff`), max),
+        "patch",
+        `declares an output over ${max} bytes`,
+      );
+    },
+  );
+
+  test("a ctrl block with an unused, valid Huffman group still reproduces the target", async () => {
+    const out = applyBsdiff(
+      fixture("patch-text.base"),
+      fixture("patch-text-extra-group.bsdiff"),
+      MAX_PATCH_OUTPUT,
+    );
+    expect(await sha256(out)).toBe(await sha256(fixture("patch-text.target")));
+  });
+
+  test.each<[string, string, string]>([
+    ["bad-magic", "patch", "does not start with BSDIFF40"],
+    ["short-header", "patch", "is shorter than its 32-byte header"],
+    ["negative-ctrl-len", "patch", "has a negative ctrl length"],
+    ["negative-new-size", "patch", "has a negative output size"],
+    ["ctrl-len-past-patch", "patch", "is shorter than its header's block lengths"],
+    ["length-2-53", "patch", "has a diff length of 2^53 or more"],
+    ["oversize-new-size", "patch", `declares an output over ${MAX_PATCH_OUTPUT} bytes`],
+    ["negative-add", "patch.ctrl", "has a negative length"],
+    ["negative-zero-seek", "patch.ctrl", "has a negative zero"],
+    ["add-past-output", "patch.ctrl", "adds past the output's end"],
+    ["copy-past-output", "patch.ctrl", "copies past the output's end"],
+    ["seek-before-base", "patch.ctrl", "seeks outside the base"],
+    ["read-past-base", "patch.ctrl", "reads past the base's end"],
+    ["leftover-triple", "patch.ctrl", "has data past its end"],
+    ["zero-progress", "patch.ctrl", "decodes to more than"],
+    ["unused-diff-byte", "patch.diff", "has data past its end"],
+    ["truncated-extra", "patch.extra", "is truncated"],
+    ["truncated-diff", "patch.diff", "is truncated"],
+    ["bad-block-crc", "patch.ctrl", "has a bad block CRC"],
+    ["bad-stream-crc", "patch.ctrl", "has a bad stream CRC"],
+    ["randomised-block", "patch.ctrl", "has a randomised block"],
+    ["huffman-unused", "patch.ctrl", "has an over-subscribed Huffman table"],
+    ["trailing-byte", "patch.extra", "has data after the stream end"],
+    ["second-stream", "patch.extra", "has data after the stream end"],
+  ])("refuses patch-bad-%s.bsdiff", async (name, field, message) => {
+    const patch = fixture(`patch-bad-${name}.bsdiff`);
+    await rejects(
+      () => applyBsdiff(fixture("patch-text.base"), patch, MAX_PATCH_OUTPUT),
+      field,
+      message,
+    );
+  });
+
+  test.each([MAX_PATCH_OUTPUT + 1, Number.MAX_SAFE_INTEGER, -1, 1.5, Number.NaN])(
+    "refuses maxOutput %d before reading the patch",
+    async (max) => {
+      await rejects(() => applyBsdiff(new Uint8Array(), new Uint8Array(), max), "maxOutput");
+    },
+  );
+
+  /** bspatch's loop over KNOWN_PATCH, written out for one base. */
+  function knownTarget(base: Uint8Array): Uint8Array {
+    const out = new Uint8Array(KNOWN_PATCH.newSize);
+    let [newPos, oldPos, diffPos, extraPos] = [0, 0, 0, 0];
+    for (const [add, copy, seek] of KNOWN_PATCH.triples) {
+      for (let i = 0; i < add; i++) {
+        out[newPos + i] = KNOWN_PATCH.diff[diffPos + i]! + base[oldPos + i]!;
+      }
+      out.set(KNOWN_PATCH.extra.subarray(extraPos, extraPos + copy), newPos + add);
+      [newPos, oldPos, diffPos, extraPos] = [
+        newPos + add + copy,
+        oldPos + add + seek,
+        diffPos + add,
+        extraPos + copy,
+      ];
+    }
+    return out;
+  }
+
+  test(`a patch with known triples applies to any base long enough (seed ${seed})`, () => {
+    const patch = fixture("patch-known.bsdiff");
+    fc.assert(
+      fc.property(fc.uint8Array({ minLength: KNOWN_PATCH.minBase, maxLength: 256 }), (base) => {
+        expect(applyBsdiff(base, patch, KNOWN_PATCH.newSize)).toEqual(knownTarget(base));
+      }),
+      { seed },
+    );
+    const short = new Uint8Array(KNOWN_PATCH.minBase - 1);
+    expect(() => applyBsdiff(short, patch, KNOWN_PATCH.newSize)).toThrow(ProtocolError);
+  });
+
+  test(`a flipped, inserted or cut byte yields bytes or a ProtocolError (seed ${seed})`, () => {
+    const name = fc.constantFrom("text", "binary", "identical", "empty-base", "empty-target");
+    const edit = fc.oneof(
+      fc.record({ op: fc.constant("flip"), at: fc.nat(), mask: fc.integer({ min: 1, max: 255 }) }),
+      fc.record({
+        op: fc.constant("insert"),
+        at: fc.nat(),
+        mask: fc.integer({ min: 0, max: 255 }),
+      }),
+      fc.record({ op: fc.constant("cut"), at: fc.nat(), mask: fc.constant(0) }),
+    );
+    fc.assert(
+      fc.property(name, edit, (n, { op, at, mask }) => {
+        const patch = fixture(`patch-${n}.bsdiff`);
+        const i = at % patch.length;
+        const edited =
+          op === "flip"
+            ? patch.map((b, j) => (j === i ? b ^ mask : b))
+            : op === "insert"
+              ? join([patch.subarray(0, i), new Uint8Array([mask]), patch.subarray(i)])
+              : patch.slice(0, i);
+        try {
+          expect(applyBsdiff(fixture(`patch-${n}.base`), edited, MAX_PATCH_OUTPUT)).toBeInstanceOf(
+            Uint8Array,
+          );
+        } catch (e) {
+          expect(e).toBeInstanceOf(ProtocolError);
+        }
+      }),
+      { seed },
+    );
+  });
+});
+
+describe("bunzip2", () => {
+  const MULTIBLOCK_LENGTH = 627_995;
+  const MULTIBLOCK_SHA256 = "234067970bb655e627e7ebf13a0cf75863107d2480e6151501f1ab889e5411ac";
+  const decode = (file: string, limit: number, chunks: readonly number[] = [limit + 1]) => {
+    const reader = bunzip2(fixture(file), "stream", limit);
+    const parts: Uint8Array[] = [];
+    for (let i = 0; ; i++) {
+      const into = new Uint8Array(chunks[i % chunks.length]!);
+      const n = reader.read(into);
+      parts.push(into.subarray(0, n));
+      if (n < into.length) break;
+    }
+    reader.end();
+    return join(parts);
+  };
+  const sha256 = async (bytes: Uint8Array<ArrayBuffer>) =>
+    hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+
+  test("several blocks decode to their SHA-256 in one read", async () => {
+    const out = decode("multiblock.bz2", MULTIBLOCK_LENGTH);
+    expect(out.length).toBe(MULTIBLOCK_LENGTH);
+    expect(await sha256(out)).toBe(MULTIBLOCK_SHA256);
+  });
+
+  test(`several blocks decode to their SHA-256 in reads of any size (seed ${seed})`, async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 1, max: 200_000 }), { minLength: 1, maxLength: 8 }),
+        async (chunks) => {
+          expect(await sha256(decode("multiblock.bz2", MULTIBLOCK_LENGTH, chunks))).toBe(
+            MULTIBLOCK_SHA256,
+          );
+        },
+      ),
+      { seed, numRuns: 20 },
+    );
+  });
+
+  test("a stream that decodes past its limit refuses", async () => {
+    await rejects(
+      () => decode("multiblock.bz2", MULTIBLOCK_LENGTH - 1),
+      "stream",
+      `decodes to more than ${MULTIBLOCK_LENGTH - 1} bytes`,
+    );
+  });
+
+  test("a block may end after a run's count byte, but not before it", async () => {
+    expect(text(decode("bzip2-run-control.bz2", 5))).toBe("xaaaa");
+    await rejects(
+      () => decode("bzip2-run-at-block-end.bz2", 5),
+      "stream",
+      "has a block that ends inside a run",
+    );
   });
 });
