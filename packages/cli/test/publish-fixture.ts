@@ -24,7 +24,7 @@ import {
 import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
 import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
-import { assetUrl, launchUrl } from "../src/publish-record.ts";
+import { launchUrl } from "../src/publish-record.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("fake-expo.ts", import.meta.url));
@@ -233,20 +233,8 @@ export async function signedManifest(objects: Objects, key: string) {
   return { reply, manifest };
 }
 
-/** What a seeded manifest serves: its launch bundle's bytes and URL shape, and its assets' bytes. */
-interface Served {
-  readonly launch?: Uint8Array<ArrayBuffer>;
-  readonly launchUrl?: (hash: string) => string;
-  readonly assets?: readonly Uint8Array<ArrayBuffer>[];
-}
-
-/** A pointer reply signed by `by`'s key: a manifest created at `time` serving `served`, or a rollback committed then. */
-export async function seededPointer(
-  kind: "manifest" | "rollback",
-  time: number,
-  by = main,
-  served: Served = {},
-) {
+/** A pointer reply signed by `by`'s key: a manifest created at `time`, or a rollback committed then. */
+export async function seededPointer(kind: "manifest" | "rollback", time: number, by = main) {
   const signer = cryptoKeySigner(by.keys.privateKey, "main");
   if (kind === "rollback") {
     const body = buildRollBackToEmbedded({ commitTime: new Date(time) });
@@ -255,15 +243,8 @@ export async function seededPointer(
     ]);
     return encodeStoredReply({ kind: "rollBackToEmbedded", ...multipart });
   }
-  const hash = await sha256Base64Url(served.launch ?? utf8("seeded"));
+  const hash = await sha256Base64Url(utf8("seeded"));
   const id = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
-  const assets = [];
-  for (const bytes of served.assets ?? []) {
-    const assetHash = await sha256Base64Url(bytes);
-    const key = createHash("md5").update(bytes).digest("hex");
-    const url = assetUrl(ASSET_URL, assetHash);
-    assets.push({ hash: assetHash, key, contentType: "image/png", fileExtension: ".png", url });
-  }
   const body = buildManifest({
     id,
     createdAt: new Date(time),
@@ -272,9 +253,9 @@ export async function seededPointer(
       hash,
       contentType: "application/javascript",
       fileExtension: ".bundle",
-      url: (served.launchUrl ?? ((h) => launchUrl(SERVER_URL, h)))(hash),
+      url: launchUrl(SERVER_URL, hash),
     },
-    assets,
+    assets: [],
     metadata: { channel: "main" },
     extra: {},
   });

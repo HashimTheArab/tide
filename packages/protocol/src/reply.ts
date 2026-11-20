@@ -39,8 +39,9 @@ const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   noUpdateAvailable: ["version", "kind", "contentType", "body"],
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-// Content-addressed objects and release records; lowercase, so they are safe on case-insensitive disks.
-const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
+/** A content-addressed bundle or asset key; lowercase, so it is safe on case-insensitive disks. */
+export const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
+// A release record key, lowercase for the same reason.
 const RECORD_KEY = new RegExp(`^updates/${UUID.source.slice(1, -1)}\\.json$`);
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
 // Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.

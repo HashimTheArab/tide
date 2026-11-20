@@ -62,10 +62,7 @@ export async function status(
 }
 
 /** Reads and checks the record at `key`; undefined when absent. */
-export async function readRecord(
-  bucket: Pick<Bucket, "get">,
-  key: string,
-): Promise<Verdict | undefined> {
+export async function readRecord(bucket: Bucket, key: string): Promise<Verdict | undefined> {
   let bytes;
   try {
     bytes = (await bucket.get(key, MAX_REPLY_BYTES))?.bytes;

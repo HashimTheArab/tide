@@ -2,15 +2,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import {
-  LEGACY_MAP_KEY,
-  contentKey,
-  cryptoKeySigner,
-  encodeMultipart,
-  encodeStoredReply,
-  expoSignature,
-  sha256Base64Url,
-} from "@tide/protocol";
+import { LEGACY_MAP_KEY, contentKey, sha256Base64Url } from "@tide/protocol";
 import { FAKE_S3 } from "@tide/server/test/fake-s3";
 
 import { byteOrder } from "../src/bucket.ts";
@@ -25,15 +17,12 @@ import {
   IOS,
   MAIN,
   SERVER_URL,
-  T,
   diskObjects,
   env,
-  main,
   project,
   s3,
   s3Env,
   s3Snapshot,
-  seededPointer,
   signedManifest,
   tree,
   useFixture,
@@ -130,18 +119,6 @@ async function record(launch: Uint8Array<ArrayBuffer>) {
   });
 }
 
-/** A pointer whose signed manifest is exactly `manifest`, so it can break rules the builder keeps. */
-async function signedPointer(manifest: object) {
-  const body = utf8(JSON.stringify(manifest));
-  const signature = await expoSignature(body, cryptoKeySigner(main.keys.privateKey, "main"));
-  return encodeStoredReply({
-    kind: "manifest",
-    updateId: UPDATE_ID,
-    manifestFilters: "",
-    ...encodeMultipart([{ name: "manifest", body, signature }]),
-  });
-}
-
 /** Fails unless `result` is exit 1 with nothing on stdout and exactly `message` on stderr, holding no credential. */
 function expectFailure(result: Awaited<ReturnType<typeof storage>>, message: string) {
   expect(result).toEqual({ code: 1, stdout: "", stderr: `tide: ${message}\n` });
@@ -187,25 +164,9 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       await bucket.putIfAbsent(key, bytes, "application/octet-stream");
       return key;
     };
-    // A pointer with no release record protects its bundle and asset.
-    const [launch, asset] = [utf8("seeded launch"), utf8("seeded asset")];
-    await bucket.put(
-      "reply/seeded/1.0.0/ios",
-      await seededPointer("manifest", T, main, { launch, assets: [asset] }),
-    );
-    protectedKeys.push(await stored("bundles", launch), await stored("assets", asset));
-    // A legacy launch URL reads assets/<hex>, so the same bytes under bundles/ serve nothing.
-    const legacy = utf8("legacy launch");
-    const legacyUrl = (h: string) => `${SERVER_URL}/assets?h=${h}&ext=bundle`;
-    await bucket.put(
-      "reply/legacy/1.0.0/ios",
-      await seededPointer("manifest", T, main, { launch: legacy, launchUrl: legacyUrl }),
-    );
-    protectedKeys.push(await stored("assets", legacy));
     const mapped = utf8("mapped");
     const mappedKey = await stored("assets", mapped);
     const unreferenced = [
-      [await stored("bundles", legacy), legacy],
       [await stored("bundles", utf8("orphan bundle")), utf8("orphan bundle")],
       [await stored("assets", utf8("orphan asset")), utf8("orphan asset")],
     ].map(([k, v]) => [k, k, v] as [string, string, Uint8Array]);
@@ -243,37 +204,6 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     expect(await storage(open())).toEqual({ code: 0, stdout: `${SUMMARY(0, 0)}\n`, stderr: "" });
   });
 
-  const hash = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
-  const manifest = {
-    id: UPDATE_ID,
-    createdAt: "2030-01-01T00:00:00.000Z",
-    runtimeVersion: "1.0.0",
-    launchAsset: { hash, url: `${SERVER_URL}/bundles/${contentKey(hash)}` },
-    assets: [],
-  };
-  test.each([
-    [{ ...manifest, assets: null }, "manifest.assets must be an array"],
-    [{ ...manifest, launchAsset: [] }, "manifest.launchAsset must be an object"],
-    [
-      { ...manifest, launchAsset: { hash: "x" } },
-      "manifest.launchAsset.hash must be 43 characters of base64url",
-    ],
-    [{ ...manifest, assets: [7] }, "manifest.assets[0] must be an object"],
-    [
-      { ...manifest, assets: [{ hash: hash.slice(1) }] },
-      "manifest.assets[0].hash must be 43 characters of base64url",
-    ],
-  ])(
-    "a pointer that status accepts but that serves %j fails the report",
-    async (served, message) => {
-      const store = open();
-      await bucketFromEnv(store.env).put(IOS, await signedPointer(served));
-      const status = await run(MAIN, ["status"], store.env);
-      expect(status.code).toBe(0);
-      expectFailure(await storage(store), `reply/ entry 1 is unreadable: ${message}`);
-    },
-  );
-
   test.each([
     [
       "a record that is valid JSON but not a record",
@@ -286,12 +216,6 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
       undefined,
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json is unreadable: its updateId differs from its name",
-    ],
-    [
-      "a pointer that is not a reply",
-      IOS,
-      utf8("not a reply"),
-      "reply/ entry 1 is unreadable: not a stored reply",
     ],
     [
       "a legacy map with a trailing newline",
@@ -332,22 +256,17 @@ describe("on S3", () => {
     );
   });
 
-  test.each([
-    [recordKey(UPDATE_ID), recordKey(UPDATE_ID)],
-    // The pointer's key holds the access key ID, so failures name its position instead.
-    [`reply/${FAKE_S3.accessKeyId}/1.0.0/ios`, "reply/ entry 1"],
-    [LEGACY_MAP_KEY, LEGACY_MAP_KEY],
-  ])("a read failure of %s fails the report without provider text", async (key, label) => {
-    const bytes = key.startsWith("reply/")
-      ? await seededPointer("manifest", T)
-      : await record(utf8("launch"));
-    s3.objects.set(key, bytes);
-    s3.behave(key, "access-denied");
-    expectFailure(
-      await storage(STORES.s3()),
-      `${label} is unreadable: S3 GetObject failed: 403 AccessDenied`,
-    );
-  });
+  test.each([recordKey(UPDATE_ID), LEGACY_MAP_KEY])(
+    "a read failure of %s fails the report without provider text",
+    async (key) => {
+      s3.objects.set(key, await record(utf8("launch")));
+      s3.behave(key, "access-denied");
+      expectFailure(
+        await storage(STORES.s3()),
+        `${key} is unreadable: S3 GetObject failed: 403 AccessDenied`,
+      );
+    },
+  );
 
   test("sizes past 2^53 are totalled exactly", async () => {
     const keys = ["aa", "bb", "cc"].map((b) => `assets/${b.repeat(32)}`);

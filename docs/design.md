@@ -283,17 +283,13 @@ references, one `<name> <bytes>` row each in byte order, then `<n> unreferenced 
 means named by:
 
 - any release record, all of which are retained (a record itself is never reported): `bundles/` for its launch hash
-  and `assets/` for each asset;
-- the signed manifest of any pointer, read as stored: an asset whose URL has a shape Tide serves (`/bundles/<hex>`,
-  `/assets/<hex>`, the legacy `/assets?h=`) names that key, any other names its hash (`bundles/` for the launch
-  asset, `assets/` otherwise). `launchAsset` and each `assets[]` entry must be an object with a valid `hash`;
+  and `assets/` for each asset. A pointer serves its release record, so it adds nothing;
 - `legacy/map.json`.
 
 A name outside the key grammar prints as a JSON string with every character outside printable ASCII written `\uXXXX`.
 It writes nothing and takes no lock, so the report is exact for a quiescent bucket: a record committed after the
 listing protects its content only from the next run. Exit 0 with the report; 1, with nothing on stdout, when a
-listing or read fails or a record, pointer or the legacy map does not decode; 2 on a usage or configuration error.
-Errors name a pointer by its position under `reply/`, never by its key, which could hold any text.
+listing or read fails or a record or the legacy map does not decode; 2 on a usage or configuration error.
 
 `register-build` (P5) records a store build's embedded update ID and bundle as a base.
 
