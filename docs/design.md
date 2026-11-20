@@ -499,8 +499,8 @@ dropped. `expo-fatal-error` holds the client's error message, which may contain 
 recorded. A point is therefore at most 64 bytes of index and 345 bytes of blobs, well inside Analytics Engine's
 limits (96-byte index, 16 KB of blobs).
 
-The sink is synchronous and never awaited: a sink that throws, or returns a promise that never settles, leaves the
-reply unchanged, and a throw is logged by error name only, never with the point's values.
+The sink is never awaited: a sink that throws, rejects, or returns a promise that never settles leaves the reply
+unchanged, and a throw or rejection is logged by error name only, never with the point's values.
 
 A synthetic probe verifies a manifest's signature against a pinned certificate and fetches its bundle.
 

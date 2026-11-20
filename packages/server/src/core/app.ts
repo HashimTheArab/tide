@@ -139,10 +139,13 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       console.error(`/manifest for ${key} failed`, e);
     }
     try {
-      analytics(manifestPoint(reply?.kind ?? "503", platform, channel, runtime, header));
+      const written: unknown = analytics(
+        manifestPoint(reply?.kind ?? "503", platform, channel, runtime, header),
+      );
+      // An async sink still type-checks; its rejection is logged, never awaited.
+      Promise.resolve(written).catch(sinkFailed);
     } catch (e) {
-      // The name only: the point holds client values.
-      console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
+      sinkFailed(e);
     }
     if (reply === undefined) return c.text("storage unavailable\n", 503, NO_STORE);
     const headers: Record<string, string> = {
@@ -328,6 +331,11 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
 interface PatchRequest {
   readonly current: string; // Lowercase UUIDs.
   readonly requested: string;
+}
+
+/** Logs a failed analytics write by error name only: the point holds client values. */
+function sinkFailed(e: unknown): void {
+  console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
 }
 
 /** Returns the update IDs of a request that accepts a bsdiff patch, or undefined. */

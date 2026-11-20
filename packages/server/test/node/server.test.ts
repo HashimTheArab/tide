@@ -113,7 +113,7 @@ describe("node app with an analytics sink", () => {
       const fail = fault === undefined ? undefined : faultySink(fault);
       sink = (point) => {
         points.push(point);
-        fail?.();
+        return fail?.();
       };
       onTestFinished(() => {
         sink = () => undefined;

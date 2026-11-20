@@ -15,7 +15,7 @@ export interface ManifestPoint {
   doubles: number[];
 }
 
-/** Receives one point per `/manifest` request that reaches the reply decision; it must not block. */
+/** Receives one point per `/manifest` request that reaches the reply decision; it is never awaited. */
 export type AnalyticsSink = (point: ManifestPoint) => void;
 
 /** `channel` and `runtime` must already match the reply key grammar; every other value is read raw from `header`. */
