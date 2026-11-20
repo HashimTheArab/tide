@@ -13,6 +13,7 @@ import {
   sha256Base64Url,
 } from "@tide/protocol";
 
+import type { Bucket } from "../src/bucket.ts";
 import type { Platform } from "../src/publish-record.ts";
 import type { Objects } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
@@ -22,6 +23,7 @@ import { checkPatch, preparePatches, uploadPatches } from "../src/publish-patch.
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { execute, publish, recordedKeys, storedContent } from "../src/publish.ts";
 import { registerBuild } from "../src/register-build.ts";
+import { bucketFromEnv } from "../src/storage.ts";
 import { prng, rejection, tempRoot } from "./helpers.ts";
 import {
   ASSET_URL,
@@ -33,6 +35,7 @@ import {
   pins,
   s3,
   s3Env,
+  serveMain,
   tree,
   useFixture,
 } from "./publish-fixture.ts";
@@ -95,6 +98,7 @@ async function register(
   const files = ["--manifest", join(dir, "app.manifest"), "--bundle", join(dir, "main.jsbundle")];
   const ignore = () => undefined;
   const environment = { ...pins(), ...store };
+  await serveMain(store);
   expect(await registerBuild([...args, ...files], environment, { out: ignore, err: ignore })).toBe(
     0,
   );
@@ -153,7 +157,7 @@ async function seedUpdate(
 
 /** Seeds an embedded base record, without its bundle. */
 async function seedEmbedded(
-  root: string,
+  bucket: Bucket,
   id: string,
   bundle: Uint8Array<ArrayBuffer>,
   platform = "ios",
@@ -166,7 +170,7 @@ async function seedEmbedded(
     launchAsset: { hash: await sha256Base64Url(bundle) },
     assets: [],
   });
-  await diskBucket(root).put(baseKey(id), record);
+  await bucket.put(baseKey(id), record);
 }
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
@@ -243,7 +247,7 @@ describe("publish stores patches", () => {
       platform: "android",
     });
     for (const i of [30, 31]) {
-      await seedEmbedded(root, uuid(i), variant(i));
+      await seedEmbedded(diskBucket(root), uuid(i), variant(i));
       await diskBucket(root).put(`bundles/${await hex(variant(i))}`, variant(i));
     }
 
@@ -292,7 +296,7 @@ describe("refusals before any write", () => {
       "an embedded build whose bundle is not stored",
       async (root, next) => {
         const base = edited(next, 1);
-        await seedEmbedded(root, EMBEDDED, base);
+        await seedEmbedded(diskBucket(root), EMBEDDED, base);
         return `${baseKey(EMBEDDED)} names bundles/${await hex(base)}, which is not stored`;
       },
     ],
@@ -330,7 +334,7 @@ describe("refusals before any write", () => {
     const ios = random(41);
     const android = random(42);
     await register({ TIDE_DISK_DIR: root }, edited(ios, 1));
-    await seedEmbedded(root, uuid(2), edited(android, 1), "android");
+    await seedEmbedded(diskBucket(root), uuid(2), edited(android, 1), "android");
     const before = tree(root);
     expect(await publishBundles({ TIDE_DISK_DIR: root }, { ios, android })).toMatchObject({
       code: 2,
@@ -344,7 +348,7 @@ describe("refusals before any write", () => {
   test("a missing base refuses even when the new bundle is too large to patch", async () => {
     const root = tempRoot();
     const next = new Uint8Array(MAX_BSDIFF_INPUT + 1);
-    await seedEmbedded(root, EMBEDDED, random(43));
+    await seedEmbedded(diskBucket(root), EMBEDDED, random(43));
     const before = tree(root);
     expect(await publishBundles({ TIDE_DISK_DIR: root }, { ios: next })).toMatchObject({
       code: 2,
@@ -360,7 +364,7 @@ describe("refusals before any write", () => {
     const store = { TIDE_DISK_DIR: root };
     const [ios, android] = [random(44), random(45)];
     await register(store, edited(ios, 1));
-    await seedEmbedded(root, uuid(2), edited(android, 1), "android");
+    await seedEmbedded(diskBucket(root), uuid(2), edited(android, 1), "android");
     await diskBucket(root).put(`bundles/${await hex(edited(android, 1))}`, edited(android, 1));
     const bucket = diskBucket(root);
     const targets = [
@@ -436,7 +440,10 @@ describe("patches on S3", () => {
   const next = edited(embedded, 61);
 
   test("patches land after bundles and assets and before reply/no-update, records, bases and pointers", async () => {
-    await register(s3Env(), embedded);
+    // Seeded rather than registered, since registering needs the reply/no-update this publish must write.
+    const bucket = bucketFromEnv(s3Env());
+    await seedEmbedded(bucket, EMBEDDED, embedded);
+    await bucket.put(`bundles/${await hex(embedded)}`, embedded);
     s3.puts.length = 0;
     expect((await publishBundles(s3Env(), { ios: next })).code).toBe(0);
     const [key] = await patchesTo(next, embedded);
@@ -446,7 +453,7 @@ describe("patches on S3", () => {
     const noUpdate = at((k) => k === NO_UPDATE_KEY);
     const records = at((k) => /^(?:updates|bases)\//.test(k));
     const pointer = at((k) => k === IOS);
-    expect(patch).toHaveLength(1);
+    expect([patch.length, noUpdate.length]).toEqual([1, 1]);
     for (const [earlier, later] of [
       [content, patch],
       [patch, noUpdate],

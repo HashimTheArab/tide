@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
 import type { BaseAsset } from "@tide/protocol";
 import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide/protocol";
@@ -29,6 +29,7 @@ import {
   s3,
   s3Env,
   s3Snapshot,
+  serveMain,
   tree,
   useFixture,
 } from "./publish-fixture.ts";
@@ -55,6 +56,14 @@ const STORES = {
   s3: () => ({ env: s3Env(), objects: () => s3.objects, snapshot: s3Snapshot }),
 };
 type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
+
+/** A `kind` store serving the main identity, as after the first publish; the S3 fake's puts list starts empty. */
+async function served(kind: keyof typeof STORES): Promise<Store> {
+  const store = STORES[kind]();
+  await serveMain(store.env);
+  s3.puts.length = 0;
+  return store;
+}
 
 interface Build {
   readonly id?: unknown;
@@ -142,17 +151,16 @@ const bundleKey = async (bytes: Uint8Array<ArrayBuffer> = BUNDLE) =>
 
 describe("register-build to disk", () => {
   test("the bin stores the exact bundle and a base record of the build, finding nested assets by MD5", async () => {
-    const root = tempRoot();
+    const store = await served("disk");
+    const before = store.objects();
     const b = build();
     writeFileSync(join(b.assets, "raw", "unrelated.txt"), "not an asset");
-    const result = await run(MAIN, ["register-build", ...args(b)], {
-      ...pins(),
-      TIDE_DISK_DIR: root,
-    });
+    const result = await run(MAIN, ["register-build", ...args(b)], { ...pins(), ...store.env });
     const bundle = await bundleKey();
     expect(result).toEqual({ code: 0, stdout: `${baseKey(ID)} ${bundle}\n`, stderr: "" });
-    expect(diskObjects(root)).toEqual(
+    expect(store.objects()).toEqual(
       new Map([
+        ...before,
         [baseKey(ID), await expectedBase(await defaultAssets())],
         [bundle, BUNDLE],
       ]),
@@ -160,7 +168,7 @@ describe("register-build to disk", () => {
   });
 
   test("a manifest without assets needs no --assets-dir", async () => {
-    const root = tempRoot();
+    const store = await served("disk");
     const b = build({ keys: [] });
     const result = await register(
       [
@@ -173,23 +181,14 @@ describe("register-build to disk", () => {
         "--bundle",
         b.bundle,
       ],
-      {
-        env: { TIDE_DISK_DIR: root },
-        objects: () => diskObjects(root),
-        snapshot: () => tree(root),
-      },
+      store,
     );
     expect(result.code).toBe(0);
-    expect(diskObjects(root).get(baseKey(ID))).toEqual(await expectedBase([]));
+    expect(store.objects().get(baseKey(ID))).toEqual(await expectedBase([]));
   });
 
   test("a build whose assets match an export's passes that publish's key check", async () => {
-    const root = tempRoot();
-    const store = {
-      env: { TIDE_DISK_DIR: root },
-      objects: () => diskObjects(root),
-      snapshot: () => tree(root),
-    };
+    const store = await served("disk");
     expect((await register(args(build()), store)).code).toBe(0);
     const published = await publish(["--channel", "main", "--from", artifact()], env(store.env), {
       out: () => undefined,
@@ -206,7 +205,7 @@ describe("register-build to disk", () => {
 });
 
 describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) => {
-  const open = (): Store => STORES[kind]();
+  const open = () => served(kind);
 
   test("either build certificate source registers, with no signing key", async () => {
     const path = join(tempRoot(), "certificate.pem");
@@ -215,7 +214,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       pins(),
       { TIDE_BUILD_KEYID: "main", TIDE_BUILD_CERTIFICATE_FILE: path },
     ]) {
-      expect(await register(args(build()), open(), identity)).toEqual({
+      expect(await register(args(build()), await open(), identity)).toEqual({
         code: 0,
         out: [`${baseKey(ID)} ${await bundleKey()}`],
         err: [],
@@ -259,7 +258,8 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       "TIDE_BUILD_CERTIFICATE: certificate has expired",
     ],
   ])("%s is refused before the bucket is read", async (_, identityOf, message) => {
-    const store = open();
+    const store = await open();
+    const before = store.snapshot();
     const requests = s3.requests;
     expect(await register(args(build()), store, await identityOf())).toEqual({
       code: 2,
@@ -267,12 +267,11 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       err: [`tide: ${message}`],
     });
     expect(s3.requests).toBe(requests);
-    expect(store.snapshot()).toEqual(kind === "disk" ? new Map() : s3Snapshot());
-    expect([...store.objects().keys()]).toEqual([]);
+    expect(store.snapshot()).toEqual(before);
   });
 
   test("a bucket whose replies are signed under another identity is refused", async () => {
-    const store = open();
+    const store = await open();
     await bucketFromEnv(store.env).put("reply/no-update", await noUpdateBy(otherIdentity));
     const before = store.snapshot();
     expect(await register(args(build()), store)).toEqual({
@@ -285,8 +284,20 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     expect(store.snapshot()).toEqual(before);
   });
 
+  test("a bucket that serves no identity yet is refused, so the first publish cannot pin another", async () => {
+    const store = STORES[kind]();
+    expect(await register(args(build()), store)).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        "tide: reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
+      ],
+    });
+    expect([...store.objects().keys()]).toEqual([]);
+  });
+
   test("an identical re-run succeeds and writes nothing", async () => {
-    const store = open();
+    const store = await open();
     const b = build();
     expect((await register(args(b), store)).code).toBe(0);
     const before = store.snapshot();
@@ -301,7 +312,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     ["another bundle", { bundle: utf8("another bundle") }],
     ["other assets", { keys: [PNG_MD5] }],
   ])("%s under a registered ID is refused before any write", async (_, other) => {
-    const store = open();
+    const store = await open();
     expect((await register(args(build()), store)).code).toBe(0);
     const before = store.snapshot();
     s3.puts.length = 0;
@@ -430,12 +441,13 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       "--bundle is missing or unreadable",
     ],
   ])("%s is refused before any bucket request", async (_, argv, message) => {
-    const store = open();
+    const store = await open();
+    const before = store.snapshot();
     const given = argv();
     const requests = s3.requests;
     expect(await register(given, store)).toEqual({ code: 2, out: [], err: [`tide: ${message}`] });
     expect(s3.requests).toBe(requests);
-    expect(store.snapshot()).toEqual(new Map());
+    expect(store.snapshot()).toEqual(before);
   });
 
   test.each([
@@ -473,7 +485,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
   ])(
     "an asset key %s records with another SHA-256 is refused before any write",
     async (_, key, seed) => {
-      const store = open();
+      const store = await open();
       await bucketFromEnv(store.env).put(
         key,
         await seed(await sha256Base64Url(utf8("other bytes"))),
@@ -494,7 +506,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
   );
 
   test("an unreadable base record refuses, since the key check cannot be proven", async () => {
-    const store = open();
+    const store = await open();
     await bucketFromEnv(store.env).put(baseKey(OTHER_ID), utf8("{}"));
     expect(await register(args(build()), store)).toEqual({
       code: 2,
@@ -506,6 +518,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 
 describe("register-build on S3", () => {
   const store = () => STORES.s3();
+  beforeEach(() => served("s3"));
 
   test("a bases/ listing that fails is a refusal with no PUT", async () => {
     s3.onList("updates/", () => s3.failAll({ status: 500, code: "InternalError" }));
@@ -532,6 +545,7 @@ describe("register-build on S3", () => {
     expect(s3.puts).toEqual([await bundleKey(), baseKey(ID)]);
 
     s3.reset();
+    await served("s3");
     s3.raceOnPut(baseKey(ID), theirs);
     expect(await register(args(b), store())).toEqual({
       code: 1,

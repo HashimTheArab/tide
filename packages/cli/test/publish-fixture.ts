@@ -26,6 +26,7 @@ import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { exportProject } from "../src/export.ts";
 import { launchUrl } from "../src/publish-record.ts";
+import { bucketFromEnv } from "../src/storage.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("fake-expo.ts", import.meta.url));
@@ -336,4 +337,9 @@ export async function noUpdateBy(id: Identity) {
     kind: "noUpdateAvailable",
     ...encodeMultipart([{ name: "directive", body, signature }]),
   });
+}
+
+/** Makes the bucket over `store` serve the main identity, as a first publish does, so register-build accepts it. */
+export async function serveMain(store: Record<string, string>): Promise<void> {
+  await bucketFromEnv(store).put("reply/no-update", await noUpdateBy(main));
 }

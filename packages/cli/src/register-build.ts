@@ -71,7 +71,12 @@ async function prepare(
     assets,
   });
 
-  await checkBucket(bucket, identity);
+  // An empty bucket serves no identity, so its first publish could pin another under this build's asset keys.
+  if (!(await checkBucket(bucket, identity))) {
+    throw new PublishError(
+      "reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
+    );
+  }
   const stored = await bucket.get(key, MAX_BASE_BYTES);
   if (stored !== undefined && !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);

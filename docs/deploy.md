@@ -99,7 +99,8 @@ separate jobs of one workflow:
 
 - **Export job.** A GitHub-hosted runner; `permissions: contents: read`; no `environment`, no `secrets.*`, no
   `id-token`, and no credential in its environment, files or profiles. It checks out the app and Tide at a pinned
-  commit, runs `tide export --out <dir>`, and uploads `<dir>` with `actions/upload-artifact`, exposing its
+  commit, both with `persist-credentials: false` (otherwise `actions/checkout` leaves the job token in `.git/config`,
+  where project code can read it), runs `tide export --out <dir>`, and uploads `<dir>` with `actions/upload-artifact`, exposing its
   `artifact-id` output as a job output. Expo's tools get only an allowlisted environment (`design.md`, CLI); pass
   anything else the app config needs with `--pass-env`.
 - **Writer job.** `needs` the export job and runs in the protected environment holding the key and bucket secrets.
@@ -118,9 +119,10 @@ separate jobs of one workflow:
     `artifact-ids` (not `name`), with `digest-mismatch: error` and `path` a fresh directory under
     `${{ runner.temp }}`, outside the Tide checkout. A single artifact by ID is "extracted directly to the specified
     path" (`actions/download-artifact` v8.0.2 README).
-  - **Head check.** On a run's first attempt, before downloading, a publish checks through the GitHub API that its
-    commit is still the branch head, as [`examples/deploy-workers.yml`](examples/deploy-workers.yml) does for
-    deploys, so a late approval cannot publish older code over newer.
+  - **Head check.** On every attempt, reruns included, before downloading, a publish checks through the GitHub API
+    that its commit is still the branch head, as [`examples/deploy-workers.yml`](examples/deploy-workers.yml) does
+    for deploys. The job already holds the group's slot, so neither a late approval nor a rerun that waited behind a
+    newer writer publishes older code over newer.
   - **KMS through OIDC.** `id-token: write` lets the job request a token; Tide needs the AWS session it is exchanged
     for. `aws-actions/configure-aws-credentials` with `role-to-assume`, `output-credentials: true` and
     `output-env-credentials: false`; then pass its `aws-access-key-id`, `aws-secret-access-key` and
@@ -137,10 +139,9 @@ binding above.
 so the head check, not the queue, keeps older code from publishing over newer.
 
 **Recovery.** A writer that exits 1 failed after writes began; one that exits 2 wrote nothing. Rerun the failed job
-(Re-run failed jobs) before any other writer runs: it downloads the same artifact by ID and publishes to the same
-channel, and starts from what the bucket holds. The rerun skips the head check, so it is not refused because the
-branch moved on; never rerun a writer once a later one has completed, since that would publish older code over
-newer. A writer whose pending run was cancelled is rerun by hand.
+(Re-run failed jobs): it downloads the same artifact by ID, publishes to the same channel and starts from what the
+bucket holds. Once the branch has moved on, its head check refuses it before any write, and the newer commit's
+writer publishes over whatever the failed run left. A writer whose pending run was cancelled is rerun by hand.
 
 ## Routine deploys
 

@@ -412,8 +412,9 @@ listing or read fails or a record or the legacy map does not decode; 2 on a usag
 `tide register-build --platform ios|android --runtime-version <v> --manifest <app.manifest> --bundle <file>
 [--assets-dir <dir>]` records a store build as an `embedded` base record, so patches can start from its bundle and
 its asset keys join the identity check. Nothing is signed or timestamped, so it needs no key, but it reads the build
-pins (Keys) before the bucket is opened and refuses a bucket whose replies are signed under another identity: a build
-is registered only where its own certificate and `keyid` are served. Exit codes as publish; stdout
+pins (Keys) before the bucket is opened and refuses a bucket whose `reply/no-update` is absent or signed under another
+identity: a build is registered only where its own certificate and `keyid` are already served, so a first publish
+cannot pin another identity over its asset keys. Exit codes as publish; stdout
 `bases/<id> bundles/<64 hex>`.
 
 - **Inputs**, all from one build: its update ID is random per build, so mixing builds registers a base no installed
@@ -432,7 +433,7 @@ is registered only where its own certificate and `keyid` are served. Exit codes 
   location, since packaging may re-encode them; two files with one MD5 and different bytes refuse.
   `--assets-dir` is required only when the manifest lists assets.
 - **Refused before any write** (exit 2): a missing or repeated option or a positional; a bad runtime or platform;
-  a missing or invalid build pin; a bucket signed under another identity;
+  a missing or invalid build pin; a bucket with no `reply/no-update` or signed under another identity;
   an ID that is not a lowercase UUID; an unreadable input; an asset key with no matching file; an asset key that a
   release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
 - **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
