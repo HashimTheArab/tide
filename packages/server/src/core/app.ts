@@ -144,16 +144,16 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   };
 
   // Every manifest's launch asset URL; patch negotiation joins it with bundle diffing.
-  app.get("/bundles/:hex", (c) => {
+  app.get("/bundles/:hex", async (c) => {
     const hex = c.req.param("hex");
     if (!CONTENT_HEX.test(hex)) {
       return c.text("the path must end in 64 lowercase hex characters\n", 400, NO_STORE);
     }
-    return serveObject(c, `bundles/${hex}`, assetContentType("bundle"));
+    return await serveObject(c, `bundles/${hex}`, assetContentType("bundle"));
   });
 
   // Serves URLs earlier servers put in signed manifests: `h` is the asset's unpadded base64url SHA-256.
-  app.get("/assets", (c) => {
+  app.get("/assets", async (c) => {
     const h = c.req.queries("h");
     let key: string;
     try {
@@ -162,7 +162,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("h must be one 43-character base64url SHA-256\n", 400, NO_STORE);
     }
     const ext = c.req.queries("ext");
-    return serveObject(c, key, assetContentType(ext?.length === 1 ? (ext[0] ?? "") : ""));
+    return await serveObject(c, key, assetContentType(ext?.length === 1 ? (ext[0] ?? "") : ""));
   });
 
   app.notFound((c) => c.text("not found\n", 404, NO_STORE));
