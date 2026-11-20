@@ -146,8 +146,9 @@ writes:
 
 A Hono app in `packages/server/src/core` that uses only web-standard APIs and one `Store.get(key)` interface.
 Entry points: `workers.ts` (R2 binding) and `node.ts` (S3 API, or a local disk for tests and single-host
-development). No application cache. `Store.get` resolves undefined only for an object that does not exist; every
-other failure is a non-cacheable 5xx, never a 404.
+development). No application cache. `Store.get` resolves undefined only for an object that does not exist. A
+failed read of what a route serves is a non-cacheable 5xx, never a 404; an optional lookup (a `/bundles` patch)
+that fails falls back to the full reply instead.
 
 ### `GET /manifest`
 
@@ -181,14 +182,34 @@ too.
 
 ### `GET /bundles/<sha256>`
 
-Every manifest's `launchAsset.url` points here, so the server sees patch negotiation.
+Every manifest's `launchAsset.url` points here, so the server sees patch negotiation. HEAD answers the same headers
+with no body and cancels every stream it holds.
 
-- With `A-IM: bsdiff`: resolve `Expo-Current-Update-ID` through `bases/`, confirm `Expo-Requested-Update-ID` names an
-  update whose launch hash is this one, and look up `patches/<base>/<this>`. Found: 226, `im: bsdiff`,
-  `expo-base-update-id`, `cache-control: private, no-store`, `vary: A-IM, Expo-Current-Update-ID`.
-- Otherwise: 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`.
-- A path that is not 64 lowercase hex is 400, an absent bundle 404 and a store failure 503, each `no-store`.
-- Patches are never shared-cached: a cached patch under the plain URL would break the client's full-file retry.
+- A path that is not 64 lowercase hex is 400. The read of `bundles/<hex>` starts at once and alone decides the rest:
+  absent is 404, a store failure 503, each `no-store`, whatever the patch lookup finds. `A-IM` can turn a 200 into a
+  226, never into an error.
+- The lookup runs beside it only when `A-IM` lists `bsdiff` (case-insensitive, commas inside quoted parameters do not
+  split items) with no `q` or a valid `q` above zero (RFC 3229 10.5.3), and `Expo-Current-Update-ID` and
+  `Expo-Requested-Update-ID` are both UUIDs, compared lowercase. It reads `bases/<current>` and
+  `bases/<requested>` (at most 256 KiB each, from the stored size) through `decodeBaseRecord`; each record's
+  `updateId` must be the ID it was read by. The requested record's launch hash must be this path's, and then
+  `patches/<current launch hex>/<this hex>` is read.
+- A patch found: 226 with its bytes, `content-type: application/octet-stream`, `im: bsdiff`,
+  `expo-base-update-id: <current ID, lowercase>`, `cache-control: private, no-store`, `vary: A-IM,
+  Expo-Current-Update-ID`. The bundle read's body is cancelled.
+- Anything else is 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`: no or
+  declined `A-IM`, a missing or malformed ID, an unknown base, a requested base naming another hash, no patch, and,
+  logged, a base record that is oversized, fails to decode or names another ID, a store error on a base or patch, or
+  the lookup passing its deadline. The full bundle is always correct and the client hashes it; a 503 would block
+  every client on a broken base until the bucket is repaired.
+- The lookup has its own 2 s deadline, so the fallback stays well inside the Android client's 10 s read timeout. The
+  deadline covers the base reads and the patch's headers only, never a 226 body already on the wire.
+- The server checks nothing it serves: not the patch bytes, the hashes, or that the bases share a runtime and
+  platform (the CLI applied and hash-checked every patch before upload).
+- Patches are never shared-cached: a cached patch under the plain URL would break the client's full-file retry. The
+  200 carries no `Vary`, so a shared cache could answer a later `A-IM` request with the full bundle, losing only the
+  saving. Workers Cache (opt-in, unset in Tide's `wrangler.jsonc`) answers before the Worker runs; a deployment that
+  enables it must let `/bundles/` requests carrying `A-IM` reach the Worker.
 
 ### Other routes
 
