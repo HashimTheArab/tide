@@ -1,19 +1,10 @@
 #!/usr/bin/env node
-import { storageFromEnv } from "@tide/protocol";
-
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
-import { diskBucket } from "./disk.ts";
-import { s3Bucket } from "./s3.ts";
 import { status } from "./status.ts";
+import { bucketFromEnv } from "./storage.ts";
 
 const USAGE = "usage: tide status";
-
-/** Returns the bucket the environment configures, with the server's variables: TIDE_DISK_DIR or TIDE_S3_*. */
-function bucketFromEnv(env: Readonly<Record<string, string | undefined>>): Bucket {
-  const storage = storageFromEnv(env);
-  return "disk" in storage ? diskBucket(storage.disk) : s3Bucket(storage.s3);
-}
 
 /** Runs one command; 0 is success, 1 an unreadable record, 2 a usage, configuration or bucket error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
