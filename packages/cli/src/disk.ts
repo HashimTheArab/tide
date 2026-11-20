@@ -253,7 +253,7 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
   };
 
   function listSync(prefix: string): ListEntry[] {
-    const entries: ListEntry[] = [];
+    const found: { readonly path: string; readonly key: string | undefined }[] = [];
     const reaches = (name: string) =>
       `${name}/`.startsWith(prefix) || prefix.startsWith(`${name}/`);
     const walk = (rel: string) => {
@@ -266,24 +266,57 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
       }
       for (const d of dirents) {
         if (rel === "" && d.name === META) continue;
-        const name = rel === "" ? d.name : `${rel}/${d.name}`;
-        const key = diskKey(name);
-        if (key !== undefined) entries.push({ key });
+        const path = rel === "" ? d.name : `${rel}/${d.name}`;
+        const key = diskKey(path);
         // A subtree that cannot hold a match is skipped, so its failures cannot fail this listing.
-        else if (d.isDirectory()) {
-          if (reaches(name) || reaches(unescapeDiskPath(name))) walk(name);
-        } else entries.push({ unknown: name });
+        if (key === undefined && d.isDirectory()) {
+          if (reaches(path) || reaches(unescapeDiskPath(path))) walk(path);
+        } else found.push({ path, key });
       }
     };
     walk("");
     // A file or symlink where a directory of the prefix belongs hides everything under it.
-    if (entries.some((e) => "unknown" in e && prefix.startsWith(`${e.unknown}/`))) {
+    if (found.some((f) => f.key === undefined && prefix.startsWith(`${f.path}/`))) {
       throw fail("failed: ENOTDIR");
     }
+    const listed = new Set(found.map((f) => f.key));
+    const entries: ListEntry[] = [];
+    for (const f of found) {
+      const key = f.key ?? aliasOf(f.path, listed);
+      if (!(key ?? f.path).startsWith(prefix)) continue;
+      const size = sizeOf(f.path);
+      entries.push(key === undefined ? { unknown: f.path, size } : { key, size });
+    }
     const name = (e: ListEntry) => ("key" in e ? e.key : e.unknown);
-    return entries
-      .filter((e) => name(e).startsWith(prefix))
-      .sort((a, b) => byteOrder(name(a), name(b)));
+    return entries.sort((a, b) => byteOrder(name(a), name(b)));
+  }
+
+  /** Returns the bytes at `path` without following a link: 0 for anything but a regular file. */
+  function sizeOf(path: string): number {
+    try {
+      const st = lstatSync(join(root, path));
+      return st.isFile() ? st.size : 0;
+    } catch (e) {
+      throw fail(`failed: ${code(e)}`);
+    }
+  }
+
+  /**
+   * Returns the key `get` opens at `path` on a case-insensitive volume, so a listing agrees with reads: the unlisted
+   * key whose path is `path` lowercased and is this same file. Undefined otherwise.
+   */
+  function aliasOf(path: string, listed: ReadonlySet<string | undefined>): string | undefined {
+    const lower = path.toLowerCase();
+    const key = diskKey(lower);
+    if (key === undefined || listed.has(key)) return undefined;
+    try {
+      const [a, b] = [path, lower].map((p) => lstatSync(join(root, p), { throwIfNoEntry: false }));
+      return a !== undefined && b !== undefined && a.ino === b.ino && a.dev === b.dev
+        ? key
+        : undefined;
+    } catch (e) {
+      throw fail(`failed: ${code(e)}`);
+    }
   }
 }
 

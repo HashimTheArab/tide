@@ -165,9 +165,9 @@ export function s3Bucket(config: S3Config, options: { readonly timeoutMs?: numbe
         };
         token = await listPage(query, (page) => {
           for (const entry of page.entries) {
-            if (!("key" in entry)) continue;
-            if (last !== undefined && byteOrder(entry.key, last) <= 0) throw invalidListing();
-            last = entry.key;
+            const name = "key" in entry ? entry.key : entry.unknown;
+            if (last !== undefined && byteOrder(name, last) <= 0) throw invalidListing();
+            last = name;
           }
           if (page.next !== undefined && sent.has(page.next)) throw invalidListing();
           entries.push(...page.entries);
@@ -225,15 +225,11 @@ interface Page {
 function parsePage(text: string, prefix: string): Page | undefined {
   const root = parseS3Xml(text);
   if (root?.name !== "ListBucketResult") return undefined;
-  const only = (name: string) => {
-    const found = childElements(root, name);
-    return found.length === 1 && found[0] !== undefined ? textOf(found[0]) : undefined;
-  };
-  const truncated = only("IsTruncated");
-  if ((truncated !== "true" && truncated !== "false") || only("EncodingType") !== "url") {
+  const truncated = onlyText(root, "IsTruncated");
+  if ((truncated !== "true" && truncated !== "false") || onlyText(root, "EncodingType") !== "url") {
     return undefined;
   }
-  const echoed = only("Prefix");
+  const echoed = onlyText(root, "Prefix");
   // No delimiter is sent, so a group would hide keys.
   if (
     echoed === undefined ||
@@ -252,19 +248,28 @@ function parsePage(text: string, prefix: string): Page | undefined {
   }
   const entries: ListEntry[] = [];
   for (const c of contents) {
-    const keys = childElements(c, "Key");
-    const raw = keys.length === 1 && keys[0] !== undefined ? textOf(keys[0]) : undefined;
-    if (raw === undefined) return undefined;
-    const name = decodeName(raw);
-    if (name !== undefined && !name.startsWith(prefix)) return undefined;
-    entries.push(name !== undefined && isKey(name) ? { key: name } : { unknown: raw });
+    const raw = onlyText(c, "Key");
+    // S3 keys are UTF-8, so a name that does not decode is a broken page, not a stored name.
+    const name = raw === undefined ? undefined : decodeName(raw);
+    const sizeText = onlyText(c, "Size");
+    const size = sizeText !== undefined && /^\d{1,16}$/.test(sizeText) ? Number(sizeText) : NaN;
+    if (name === undefined || !name.startsWith(prefix) || !Number.isSafeInteger(size)) {
+      return undefined;
+    }
+    entries.push(isKey(name) ? { key: name, size } : { unknown: name, size });
   }
   let next: string | undefined;
   if (truncated === "true") {
-    next = only("NextContinuationToken");
+    next = onlyText(root, "NextContinuationToken");
     if (next === undefined || next === "") return undefined;
   }
   return { entries, next };
+}
+
+/** The text of `parent`'s one `name` child; undefined unless there is exactly one. */
+function onlyText(parent: Parameters<typeof childElements>[0], name: string): string | undefined {
+  const found = childElements(parent, name);
+  return found.length === 1 && found[0] !== undefined ? textOf(found[0]) : undefined;
 }
 
 /** `encoding-type=url` names: + is a space, then percent-decoded as UTF-8. */

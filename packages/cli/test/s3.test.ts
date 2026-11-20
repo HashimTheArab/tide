@@ -17,9 +17,7 @@ beforeAll(async () => {
   bucket = s3Bucket({ ...FAKE_S3, endpoint: fake.endpoint });
 });
 afterEach(() => {
-  fake.failAll(undefined);
-  fake.listFault(undefined);
-  fake.objects.clear();
+  fake.reset();
 });
 afterAll(() => fake.close());
 
@@ -142,21 +140,45 @@ test("putIfMatch on an absent key is AWS's 404, an error rather than a lost race
   expect(fake.objects.has(KEY)).toBe(false);
 });
 
-test.each(["malformed", "missing-field", "common-prefixes", "repeat-token"] as const)(
-  "a second listing page that is %s rejects the whole listing",
-  async (fault) => {
-    for (const n of [1, 2, 3, 4, 5]) fake.objects.set(`reply/c${n}/1/ios`, utf8("x"));
-    fake.listFault(fault);
-    const before = fake.tokens.length;
-    const error = await rejection(bucket.list("reply/"));
-    expect(error).toMatchObject({
-      message: "S3 ListObjectsV2 returned 200 with an invalid listing page",
-      outcome: "failed",
-    });
-    // The fake faults only pages after the first, so exactly one continuation was requested.
-    expect(fake.tokens.slice(before)).toHaveLength(1);
-  },
-);
+test.each([
+  "malformed",
+  "missing-field",
+  "common-prefixes",
+  "repeat-token",
+  "no-size",
+  "bad-name",
+  "repeat-key",
+] as const)("a second listing page that is %s rejects the whole listing", async (fault) => {
+  for (const n of [1, 2, 3, 4, 5]) fake.objects.set(`reply/c${n}/1/ios`, utf8("x"));
+  fake.listFault(fault);
+  const before = fake.tokens.length;
+  const error = await rejection(bucket.list("reply/"));
+  expect(error).toMatchObject({
+    message: "S3 ListObjectsV2 returned 200 with an invalid listing page",
+    outcome: "failed",
+  });
+  // The fake faults only pages after the first, so exactly one continuation was requested.
+  expect(fake.tokens.slice(before)).toHaveLength(1);
+});
+
+test("a name outside the grammar repeated on the next page rejects the listing", async () => {
+  for (const n of [1, 2, 3, 4, 5]) fake.objects.set(`assets/name ${n}`, utf8("x"));
+  fake.listFault("repeat-key");
+  expect(await rejection(bucket.list("assets/"))).toMatchObject({
+    message: "S3 ListObjectsV2 returned 200 with an invalid listing page",
+  });
+});
+
+test("a listed size is exact up to 2^53 - 1 bytes, and a larger one rejects the listing", async () => {
+  const key = `assets/${"ab".repeat(32)}`;
+  fake.objects.set(key, utf8("x"));
+  fake.listSize(key, String(Number.MAX_SAFE_INTEGER));
+  expect(await bucket.list("assets/")).toEqual([{ key, size: Number.MAX_SAFE_INTEGER }]);
+  fake.listSize(key, "9007199254740992");
+  expect(await rejection(bucket.list("assets/"))).toMatchObject({
+    message: "S3 ListObjectsV2 returned 200 with an invalid listing page",
+  });
+});
 
 test("a clean listing sends each continuation token back byte for byte", async () => {
   const before = fake.tokens.length;

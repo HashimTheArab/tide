@@ -139,7 +139,7 @@ describe("disk bucket", () => {
     const root = tempRoot();
     const bucket = diskBucket(root);
     mkdirSync(path(root), { recursive: true });
-    expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
+    expect(await bucket.list("reply/")).toEqual([{ key: KEY, size: 0 }]);
     expect(await rejection(bucket.get(KEY, 100))).toMatchObject({
       message: `disk bucket ${root} not a regular file`,
     });
@@ -186,6 +186,36 @@ describe("disk bucket", () => {
     expect(existsSync(path(root))).toBe(false);
   });
 
+  test("a listing sizes entries without following links: only a regular file has bytes", async () => {
+    const root = tempRoot();
+    const outside = join(tempRoot(), "big");
+    writeFileSync(outside, new Uint8Array(4096));
+    const [linked, dangling, file] = ["aa", "bb", "cc"].map((b) => `assets/${b.repeat(32)}`);
+    mkdirSync(join(root, "assets"));
+    symlinkSync(outside, join(root, linked!));
+    symlinkSync(join(root, "missing"), join(root, dangling!));
+    writeFileSync(join(root, file!), "abc");
+    expect(await diskBucket(root).list("assets/")).toEqual([
+      { key: linked, size: 0 },
+      { key: dangling, size: 0 },
+      { key: file, size: 3 },
+    ]);
+  });
+
+  test("a name that opens a key's file on a case-insensitive volume is listed as that key", async () => {
+    const root = tempRoot();
+    const [key, alias] = [`bundles/${"ab".repeat(32)}`, `bundles/${"AB".repeat(32)}`];
+    mkdirSync(join(root, "bundles"));
+    writeFileSync(join(root, alias), "abc");
+    // On a case-sensitive volume the key's path is another, absent file, so the name stays unknown.
+    const insensitive = existsSync(join(root, key));
+    const bucket = diskBucket(root);
+    expect(await bucket.list("bundles/")).toEqual([
+      insensitive ? { key, size: 3 } : { unknown: alias, size: 3 },
+    ]);
+    expect((await bucket.get(key, 10))?.bytes).toEqual(insensitive ? utf8("abc") : undefined);
+  });
+
   test("putIfMatch on an absent key is a lost race", async () => {
     const root = tempRoot();
     expect(await diskBucket(root).putIfMatch(KEY, utf8("x"), '"a"')).toBeUndefined();
@@ -219,7 +249,7 @@ describe("disk bucket", () => {
       chmodSync(assets, 0);
       try {
         expect(() => readdirSync(assets)).toThrow();
-        expect(await bucket.list("reply/")).toEqual([{ key: KEY }]);
+        expect(await bucket.list("reply/")).toEqual([{ key: KEY, size: 1 }]);
         expect(await rejection(bucket.list(""))).toMatchObject({
           message: `disk bucket ${root} failed: EACCES`,
         });
