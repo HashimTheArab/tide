@@ -190,7 +190,7 @@ function republishing(ids: readonly string[], channel?: string, runtime?: string
   return async (writer, now) => {
     const { bucket } = writer;
     // Every retained record decodes and agrees on asset keys, the source's included, as a publish requires.
-    const { records: retained } = await recordedKeys(bucket);
+    const { records: retained } = await recordedKeys(bucket, ids.map(recordKey));
     const stored = new Set(await storedContent(bucket));
     const sources = [];
     for (const id of ids) {

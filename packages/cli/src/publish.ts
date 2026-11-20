@@ -333,10 +333,10 @@ function configuredBase(env: Env, name: string): string {
 }
 
 /**
- * Reads every retained release record, by key, with the asset keys they name. A record that cannot be read refuses,
- * since the key check cannot be proven without it.
+ * Returns the asset keys every retained release record names, and the records stored at `wanted` keys. A record that
+ * cannot be read refuses, since the key check cannot be proven without it.
  */
-export async function recordedKeys(bucket: Bucket) {
+export async function recordedKeys(bucket: Bucket, wanted: readonly string[] = []) {
   const keys: KeyHashes = new Map();
   const records = new Map<string, ReleaseRecord>();
   for (const entry of await bucket.list(RECORD_PREFIX)) {
@@ -356,7 +356,8 @@ export async function recordedKeys(bucket: Bucket) {
       throw new PublishError(`${entry.key} is unreadable: its updateId differs from its name`);
     }
     for (const a of record.assets) addKey(keys, a.key, a.hash, entry.key);
-    records.set(entry.key, record);
+    // Others are dropped, so memory follows the key index rather than the release history.
+    if (wanted.includes(entry.key)) records.set(entry.key, record);
   }
   return { keys, records };
 }

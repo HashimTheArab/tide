@@ -18,8 +18,14 @@ import { FAKE_S3 } from "@tide/server/test/fake-s3";
 import type { Objects } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
 import { diskBucket } from "../src/disk.ts";
-import { assetUrl, decodeRecord, encodeRecord, launchUrl } from "../src/publish-record.ts";
-import { publish } from "../src/publish.ts";
+import {
+  assetUrl,
+  decodeRecord,
+  encodeRecord,
+  launchUrl,
+  recordKey,
+} from "../src/publish-record.ts";
+import { publish, recordedKeys } from "../src/publish.ts";
 import { run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
@@ -572,6 +578,16 @@ describe("publish to disk", () => {
       expect(result).toEqual({ code: 2, out: [], err: [`tide: ${message}`] });
       expect(tree(root)).toEqual(new Map());
     });
+  });
+
+  test("the record scan keeps only the requested records, though it indexes every record's keys", async () => {
+    const bucket = diskBucket(tempRoot());
+    const [a, b] = ["6f9619ff-8b86-4d01-b42d-00cf4fc96401", "6f9619ff-8b86-4d01-b42d-00cf4fc96402"];
+    const hash = await sha256Base64Url(utf8("png"));
+    for (const id of [a, b]) await bucket.putIfAbsent(recordKey(id), await seededRecord(id, hash));
+    const { keys, records } = await recordedKeys(bucket, [recordKey(a)]);
+    expect([...records.keys()]).toEqual([recordKey(a)]);
+    expect(keys.get(PNG_MD5)?.hash).toBe(hash);
   });
 });
 

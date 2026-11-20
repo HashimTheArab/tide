@@ -253,8 +253,8 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
   };
 
   /**
-   * False for content the server could not open: a bundle or asset key that is not a readable regular file, a symlink
-   * followed. Other keys are always listed, so `status` can name what is wrong with them.
+   * False for a bundle or asset key that is not a regular file this process can read, a symlink followed; the server
+   * shares the publisher's access. Other keys are always listed, so `status` can name what is wrong with them.
    */
   function servable(key: string, name: string): boolean {
     if (!key.startsWith("bundles/") && !key.startsWith("assets/")) return true;
