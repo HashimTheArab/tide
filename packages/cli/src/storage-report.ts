@@ -3,16 +3,22 @@ import { CONTENT_KEY, LEGACY_MAP_KEY, contentKey } from "@tide/protocol";
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
 import { member } from "./keys.ts";
-import { PublishError, RECORD_PREFIX, readReleaseRecord } from "./publish-record.ts";
+import {
+  BASE_PREFIX,
+  PublishError,
+  RECORD_PREFIX,
+  readBaseRecord,
+  readReleaseRecord,
+} from "./publish-record.ts";
 
 const REPORTED = ["assets/", "bundles/", RECORD_PREFIX] as const;
 const MAX_MAP_BYTES = 64 * 1024 * 1024;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
- * Prints every object under `assets/`, `bundles/` and `updates/` that no release record or legacy map entry names, as
- * `<name> <bytes>`, then the count and total. Returns 1 with nothing on stdout when a listing or read fails, since a
- * partial scan could report a referenced object.
+ * Prints every object under `assets/`, `bundles/` and `updates/` that no release record, base record or legacy map
+ * entry names, as `<name> <bytes>`, then the count and total. Returns 1 with nothing on stdout when a listing or read
+ * fails, since a partial scan could report a referenced object.
  */
 export async function storage(
   bucket: Pick<Bucket, "get" | "list">,
@@ -37,8 +43,8 @@ export async function storage(
 }
 
 /**
- * Lists the reported prefixes, then reads the legacy map and every release record. A pointer serves its release
- * record, which is retained, so pointers add no root.
+ * Lists the reported prefixes and `bases/`, then reads the legacy map, every release record and every base record. A
+ * pointer serves its release record, which is retained, so pointers add no root.
  */
 async function scan(bucket: Pick<Bucket, "get" | "list">): Promise<ListEntry[]> {
   let listed: ListEntry[] = [];
@@ -51,6 +57,12 @@ async function scan(bucket: Pick<Bucket, "get" | "list">): Promise<ListEntry[]> 
     if (record === undefined) continue;
     referenced.add(`bundles/${contentKey(record.launchAsset.hash)}`);
     for (const a of record.assets) referenced.add(`assets/${contentKey(a.hash)}`);
+  }
+  // A base's bundle is what patches start from; its embedded assets are in the store build, not the bucket.
+  for (const e of await listing(bucket, BASE_PREFIX)) {
+    if (!("key" in e)) continue; // No reader opens a name outside the grammar.
+    const base = await reading(e.key, () => readBaseRecord(bucket, e.key));
+    if (base !== undefined) referenced.add(`bundles/${contentKey(base.launchAsset.hash)}`);
   }
   // A release record is itself retained.
   return listed.filter(

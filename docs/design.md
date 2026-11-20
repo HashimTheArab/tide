@@ -235,10 +235,16 @@ with no body and cancels every stream it holds.
 
 ## CLI
 
-**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` (P5) run only from one CI
+**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only from one CI
 workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
+
+When `register-build` exits 1, the workflow keeps its exact inputs and runs it again with them, admitting no other
+writer, until it exits 0. A base PUT whose response was lost can still land; once a re-run has stored the same bytes,
+a late copy can only be refused or identical. Otherwise it could land after another writer had committed another
+SHA-256 for one of its asset keys, on a build already installed. If the rule is broken anyway, the next key check
+refuses, naming both sources.
 
 ### Bucket configuration
 
@@ -297,8 +303,8 @@ components), the MD5 is its key, and the file's bytes must hash to it. Repeated 
 Steps, in order; every refusal comes before the first write, and all replies are signed in memory first:
 
 1. Read the config, runtimes and export, and open the writer (Keys).
-2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build (P5), or in
-   two of them, comparing keys case-insensitively. An unreadable record refuses too.
+2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build, or in
+   two of them, comparing keys case-insensitively. An unreadable release or base record refuses too.
 3. Read each pointer and its ETag, then the bucket's time. Refuse a local clock more than a minute from it, or a
    certificate invalid by either clock.
 4. Compose each platform's manifest under a fresh UUID with `createdAt = max(now, previous createdAt or commitTime
@@ -308,7 +314,8 @@ Steps, in order; every refusal comes before the first write, and all replies are
    last N updates); apply each and check its hash before upload; keep one only if it is well under the compressed
    bundle.
 6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then
-   `reply/no-update` (a winner must verify under the identity), release records, and (P5) bases and patches. Then,
+   `reply/no-update` (a winner must verify under the identity), each release record followed by its `update` base
+   record (put-if-absent), and (P5) patches. Then,
    per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
    its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
    an unknown outcome may be live, and the next run starts from what the bucket holds.
@@ -337,7 +344,7 @@ first write; arguments are checked before Expo runs.
   update's stored code again under a fresh UUID, on `--channel` or the update's own channel. It is rebuilt from the
   release record by publish's own manifest builder, so hashes, keys, extensions, `extra` and URLs are the original's;
   only the ID, `createdAt = max(now, previous + 1 ms, source createdAt + 1 ms)`, `metadata.channel` and the filter
-  change. It writes a new release record and uploads nothing. stdout as publish.
+  change. It writes a new release record and base record, and uploads nothing. stdout as publish.
 - `tide rollback --to <updateId> [--to <updateId>]... [--project-root <dir>]` is `republish` onto each update's own
   pointer, and takes no `--channel`, `--runtime-version` or `--platform`. `--to A B` is a usage error.
 
@@ -353,14 +360,42 @@ means named by:
 
 - any release record, all of which are retained (a record itself is never reported): `bundles/` for its launch hash
   and `assets/` for each asset. A pointer serves its release record, so it adds nothing;
+- any base record: `bundles/` for its launch hash. Embedded assets live in the store build, not the bucket;
 - `legacy/map.json`.
+
+Nothing under `bases/` or `patches/` is ever reported.
 
 A name outside the key grammar prints as a JSON string with every character outside printable ASCII written `\uXXXX`.
 It writes nothing and takes no lock, so the report is exact for a quiescent bucket: a record committed after the
 listing protects its content only from the next run. Exit 0 with the report; 1, with nothing on stdout, when a
 listing or read fails or a record or the legacy map does not decode; 2 on a usage or configuration error.
 
-`register-build` (P5) records a store build's embedded update ID and bundle as a base.
+`tide register-build --platform ios|android --runtime-version <v> --manifest <app.manifest> --bundle <file>
+[--assets-dir <dir>]` records a store build as an `embedded` base record, so patches can start from its bundle and
+its asset keys join the identity check. It needs only the bucket: nothing is signed or timestamped. Exit codes as
+publish; stdout `bases/<id> bundles/<64 hex>`.
+
+- **Inputs**, all from one build: its update ID is random per build, so mixing builds registers a base no installed
+  client has. Android: `assets/app.manifest` and `assets/index.android.bundle` from the built APK (`base/assets/`
+  in an AAB), and `--assets-dir app/build/generated/res/react/<variant>` from the same Gradle run. Build clean or
+  with `--rerun-tasks`: `create<Variant>UpdatesResources` does not track JS sources, so an incremental build can
+  pack a new bundle beside the previous build's manifest. The manifest names no bundle hash, so unless that ID is
+  already registered, registration accepts the pair and every patch from it fails on installs of the earlier build.
+  iOS: `main.jsbundle`, `assets/` and the manifest the client loads from the built `.app`: `app.manifest` in the
+  `EXUpdates.bundle` beside the `EXUpdates` code (the `.app` root, since Expo links `EXUpdates` statically), else the
+  `.app` root's own `app.manifest`. When images are compiled into an asset catalog (`RNAssets.xcassets`), pass the
+  same build's Metro asset files from before catalog compilation instead.
+- The update ID is the manifest's `id`, a lowercase UUID. Each manifest asset's key is its `packagerHash`
+  (32 lowercase hex): the MD5 of the source file. Every regular file under `--assets-dir` (symlinks and other types
+  skipped) is MD5-hashed, and the file matching each key gives its SHA-256. Files are found by content, never by
+  location, since packaging may re-encode them; two files with one MD5 and different bytes refuse.
+  `--assets-dir` is required only when the manifest lists assets.
+- **Refused before any write** (exit 2): a missing or repeated option or a positional; a bad runtime or platform;
+  an ID that is not a lowercase UUID; an unreadable input; an asset key with no matching file; an asset key that a
+  release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
+- **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
+  A lost base create succeeds only if the stored bytes are identical. Re-running with identical inputs writes nothing
+  and exits 0. An unknown outcome exits 1, and the re-run starts from the bucket (One writer at a time).
 
 **Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an

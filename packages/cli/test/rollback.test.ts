@@ -2,7 +2,13 @@ import { appendFileSync, cpSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { NO_UPDATE_KEY, decodeStoredReply, sha256Base64Url } from "@tide/protocol";
+import {
+  NO_UPDATE_KEY,
+  baseKey,
+  decodeBaseRecord,
+  decodeStoredReply,
+  sha256Base64Url,
+} from "@tide/protocol";
 
 import type { Manifest } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
@@ -165,6 +171,17 @@ async function servedManifest(res: Response, store: Store, key: string) {
   return (await signedPart(body, stored.boundary, "manifest")) as Manifest;
 }
 
+/** Fails unless `bases/<id>` is the update base record of `manifest`. */
+function expectBase(store: Store, manifest: Manifest, platform: string) {
+  expect(decodeBaseRecord(store.objects().get(baseKey(manifest.id))!)).toEqual({
+    kind: "update",
+    updateId: manifest.id,
+    runtimeVersion: manifest.runtimeVersion,
+    platform,
+    launchAsset: { hash: manifest.launchAsset.hash },
+  });
+}
+
 /** The parts of a manifest a republish must carry over unchanged. */
 const code = (m: Manifest) => ({
   runtimeVersion: m.runtimeVersion,
@@ -247,7 +264,9 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     });
     expect(content(store.snapshot())).toEqual(content(before));
     expect(store.snapshot().get(IOS)).toEqual(before.get(IOS));
-    if (kind === "s3") expect(s3.puts).toEqual([recordKey(manifest.id), BETA]);
+    expectBase(store, manifest, "ios");
+    if (kind === "s3")
+      expect(s3.puts).toEqual([recordKey(manifest.id), baseKey(manifest.id), BETA]);
 
     const server = await serve(store);
     const served = await servedManifest(await server.manifest("beta", "ios"), store, BETA);
@@ -262,6 +281,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     const b = await publishIos(store, app.root, exportB());
     expect(b.launchAsset.hash).not.toBe(a.launchAsset.hash);
     clearLog(app);
+    s3.puts.length = 0;
     const result = await cmd(
       "rollback",
       ["--to", a.id, "--project-root", app.root],
@@ -271,6 +291,8 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     expectOneConfigRun(app);
 
     const { manifest } = await signedManifest(store.objects(), IOS);
+    expectBase(store, manifest, "ios");
+    if (kind === "s3") expect(s3.puts).toEqual([recordKey(manifest.id), baseKey(manifest.id), IOS]);
     expect(result.out).toEqual([`${IOS} ${manifest.id} ${manifest.createdAt}`]);
     expect([a.id, b.id]).not.toContain(manifest.id);
     expect(code(manifest)).toEqual(code(a));
@@ -660,6 +682,29 @@ describe("on S3", () => {
     );
     expect(s3.puts).toHaveLength(1);
     expect(s3.puts[0]).toMatch(/^updates\//);
+  });
+
+  test("a failed base write stops republish and rollback --to before their pointers", async () => {
+    const store = STORES.s3();
+    const app = project();
+    const a = await publishIos(store, app.root);
+    const before = s3.objects.get(IOS);
+    for (const args of [
+      [a.id, "--channel", "beta"],
+      ["--to", a.id],
+    ]) {
+      s3.puts.length = 0;
+      s3.dropAfterPut("bases/");
+      const command = args[0] === "--to" ? "rollback" : "republish";
+      const result = await cmd(command, [...args, "--project-root", app.root], writerEnv(store));
+      expect(result.code).toBe(1);
+      expect(result.err[0]).toMatch(
+        /^tide: bases\/[0-9a-f-]{36}: S3 PutObject failed: network error; outcome unknown; no pointer names it yet$/,
+      );
+      expect(s3.puts.map((k) => k.split("/")[0])).toEqual(["updates", "bases"]);
+    }
+    expect(s3.objects.get(IOS)).toBe(before);
+    expect(s3.objects.has(BETA)).toBe(false);
   });
 
   describe("certificate expiry", () => {

@@ -18,6 +18,7 @@ import { createdAtFloor } from "./pointer.ts";
 import { expoEnv, expoJson } from "./publish-export.ts";
 import { PublishError, recordKey } from "./publish-record.ts";
 import {
+  commit,
   compose,
   execute,
   plan,
@@ -131,12 +132,13 @@ async function run(
     const { projectRoot, prepare } = parse(cwd);
     // The app config is project code, so it runs without TIDE_ variables or dotenv files.
     const config = await expoJson(projectRoot, expoEnv(env), "expo", ["config", "--json"]);
-    return await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
+    const ready = await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
+    return () => commit(ready, options.out);
   });
 }
 
 /** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
-function parsed<T>(usage: string, parse: () => T): T {
+export function parsed<T>(usage: string, parse: () => T): T {
   try {
     return parse();
   } catch {
@@ -227,7 +229,7 @@ function republishing(ids: readonly string[], channel?: string, runtime?: string
       const createdAt = Math.max(createdAtFloor(local, previous), Date.parse(record.createdAt) + 1);
       const { updateId: _, createdAt: __, ...draft } = record;
       const c = await compose(writer, { ...draft, channel: target }, createdAt, { key, previous });
-      records.push(c.record);
+      records.push(...c.records);
       pointers.push(c.pointer);
     }
     return await plan(writer, checkCertificate, records, pointers);

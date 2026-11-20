@@ -34,6 +34,19 @@ export const SERVER_URL = "https://updates.example.com";
 export const ASSET_URL = "https://assets.example.com";
 // The fixture PNG's key: the MD5 of its bytes, which is also its file name in the export.
 export const PNG_MD5 = createHash("md5").update(fixture("asset.png")).digest("hex");
+// A known MD5 collision: two 128-byte blocks with one digest and two SHA-256s.
+const COLLISION =
+  "d131dd02c5e6eec4693d9a0698aff95c2fcab58712467eab4004583eb8fb7f8955ad340609f4b30283e488832571415a085125e8f7cdc99fd91dbdf280373c5bd8823e3156348f5bae6dacd436c919c6dd53e2b487da03fd02396306d248cda0e99f33420f577ee8ce54b67080a80d1ec69821bcb6a8839396f9652b6ff72a70";
+const collidingBlock = (diff: Record<number, number>) => {
+  const bytes = new Uint8Array(Buffer.from(COLLISION, "hex"));
+  for (const [i, b] of Object.entries(diff)) bytes[Number(i)] = b;
+  return bytes;
+};
+export const COLLIDING = [
+  collidingBlock({}),
+  collidingBlock({ 19: 0x07, 45: 0xf1, 59: 0x72, 83: 0x34, 109: 0x28, 123: 0xab }),
+] as const;
+export const COLLIDING_MD5 = "79054025255fb1a26e4bc422aef54eb4";
 export const IOS = "reply/main/1.0.0/ios";
 export const ANDROID = "reply/main/1.0.0/android";
 export const T = Date.UTC(2030, 0, 1); // A whole second, so the fake's Date header carries it exactly.
