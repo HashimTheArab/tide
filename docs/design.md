@@ -37,8 +37,8 @@ updates/<updateId>.json                  release record (CLI, Release records)
 reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
 reply/no-update                          stored reply: the signed noUpdateAvailable
 legacy/map.json                          content keys that URLs from earlier servers name (legacy import)
-bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
-patches/<fromHash>/<toHash>              BSDIFF40 patch
+bases/<updateId>                         base record: a launch bundle patches start from (Base records)
+patches/<fromHash>/<toHash>              BSDIFF40 patch between two launch bundles (Patches)
 ```
 
 The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
@@ -48,8 +48,9 @@ and hash checks. An operator who needs a strictly read-only Worker can point the
 read-only token.
 
 - **Keys** are a known prefix plus a hash (`assets/` or `bundles/` and 64 lowercase hex), a release record
-  (`updates/<lowercase UUID>.json`) or a reply key. All but reply keys are lowercase, so they are distinct on a
-  case-insensitive disk and need no escaping. Objects are stored
+  (`updates/<lowercase UUID>.json`), a base record (`bases/<lowercase UUID>`), a patch (`patches/` and two 64
+  lowercase hex content keys, from then to) or a reply key. All but reply keys are lowercase, so they are distinct on
+  a case-insensitive disk and need no escaping. Objects are stored
   unencoded; an object with a `content-encoding` other than `identity` is an error, not an asset.
 - **Reply keys** come from protocol `replyKey`, shared by server and CLI. Channel and runtime version are each 1 to 64
   of `A-Z a-z 0-9 . _ + - ( ) :`, and neither is `.` or `..`, so no header value can name another key; platform is `ios` or
@@ -98,6 +99,48 @@ golden files are `packages/protocol/test/fixtures/*.reply.json`. Keys in this or
   iOS compares Swift strings that way and traps on duplicate dictionary keys.
 - A publish replaces a record whole (R2 and S3 atomically; on disk a temporary file and a rename), so a request reads
   the old reply or the new one, never a mix.
+
+### Base records
+
+One JSON object per base, encoded and decoded by protocol `encodeBaseRecord` and `decodeBaseRecord`; the golden files
+are `packages/protocol/test/fixtures/base-*.json`. Keys in this order, no trailing newline, at most 256 KiB:
+
+```json
+{"version":1,"kind":"update","updateId":"<uuid>","runtimeVersion":"1.0.0","platform":"ios","launchAsset":{"hash":"<b64url>"}}
+{"version":1,"kind":"embedded","updateId":"<uuid>","runtimeVersion":"1.0.0","platform":"android","launchAsset":{"hash":"<b64url>"},"assets":[{"key":"<k>","hash":"<b64url>"}]}
+```
+
+- `kind` is `update` (an OTA update; its assets are in its release record) or `embedded` (a store build), which alone
+  has `assets`: the embedded keys and SHA-256s the asset key identity check compares.
+- Field rules are the release record's: a lowercase UUID, the reply-key name grammar for the runtime, `ios` or
+  `android`, canonical base64url SHA-256 hashes, asset keys of 1 to 64 `A-Z a-z 0-9 _ -`.
+- Encode sorts `assets` by key in code-unit order and collapses entries repeating a key and hash (Expo lists one per
+  scale). Keys equal after lowercasing must share one hash, as publish requires (iOS keeps asset files on a
+  case-insensitive disk).
+- Decode checks the size, then `version` (any other is unreadable), then requires the exact bytes encode writes for
+  what it parsed, so key order, whitespace, escapes, repeats and unsorted assets are all refused.
+
+### Patches
+
+`patches/<fromHash>/<toHash>` holds a BSDIFF40 patch exactly as bsdiff 4.3 writes it, what the expo-updates bspatch
+reads: a 32-byte header (`BSDIFF40`, then the ctrl block length, diff block length and output size, each 8 bytes
+little-endian sign-magnitude), then three bzip2 streams: ctrl triples (add, copy, seek), diff bytes added to the base,
+and extra bytes copied.
+
+Protocol `applyBsdiff(base, patch, maxOutput)` runs in the CLI, which applies and hash-checks every patch before
+upload; the server only serves stored bytes. It is stricter than reference bspatch, and accepts every patch bsdiff
+writes:
+
+- `maxOutput` is at most 128 MiB; a larger declared output is refused before anything is allocated. Header lengths
+  are non-negative and below 2^53, and the ctrl and diff blocks fit in the patch.
+- Each triple is checked before it is used: add and copy are non-negative, no value is negative zero or 2^53 or more,
+  writes stay inside the output, reads stay inside the base (bspatch skips adds outside it; bsdiff never writes one),
+  and every seek lands in `[0, base length]`.
+- Each block is exactly one bzip2 stream: block and stream CRCs match, no randomised block, no block ending inside a
+  run, every Huffman table (used or not) satisfies the Kraft inequality, zero padding, nothing after it. When the
+  output is complete, ctrl, diff and extra must all be at their end.
+- Work is bounded: the bzip2 reader holds one block, ctrl may decode at most one triple per output byte plus one, and
+  diff and extra at most the output size. Any refusal is a `ProtocolError`; the client falls back to the full bundle.
 
 ## Server
 
