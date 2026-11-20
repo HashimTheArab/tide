@@ -15,7 +15,8 @@
     "packages/cli": {
       "entry": [
         "src/main.ts",
-        "test/disk-writer.ts"
+        "test/disk-writer.ts",
+        "test/open-writer.ts"
       ]
     }
   }

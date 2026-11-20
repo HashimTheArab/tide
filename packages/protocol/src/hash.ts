@@ -15,6 +15,14 @@ export async function sha256Base64Url(bytes: Uint8Array<ArrayBuffer>): Promise<s
   return base64(digest).replaceAll("+", "-").replaceAll("/", "_").replace(/=$/, "");
 }
 
+/** Returns the lowercase hex SHA-256 of `bytes`. */
+export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  return hex(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+export const hex = (bytes: ArrayBuffer | Uint8Array): string =>
+  Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+
 /** Returns `bytes` as standard padded base64. */
 export function base64(bytes: Uint8Array): string {
   let binary = "";

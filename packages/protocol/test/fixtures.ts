@@ -119,57 +119,97 @@ function der(tag: number, ...contents: Uint8Array[]): Uint8Array<ArrayBuffer> {
 }
 
 const SEQUENCE = 0x30;
-const SHA256_WITH_RSA = der(SEQUENCE, hexBytes("06092a864886f70d01010b0500"));
-const NAME = der(
-  SEQUENCE,
-  der(
-    0x31,
-    der(SEQUENCE, hexBytes("0603550403"), der(0x0c, new TextEncoder().encode("Tide test"))),
-  ),
-);
-// keyUsage critical digitalSignature; extKeyUsage critical codeSigning: Expo's code-signing profile.
-const EXTENSIONS = der(
-  0xa3,
+/** Signature AlgorithmIdentifiers a test certificate can name. */
+export const ALGORITHM = {
+  sha256WithRsa: der(SEQUENCE, hexBytes("06092a864886f70d01010b0500")),
+  sha256WithRsaNoParameters: der(SEQUENCE, hexBytes("06092a864886f70d01010b")),
+  sha384WithRsa: der(SEQUENCE, hexBytes("06092a864886f70d01010c0500")),
+} as const;
+const name = (cn: string) =>
   der(
     SEQUENCE,
-    der(SEQUENCE, hexBytes("0603551d0f0101ff040403020780")),
-    der(SEQUENCE, hexBytes("0603551d250101ff040c300a06082b06010505070303")),
+    der(0x31, der(SEQUENCE, hexBytes("0603550403"), der(0x0c, new TextEncoder().encode(cn)))),
+  );
+/** Certificate extensions a test certificate can carry, each one DER `Extension`. */
+export const EXTENSION = {
+  digitalSignature: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020780")), // keyUsage critical
+  keyCertSignOnly: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020204")),
+  digitalSignatureUnusedBits8: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020880")),
+  codeSigning: der(SEQUENCE, hexBytes("0603551d250101ff040c300a06082b06010505070303")), // extKeyUsage critical
+  serverAuthOnly: der(SEQUENCE, hexBytes("0603551d25040c300a06082b06010505070301")),
+  codeSigningAndBoolean: der(
+    SEQUENCE,
+    hexBytes("0603551d250101ff040f300d06082b060105050703030101ff"),
   ),
-);
+  // Expo's project information (1.2.840.113556.1.8000.2554.43437.254.128.102.157.7894389.20439.2.1).
+  projectInformation: der(
+    SEQUENCE,
+    der(0x06, hexBytes("2a864886f71401be40937a82d32d817e810066811d83e1ea75819f570201")),
+    der(0x04, der(0x0c, new TextEncoder().encode("project,scope"))),
+  ),
+} as const;
+// Expo's code-signing profile.
+const CODE_SIGNING = [EXTENSION.digitalSignature, EXTENSION.codeSigning];
 
-/** UTCTime, which RFC 5280 allows through 2049. */
-const utcTime = (date: Date) =>
-  der(0x17, new TextEncoder().encode(date.toISOString().replace(/^\d\d|[-:T]|\.\d+/g, "")));
-const NOT_AFTER = new Date("2049-12-31T23:59:59Z");
+/** RFC 5280 4.1.2.5: UTCTime through 2049, GeneralizedTime from 2050. */
+const time = (date: Date) => {
+  const digits = date.toISOString().replace(/[-:T]|\.\d+/g, "");
+  return date.getUTCFullYear() < 2050
+    ? der(0x17, new TextEncoder().encode(digits.slice(2)))
+    : der(0x18, new TextEncoder().encode(digits));
+};
+
+/** What a test certificate differs in; each default gives Expo's direct-signing profile. */
+export interface CertificateOptions {
+  readonly notBefore?: Date; // Default: `now`.
+  readonly notAfter?: Date; // Default: the end of 2049.
+  readonly v1?: true; // No version field and no extensions.
+  readonly issuer?: string; // Default: the subject's name, `Tide test`.
+  readonly outerAlgorithm?: Uint8Array;
+  readonly innerAlgorithm?: Uint8Array;
+  readonly extensions?: readonly Uint8Array[];
+}
 
 /**
- * Returns a PEM X.509 code-signing certificate for `subject` signed by `issuer`, valid from `now` through 2049.
- * Self-signed when `issuer` is `subject`'s private key.
+ * Returns a PEM X.509 code-signing certificate for `subject` signed by `issuer` with SHA-256. Self-signed when
+ * `issuer` is `subject`'s private key.
  */
 export async function certificate(
   subject: CryptoKey,
   issuer: CryptoKey,
   now: Date,
+  options: CertificateOptions = {},
 ): Promise<string> {
   const serial = crypto.getRandomValues(new Uint8Array(16));
   serial[0] = 0x40 | ((serial[0] ?? 0) & 0x3f); // Positive and minimal.
   const tbs = der(
     SEQUENCE,
-    der(0xa0, der(0x02, new Uint8Array([2]))),
+    ...(options.v1 ? [] : [der(0xa0, der(0x02, new Uint8Array([2])))]),
     der(0x02, serial),
-    SHA256_WITH_RSA,
-    NAME,
-    der(SEQUENCE, utcTime(now), utcTime(NOT_AFTER)),
-    NAME,
+    options.innerAlgorithm ?? ALGORITHM.sha256WithRsa,
+    name(options.issuer ?? "Tide test"),
+    der(
+      SEQUENCE,
+      time(options.notBefore ?? now),
+      time(options.notAfter ?? new Date("2049-12-31T23:59:59Z")),
+    ),
+    name("Tide test"),
     new Uint8Array(await crypto.subtle.exportKey("spki", subject)),
-    EXTENSIONS,
+    ...(options.v1 ? [] : [der(0xa3, der(SEQUENCE, ...(options.extensions ?? CODE_SIGNING)))]),
   );
   const signature = new Uint8Array(await crypto.subtle.sign(RSA_SHA256, issuer, tbs));
-  return pem(der(SEQUENCE, tbs, SHA256_WITH_RSA, der(0x03, new Uint8Array([0]), signature)));
+  return pem(
+    der(
+      SEQUENCE,
+      tbs,
+      options.outerAlgorithm ?? ALGORITHM.sha256WithRsa,
+      der(0x03, new Uint8Array([0]), signature),
+    ),
+  );
 }
 
-/** Returns `bytes` as a PEM CERTIFICATE block with 64-character lines. */
-export function pem(bytes: Uint8Array): string {
+/** Returns `bytes` as a PEM block with 64-character lines. */
+export function pem(bytes: Uint8Array, label = "CERTIFICATE"): string {
   const lines = base64(bytes).match(/.{1,64}/g) ?? [];
-  return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
+  return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
 }

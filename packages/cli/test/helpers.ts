@@ -60,3 +60,58 @@ export function child(script: string, args: string[], env: NodeJS.ProcessEnv = p
     exited: once(proc, "exit"),
   };
 }
+
+interface RunResult {
+  readonly code: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** Runs `script` in a Node child with exactly `env`, draining stdout and stderr until it closes. */
+export async function run(
+  script: string,
+  args: string[],
+  env: Record<string, string>,
+): Promise<RunResult> {
+  const proc = spawn(process.execPath, [script, ...args], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  onTestFinished(() => {
+    proc.kill("SIGKILL");
+  });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
+  proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+  const [code] = (await once(proc, "close")) as [number | null];
+  return { code, stdout, stderr };
+}
+
+// These assertions fail with fixed text and never pass output to a matcher, so a failing test cannot print a PEM.
+
+/** Fails unless `result` exited 0 with nothing on stderr. */
+export function expectSuccess(result: RunResult): void {
+  if (result.code !== 0 || result.stderr !== "") throw new Error("unexpected exit code");
+}
+
+/** Fails unless `result` is exactly the refusal `message` with exit code 2. */
+export function expectRefusal(result: RunResult, message: string): void {
+  if (result.code !== 2) throw new Error("unexpected exit code");
+  if (result.stdout !== "" || result.stderr !== `tide: ${message}\n`) {
+    throw new Error(`expected refusal missing: ${message}`);
+  }
+}
+
+/** Fails if `output` holds any base64 line of `pem`, its joined body, or a PEM label. */
+export function expectNoPem(output: string, pem: string): void {
+  const lines = pem.split("\n").filter((l) => l !== "" && !l.startsWith("-----"));
+  const flat = output.replace(/\s/g, "");
+  if (
+    output.includes("-----BEGIN") ||
+    lines.some((l) => l.length >= 16 && output.includes(l)) ||
+    flat.includes(lines.join(""))
+  ) {
+    throw new Error("output contains PEM text");
+  }
+}

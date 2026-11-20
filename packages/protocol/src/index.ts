@@ -1,4 +1,4 @@
-export { ProtocolError, assetHash, contentKey, sha256Base64Url } from "./hash.ts";
+export { ProtocolError, assetHash, contentKey, decodeBase64, sha256Base64Url } from "./hash.ts";
 export type { Asset, JsonObject, JsonValue, LaunchAsset, ManifestInput } from "./manifest.ts";
 export {
   assetContentType,
@@ -20,9 +20,10 @@ export {
   encodeStoredReply,
   replyKey,
 } from "./reply.ts";
-export type { S3Config, S3Operation, S3Request } from "./s3.ts";
+export type { S3Config, S3Operation, S3Request, SigV4Credentials } from "./s3.ts";
 export {
   S3Error,
+  awsFetch,
   childElements,
   parseS3Xml,
   readS3Text,
@@ -31,14 +32,16 @@ export {
   s3ErrorCode,
   s3Fetch,
   s3Target,
+  sigV4Credentials,
   signV4,
   storageFromEnv,
   textOf,
 } from "./s3.ts";
 export { encodeSfvDictionary } from "./sfv.ts";
-export type { Signer } from "./signature.ts";
+export type { CodeSigningCertificate, Signer } from "./signature.ts";
 export {
   certificatePublicKey,
+  codeSigningCertificate,
   cryptoKeySigner,
   expoSignature,
   parseExpoSignature,

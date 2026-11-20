@@ -196,7 +196,7 @@ stored field are never printed.
    any retained update or registered build.
 2. Compose the manifest with `createdAt = max(now, previous pointer and any rollback commitTime + 1 ms)`; refuse if
    the clock differs from the bucket's `Date` by more than a minute.
-3. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through a KMS or a protected CI secret.
+3. Sign the exact part bytes (RSA PKCS#1 v1.5, SHA-256) through the configured key source (Keys).
 4. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
    updates); apply each and check its hash before upload; keep one only if it is well under the compressed bundle.
 5. Write the release record, bases and patches, then the pointer with `If-Match` on its ETag.
@@ -210,9 +210,64 @@ are still unreferenced. A publish that reuses an object in between makes it refe
 
 ## Keys
 
-A leaked key can ship code to every installed app. Publish only from CI and sign through a non-exportable KMS key
-where possible. Apps should embed a root certificate and request a certificate chain, so the signing key can rotate
-without an app release.
+A leaked key can ship code to every installed app. Publish only from CI, and sign through KMS where possible. Tide
+supports direct signing only: the app embeds one self-signed certificate, and its key signs every part.
+
+**Key sources.** Exactly one is configured; an empty variable counts as unset.
+
+| Variable | Source |
+| --- | --- |
+| `TIDE_SIGNING_KEY_FILE` | Path to an unencrypted PKCS#8 or PKCS#1 RSA private key PEM, at most 64 KiB |
+| `TIDE_SIGNING_KEY` | The same PEM as the value |
+| `TIDE_KMS_KEY_ID` | KMS key ID, ARN or alias, with `TIDE_KMS_REGION`, `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY`; optional `TIDE_KMS_SESSION_TOKEN` and `TIDE_KMS_ENDPOINT` |
+
+A PEM key must be RSA of 2048 to 4096 bits. KMS calls `Sign` with `RSASSA_PKCS1_V1_5_SHA_256` and `MessageType:
+DIGEST` over the SHA-256 computed locally: `RAW` caps the message at 4096 bytes, which a manifest can exceed, and
+both give the same signature. Requests are SigV4-signed without an AWS SDK, never follow a redirect, and go to
+`https://kms.<region>.amazonaws.com` or `TIDE_KMS_ENDPOINT`, which must be an `https:` origin (plain `http:` only to
+a loopback IP literal). Throttling, access denied, a disabled key, a timeout or a malformed reply is an error.
+
+**Identity.** The app config gives the certificate (`updates.codeSigningCertificate`, relative to the project root)
+and `updates.codeSigningMetadata`. `keyid` is required, since Expo's implicit `root` is refused, and `alg` must be
+absent or `rsa-v1_5-sha256`. The certificate must be one ASCII PEM block, each delimiter alone on its line, holding
+one self-signed X.509 v3 certificate, valid now, signed with `sha256WithRSAEncryption` (the same identifier inside and
+outside the TBS), with well-formed Key Usage `digitalSignature`, Extended Key Usage `codeSigning`, no repeated
+extension, no Expo project-information extension, and an RSA key of 2048 to 4096 bits.
+
+**Build pins.** The checkout can drift from what installed builds embed, so two required variables record the store
+builds' identity, read from a shipped binary rather than the checkout:
+
+- `TIDE_BUILD_KEYID`: the builds' `keyid`.
+- `TIDE_BUILD_CERTIFICATE_SHA256`: SHA-256 of the builds' certificate DER, 64 hex digits, colons allowed.
+
+In an APK, `aapt2 dump xmltree --file AndroidManifest.xml app.apk` shows the meta-data
+`expo.modules.updates.CODE_SIGNING_CERTIFICATE` and `CODE_SIGNING_METADATA`; in an IPA, `plutil -p
+Payload/<App>.app/Expo.plist` shows `EXUpdatesCodeSigningCertificate` and `EXUpdatesCodeSigningMetadata`. Get the
+fingerprint with `openssl x509 -noout -fingerprint -sha256`. The app config must match both pins; a renewed
+certificate does not pass while the builds hold an expired one.
+
+**Probe.** Before the bucket is opened, the CLI signs `tide signing probe` and verifies it against the certificate
+and `keyid`. Every later signature is verified the same way before it is returned, so a re-pointed KMS alias cannot
+produce a part the app rejects. Every key or config refusal exits before the bucket is opened; the bucket check only
+reads `reply/no-update`. Each refusal has a fixed message that names variables and config fields, never a key,
+credential or provider text.
+
+**One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
+exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
+certificate and `keyid`. A new key or key ID therefore needs a new bucket and `updates.url`. `publish` creates
+`reply/no-update` with put-if-absent before any pointer and re-checks a winner it did not write; it re-checks the
+certificate's validity before the pointer write; and it runs `expo config` and `expo export` with every `TIDE_`
+variable removed and `EXPO_NO_DOTENV=1`, so no signing or storage secret reaches project code.
+
+**KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
+imported:
+
+1. `npx expo-updates codesigning:generate`, then `openssl pkcs8 -topk8 -nocrypt -outform DER` on the private key.
+2. `aws kms create-key --origin EXTERNAL --key-spec RSA_2048 --key-usage SIGN_VERIFY` (the spec matching the key).
+3. `get-parameters-for-import --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256`, wrap the DER, and
+   `import-key-material --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE`.
+4. Keep one encrypted recovery copy of the private key offline, outside AWS: if the imported material is deleted,
+   only the same material restores signing for installed builds. Delete every other copy.
 
 ## Observability
 
@@ -222,5 +277,8 @@ fetches its bundle.
 
 ## Later
 
+- Certificate chains: the CLI validates and serves a leaf plus intermediates, so the key can rotate without an app
+  release.
+- A KMS-signed self-signed certificate, so the key never exists outside KMS.
 - Staged rollouts: a percentage in the pointer, a hash of `EAS-Client-ID`, two pre-signed bodies.
 - Hermes delta compiles (`hermesc -base-bytecode`), measured against plain bsdiff.

@@ -13,9 +13,17 @@ import { BucketError } from "./bucket.ts";
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-/** One readable pointer, or why a record cannot be served; every reason is fixed text, never stored data. */
+/**
+ * One readable record with its signed part as stored, or why it cannot be served; every reason is fixed text, never
+ * stored data.
+ */
 type Verdict =
-  | { readonly kind: StoredReply["kind"]; readonly updateId?: string; readonly time?: string }
+  | {
+      readonly kind: StoredReply["kind"];
+      readonly updateId?: string;
+      readonly time?: string;
+      readonly signed: { readonly body: Uint8Array<ArrayBuffer>; readonly signature: string };
+    }
   | string;
 
 /**
@@ -37,7 +45,7 @@ export async function status(
       continue;
     }
     const { key } = entry;
-    const verdict = await check(bucket, key);
+    const verdict = (await readRecord(bucket, key)) ?? "absent when read";
     if (key === NO_UPDATE_KEY) noUpdate = typeof verdict === "string" ? "unreadable" : "present";
     if (typeof verdict === "string") {
       err(`${key}: unreadable: ${verdict}`);
@@ -53,8 +61,8 @@ export async function status(
   return unreadable ? 1 : 0;
 }
 
-/** Reads and checks the record at `key` the way a signing client would receive it. */
-async function check(bucket: Bucket, key: string): Promise<Verdict> {
+/** Reads and checks the record at `key` the way a signing client would receive it; undefined when absent. */
+export async function readRecord(bucket: Bucket, key: string): Promise<Verdict | undefined> {
   let bytes;
   try {
     bytes = (await bucket.get(key, MAX_REPLY_BYTES))?.bytes;
@@ -62,7 +70,7 @@ async function check(bucket: Bucket, key: string): Promise<Verdict> {
     // The listing succeeded, so one failed read is this record's problem; later records are still read.
     return e instanceof BucketError ? e.message : "read failed";
   }
-  if (bytes === undefined) return "absent when read";
+  if (bytes === undefined) return undefined;
   let reply: StoredReply;
   try {
     reply = decodeStoredReply(bytes);
@@ -82,15 +90,17 @@ async function check(bucket: Bucket, key: string): Promise<Verdict> {
   }
   if (part === undefined) return `body has no ${partName} part`;
   // A client configured for code signing rejects a part without one.
-  if (part.signature === undefined) return `${partName} part has no expo-signature`;
+  const { body, signature } = part;
+  if (signature === undefined) return `${partName} part has no expo-signature`;
+  const signed = { body, signature };
   try {
-    parseExpoSignature(part.signature);
+    parseExpoSignature(signature);
   } catch {
     return `${partName} part has a malformed expo-signature`;
   }
   let json: unknown;
   try {
-    json = JSON.parse(utf8.decode(part.body));
+    json = JSON.parse(utf8.decode(body));
   } catch {
     return `${partName} part is not JSON`;
   }
@@ -110,13 +120,13 @@ async function check(bucket: Bucket, key: string): Promise<Verdict> {
     }
     const createdAt = field("createdAt");
     if (!isTime(createdAt)) return "manifest createdAt is not a valid time";
-    return { kind: reply.kind, updateId: reply.updateId, time: createdAt };
+    return { kind: reply.kind, updateId: reply.updateId, time: createdAt, signed };
   }
   if (field("type") !== reply.kind) return `directive type is not ${reply.kind}`;
-  if (reply.kind === "noUpdateAvailable") return { kind: reply.kind };
+  if (reply.kind === "noUpdateAvailable") return { kind: reply.kind, signed };
   const commitTime = field("parameters", "commitTime");
   if (!isTime(commitTime)) return "directive commitTime is not a valid time";
-  return { kind: reply.kind, time: commitTime };
+  return { kind: reply.kind, time: commitTime, signed };
 }
 
 /** Exactly the form the publisher writes: an ISO 8601 UTC time with milliseconds that names a real instant. */
