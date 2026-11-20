@@ -420,7 +420,15 @@ export function stallCases(): void {
       async (label, decided, stalled, misnamed) => {
         const s = await seed(label, misnamed ? [stalled] : [decided, stalled], misnamed);
         await fake.script(s.key(stalled), "hang");
-        const { res } = start(s.path, s.headers, new AbortController().signal);
+        // The deciding base answers only once the stalled read has reached the fake, so its abandonment is seen.
+        const arrived = fake.event("arrived", s.key(stalled));
+        const gated: Store = {
+          get: async (key, signal) => {
+            if (key === s.key(decided)) await arrived;
+            return s3.get(key, signal);
+          },
+        };
+        const { res } = start(s.path, s.headers, new AbortController().signal, { store: gated });
         await expectFull(res, s.bundle);
         await fake.event("abandoned", s.key(stalled));
       },
