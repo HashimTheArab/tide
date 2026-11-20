@@ -143,6 +143,18 @@ export function replyKey(channel: string, runtimeVersion: string, platform: stri
   return `reply/${channel}/${runtimeVersion}/${platform}`;
 }
 
+/** Returns the base record key for `updateId`, which must be a lowercase UUID. */
+export function baseKey(updateId: string): string {
+  return `bases/${checkUpdateId(updateId)}`;
+}
+
+/** Returns the key of the patch from bundle `fromHex` to bundle `toHex`, each 64 lowercase hex. */
+export function patchKey(fromHex: string, toHex: string): string {
+  const key = `patches/${fromHex}/${toHex}`;
+  if (!PATCH_KEY.test(key)) throw new ProtocolError("key", "must name two 64-hex bundle keys");
+  return key;
+}
+
 /**
  * Returns the relative file path that holds `key` on disk. Names are hex-escaped to lowercase without `.` or `-`, so
  * no two keys share a path on a case-insensitive filesystem and no name collides with `reply/no-update`.

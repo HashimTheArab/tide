@@ -17,11 +17,13 @@ export {
   LEGACY_MAP_KEY,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
+  baseKey,
   decodeStoredReply,
   diskKey,
   diskPath,
   unescapeDiskPath,
   encodeStoredReply,
+  patchKey,
   replyKey,
 } from "./reply.ts";
 export type { S3Config, S3Operation, S3Request, SigV4Credentials } from "./s3.ts";
