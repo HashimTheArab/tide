@@ -84,6 +84,6 @@ export async function readBounded(
 }
 
 /** Starts cancelling without waiting: a source's `cancel` may never settle, and must not delay a reply. */
-function discard(stream: { cancel(): Promise<void> }): void {
+export function discard(stream: { cancel(): Promise<void> }): void {
   stream.cancel().catch(() => undefined);
 }

@@ -11,7 +11,8 @@ once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.
 `packages/expo-updates/ios/Tests` in [expo/expo@54c0d6f6](https://github.com/expo/expo/tree/54c0d6f6e9ef537280831b68e5c236807facb641/packages/expo-updates/ios/Tests),
 copyright 650 Industries, Inc., MIT licence in `LICENSE-expo`.
 
-`base-update.json` and `base-embedded.json` are hand-written golden base records.
+`base-update.json`, `base-embedded.json` and `base-embedded-patch.json` are hand-written golden base records;
+`base-embedded-patch.json`'s launch hash is `patch-text.base`'s, so the server tests can patch from it.
 
 The patch fixtures come from `node packages/protocol/test/generate-patch-fixtures.ts --bsdiff <path> [--out <dir>]`,
 which needs the system `bzip2` and reference bsdiff 4.3 (BSD-2-Clause). Build bsdiff outside the repo from the Debian

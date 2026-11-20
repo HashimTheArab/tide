@@ -112,15 +112,24 @@ export async function startFakeS3(): Promise<FakeS3> {
     return e;
   };
 
+  const releases = new Map<string, PromiseWithResolvers<void>>();
+  const released = (key: string) => {
+    let r = releases.get(key);
+    if (r === undefined) releases.set(key, (r = Promise.withResolvers<void>()));
+    return r;
+  };
+
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? ""}`);
-      const control = /^\/_fake\/(script|event\/(arrived|flushed|abandoned))\/([^/]+)$/.exec(
-        url.pathname,
-      );
+      const control =
+        /^\/_fake\/(script|release|event\/(arrived|flushed|abandoned))\/([^/]+)$/.exec(
+          url.pathname,
+        );
       if (control !== null) {
         const key = decodeURIComponent(control[3] ?? "");
         if (control[2] !== undefined) await event(control[2] as FakeEvent, key).promise;
+        else if (control[1] === "release") released(key).resolve();
         else {
           let behaviour = "";
           for await (const chunk of req) behaviour += String(chunk);
@@ -267,6 +276,13 @@ export async function startFakeS3(): Promise<FakeS3> {
         return void res.write(new Uint8Array(STALL_BODY.sent), () =>
           event("flushed", key).resolve(),
         );
+      case "pause-body": {
+        const body = stored ?? new Uint8Array();
+        const half = body.length >> 1;
+        res.writeHead(200, { "content-length": body.length, etag: '"pause"' });
+        res.write(body.subarray(0, half), () => event("flushed", key).resolve());
+        return void released(key).promise.then(() => res.end(body.subarray(half)));
+      }
       case "oversize":
         res.writeHead(200, { "content-length": MAX_REPLY_BYTES + 1, etag: '"big"' });
         res.flushHeaders();

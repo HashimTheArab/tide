@@ -3,6 +3,9 @@ import { S3Error, s3Absent, s3BodyProblem, s3Fetch, s3Target } from "@tide/proto
 
 import type { Store } from "./store.ts";
 
+/** Each body's Response: Node's fetch cancels a body once its Response is collected, even while the body is held. */
+const responses = new WeakMap<ReadableStream<Uint8Array>, Response>();
+
 /**
  * Returns a store that reads objects with signed GetObject requests; the credentials need only s3:GetObject and
  * s3:ListBucket. `timeoutMs` lasts until a 200's headers, or a non-200's error body, have arrived.
@@ -32,6 +35,7 @@ export function s3Store(config: S3Config & { readonly timeoutMs?: number }): Sto
             await res.body?.cancel(); // Releases the connection.
             throw new S3Error(operation, { problem: problem ?? "length" });
           }
+          responses.set(res.body, res);
           return { body: res.body, size: Number(res.headers.get("content-length")) };
         }
         return await s3Absent(operation, res);

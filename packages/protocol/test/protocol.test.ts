@@ -22,6 +22,7 @@ import {
   applyBsdiff,
   assetContentType,
   assetHash,
+  baseKey,
   buildManifest,
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
@@ -42,6 +43,7 @@ import {
   expoSignature,
   parseMultipart,
   parseS3Xml,
+  patchKey,
   replyKey,
   s3BodyProblem,
   s3ErrorCode,
@@ -1974,6 +1976,17 @@ describe("base record", () => {
   test.each<[string, BaseRecord]>([
     ["base-update.json", UPDATE],
     ["base-embedded.json", EMBEDDED],
+    [
+      "base-embedded-patch.json",
+      {
+        kind: "embedded",
+        updateId: "3b9d4c2e-8f1a-4e6b-9c7d-1a2b3c4d5e6f",
+        runtimeVersion: "1.0.0",
+        platform: "ios",
+        launchAsset: { hash: "T6FbGPa3Nny4wqmsDVbTLV2oHxbcFbBx4NxQESc8xeY" }, // patch-text.base
+        assets: [{ key: "icon", hash: EMPTY_HASH }],
+      },
+    ],
   ])("%s decodes to its fields and re-encodes to the same bytes", (file, record) => {
     expect(decodeBaseRecord(fixture(file))).toEqual(record);
     expect(encodeBaseRecord(record)).toEqual(fixture(file));
@@ -2042,6 +2055,27 @@ describe("base record", () => {
     ],
   ])("decode refuses %s", async (_, record, field, message) => {
     await rejects(() => decodeBaseRecord(ascii(record)), field, message);
+  });
+
+  test("baseKey takes only a lowercase UUID", async () => {
+    expect(baseKey(ID)).toBe(`bases/${ID}`);
+    for (const id of [ID.toUpperCase(), ID.slice(1), "not-a-uuid", `${ID}, ${ID}`, ""]) {
+      await rejects(() => baseKey(id), "updateId", "lowercase UUID");
+    }
+  });
+
+  test("patchKey takes only two 64-hex bundle keys", async () => {
+    const [a, b] = ["a".repeat(64), "0".repeat(64)];
+    expect(patchKey(a, b)).toBe(`patches/${a}/${b}`);
+    for (const [from, to] of [
+      [a.toUpperCase(), b],
+      [a, b.slice(1)],
+      [`${a}0`, b],
+      [a, `${b}/x`],
+      [LAUNCH_HASH, b],
+    ] as const) {
+      await rejects(() => patchKey(from, to), "key", "two 64-hex bundle keys");
+    }
   });
 
   test("decode refuses a record over the cap before parsing it, and non-UTF-8", async () => {

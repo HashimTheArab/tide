@@ -2,13 +2,19 @@ import { beforeEach, describe, expect, test } from "vitest";
 
 import type { StoredReply } from "@tide/protocol";
 import {
+  MAX_BASE_BYTES,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
+  applyBsdiff,
+  baseKey,
   certificatePublicKey,
   contentKey,
+  decodeBaseRecord,
   decodeStoredReply,
+  encodeBaseRecord,
   encodeStoredReply,
   parseMultipart,
+  patchKey,
   replyKey,
   sha256Base64Url,
   verifyExpoSignature,
@@ -164,6 +170,292 @@ export function serverCases(harness: Harness): void {
     expect(res.status).toBe(503);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect((await get("/hc")).res.status).toBe(200);
+  });
+}
+
+/** Returns the base record bytes of OTA update `updateId`, whose launch bundle has `hash`. */
+export function baseRecord(updateId: string, hash: string): Uint8Array<ArrayBuffer> {
+  return encodeBaseRecord({
+    kind: "update",
+    updateId,
+    runtimeVersion: "1.0.0",
+    platform: "ios",
+    launchAsset: { hash },
+  });
+}
+
+interface Pair {
+  readonly base: Uint8Array<ArrayBuffer>;
+  readonly target: Uint8Array<ArrayBuffer>;
+  readonly patch: Uint8Array<ArrayBuffer>;
+  readonly baseHash: string;
+  readonly targetHash: string;
+  readonly path: string;
+  readonly bundleKey: string;
+  readonly patchKey: string;
+}
+
+async function pair(
+  base: Uint8Array<ArrayBuffer>,
+  target: Uint8Array<ArrayBuffer>,
+  patch: Uint8Array<ArrayBuffer>,
+): Promise<Pair> {
+  const [baseHash, targetHash] = await Promise.all([
+    sha256Base64Url(base),
+    sha256Base64Url(target),
+  ]);
+  const hex = contentKey(targetHash);
+  return {
+    base,
+    target,
+    patch,
+    baseHash,
+    targetHash,
+    path: `/bundles/${hex}`,
+    bundleKey: `bundles/${hex}`,
+    patchKey: patchKey(contentKey(baseHash), hex),
+  };
+}
+
+/** Registers the `/bundles` patch negotiation tests every runtime must pass. */
+export function bundleCases(harness: Harness): void {
+  // Workers storage is shared by every case in a file, so each case uses its own update IDs, and only cases that
+  // never fault or drop a bundle or patch key share a golden pair.
+  let next = 0;
+  const uuid = () => `00000000-0000-4000-8000-${(++next).toString(16).padStart(12, "0")}`;
+  const golden = (name: string) =>
+    pair(
+      fixture(`patch-${name}.base`),
+      fixture(`patch-${name}.target`),
+      fixture(`patch-${name}.bsdiff`),
+    );
+  /** A pair of its own for `label`, with opaque patch bytes that are never applied. */
+  const own = async (label: string) =>
+    pair(
+      (await asset(`${label} base`)).bytes,
+      (await asset(`${label} target`)).bytes,
+      new Uint8Array(new TextEncoder().encode(`${label} patch`)),
+    );
+
+  /** Seeds `p` and two fresh base records; returns the headers of a client patching between them. */
+  const seed = async (p: Pair, { bundle = true, patch = true } = {}) => {
+    const current = uuid();
+    const requested = uuid();
+    await harness.put(baseKey(current), baseRecord(current, p.baseHash));
+    await harness.put(baseKey(requested), baseRecord(requested, p.targetHash));
+    if (bundle) await harness.put(p.bundleKey, p.target);
+    if (patch) await harness.put(p.patchKey, p.patch);
+    const headers: Record<string, string> = {
+      "a-im": "bsdiff",
+      "expo-current-update-id": current,
+      "expo-requested-update-id": requested,
+    };
+    return { current, requested, headers };
+  };
+  /** `headers` with `change` applied; an undefined value drops that header. */
+  const edit = (headers: Record<string, string>, change: Record<string, string | undefined>) =>
+    Object.fromEntries(
+      Object.entries({ ...headers, ...change }).filter(
+        (e): e is [string, string] => e[1] !== undefined,
+      ),
+    );
+  const get = async (path: string, headers: Record<string, string>, method = "GET") => {
+    const res =
+      method === "GET"
+        ? await harness.request(path, headers)
+        : await harness.fetch(path, { method, headers });
+    return { res, body: new Uint8Array(await res.arrayBuffer()) };
+  };
+
+  type Got = Awaited<ReturnType<typeof get>>;
+  /** Asserts a 226 carrying exactly `p`'s stored patch, based on `current`. */
+  const expectPatch = ({ res, body }: Got, p: Pair, current: string, head = false) => {
+    expect(res.status).toBe(226);
+    expect(body).toEqual(head ? new Uint8Array() : p.patch);
+    expect(res.headers.get("im")).toBe("bsdiff");
+    expect(res.headers.get("expo-base-update-id")).toBe(current);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("vary")).toBe("A-IM, Expo-Current-Update-ID");
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+    expect(res.headers.get("content-length")).toBe(String(p.patch.length));
+  };
+  /** Asserts the client's own check: the patch applied to the base hashes to the requested path. */
+  const expectApplies = async ({ body }: Got, p: Pair) => {
+    const out = new Uint8Array(applyBsdiff(p.base, body, p.target.length));
+    expect(`/bundles/${contentKey(await sha256Base64Url(out))}`).toBe(p.path);
+  };
+  /** Asserts a 200 carrying `p`'s full target bundle. */
+  const expectFull = ({ res, body }: Got, p: Pair, head = false) => {
+    expect(res.status).toBe(200);
+    expect(body).toEqual(head ? new Uint8Array() : p.target);
+    expect(res.headers.get("content-type")).toBe("application/javascript");
+    expect(res.headers.get("cache-control")).toBe(IMMUTABLE);
+    expect(res.headers.get("content-length")).toBe(String(p.target.length));
+    for (const name of ["im", "expo-base-update-id", "vary"]) {
+      expect([name, res.headers.get(name)]).toEqual([name, null]);
+    }
+  };
+  const expectFailure = ({ res }: Got, status: number) => {
+    expect(res.status).toBe(status);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  };
+
+  test("a registered base and a stored patch get a 226 that applies to the requested bundle", async () => {
+    const p = await golden("text");
+    const { current, headers } = await seed(p);
+    const got = await get(p.path, headers);
+    expectPatch(got, p, current);
+    await expectApplies(got, p);
+  });
+
+  test("uppercase update IDs get a 226 based on the lowercase current ID", async () => {
+    const p = await golden("text");
+    const { current, requested } = await seed(p);
+    const got = await get(p.path, {
+      "a-im": "bsdiff",
+      "expo-current-update-id": current.toUpperCase(),
+      "expo-requested-update-id": requested.toUpperCase(),
+    });
+    expectPatch(got, p, current);
+  });
+
+  test.each([
+    "BSDIFF",
+    "gzip, bsdiff",
+    "bsdiff;q=1",
+    "bsdiff; Q=0.5",
+    "bsdiff;q=0.001",
+    'gzip;note="a, b", bsdiff',
+  ])("A-IM %j gets a 226", async (aIm) => {
+    const p = await golden("text");
+    const { current, headers } = await seed(p);
+    expectPatch(await get(p.path, { ...headers, "a-im": aIm }), p, current);
+  });
+
+  test("an embedded build's base record gets a 226 that applies to its bundle", async () => {
+    const p = await golden("text");
+    const embedded = fixture("base-embedded-patch.json");
+    const { updateId, launchAsset } = decodeBaseRecord(embedded);
+    expect(contentKey(launchAsset.hash)).toBe(contentKey(p.baseHash));
+    const { requested } = await seed(p);
+    await harness.put(baseKey(updateId), embedded);
+    const got = await get(p.path, {
+      "a-im": "bsdiff",
+      "expo-current-update-id": updateId,
+      "expo-requested-update-id": requested,
+    });
+    expectPatch(got, p, updateId);
+    await expectApplies(got, p);
+  });
+
+  test("HEAD on the 226 and the 200 paths answers their headers with no body", async () => {
+    const p = await golden("text");
+    const { current, headers } = await seed(p);
+    expectPatch(await get(p.path, headers, "HEAD"), p, current, true);
+    expectFull(await get(p.path, edit(headers, { "a-im": undefined }), "HEAD"), p, true);
+  });
+
+  test.each<
+    [string, (ids: { current: string; requested: string }) => Record<string, string | undefined>]
+  >([
+    ["no A-IM", () => ({ "a-im": undefined })],
+    ["A-IM gzip", () => ({ "a-im": "gzip" })],
+    ["A-IM bsdiff;q=0", () => ({ "a-im": "bsdiff;q=0" })],
+    ["A-IM bsdiff;q=0.000", () => ({ "a-im": "bsdiff;q=0.000" })],
+    ["A-IM bsdiff;q=x", () => ({ "a-im": "bsdiff;q=x" })],
+    ["A-IM bsdiff;q=1.5", () => ({ "a-im": "bsdiff;q=1.5" })],
+    ["bsdiff only inside a quoted parameter", () => ({ "a-im": 'gzip;note="x, bsdiff, y"' })],
+    ["bsdiff after an escaped quote", () => ({ "a-im": 'gzip;note="a\\", bsdiff"' })],
+    ["bsdiff inside an unterminated quote", () => ({ "a-im": 'gzip;note="x, bsdiff' })],
+    ["no current ID", () => ({ "expo-current-update-id": undefined })],
+    ["an empty current ID", () => ({ "expo-current-update-id": "" })],
+    ["a malformed current ID", ({ current }) => ({ "expo-current-update-id": current.slice(1) })],
+    [
+      "a repeated current ID",
+      ({ current }) => ({ "expo-current-update-id": `${current}, ${current}` }),
+    ],
+    ["no requested ID", () => ({ "expo-requested-update-id": undefined })],
+    ["an empty requested ID", () => ({ "expo-requested-update-id": "" })],
+    [
+      "a malformed requested ID",
+      ({ requested }) => ({ "expo-requested-update-id": `${requested}0` }),
+    ],
+    [
+      "a repeated requested ID",
+      ({ requested }) => ({ "expo-requested-update-id": `${requested}, ${requested}` }),
+    ],
+    ["an unknown current base", () => ({ "expo-current-update-id": uuid() })],
+    ["an unknown requested base", () => ({ "expo-requested-update-id": uuid() })],
+    [
+      "a requested base naming another bundle",
+      ({ current }) => ({ "expo-requested-update-id": current }),
+    ],
+  ])("%s gets the full bundle", async (_, change) => {
+    const p = await golden("text");
+    const { headers, current, requested } = await seed(p);
+    expectFull(await get(p.path, edit(headers, change({ current, requested }))), p);
+  });
+
+  test("a missing patch gets the full bundle", async () => {
+    const p = await own("no patch");
+    const { headers } = await seed(p, { patch: false });
+    expectFull(await get(p.path, headers), p);
+  });
+
+  test("a patch the store fails to read gets the full bundle", async () => {
+    const p = await own("patch fault");
+    const { headers } = await seed(p, { patch: false });
+    await harness.putFault(p.patchKey);
+    expectFull(await get(p.path, headers), p);
+  });
+
+  const utf8 = (text: string) => new Uint8Array(new TextEncoder().encode(text));
+  describe.each(["current", "requested"] as const)("a %s base record", (which) => {
+    test.each<[string, (id: string, hash: string) => Uint8Array<ArrayBuffer>]>([
+      ["of malformed JSON", () => utf8('{"version":1,')],
+      [
+        "of version 2",
+        (id, hash) =>
+          utf8(
+            new TextDecoder().decode(baseRecord(id, hash)).replace('"version":1', '"version":2'),
+          ),
+      ],
+      ["one byte over the limit", () => new Uint8Array(MAX_BASE_BYTES + 1).fill(0x20)],
+      ["naming another update ID than its key", (_, hash) => baseRecord(uuid(), hash)],
+    ])("%s gets the full bundle", async (_, record) => {
+      const p = await golden("text");
+      const ids = await seed(p);
+      const hash = which === "current" ? p.baseHash : p.targetHash;
+      await harness.put(baseKey(ids[which]), record(ids[which], hash));
+      expectFull(await get(p.path, ids.headers), p);
+    });
+
+    test("the store fails to read gets the full bundle", async () => {
+      const p = await golden("text");
+      const ids = await seed(p);
+      await harness.putFault(baseKey(ids[which]));
+      expectFull(await get(p.path, ids.headers), p);
+    });
+  });
+
+  // Each uses a golden pair no other case stores, so a usable patch is present and must not mask the result.
+  test("an absent bundle is 404 and not cached, even with a patch for it", async () => {
+    const p = await golden("binary");
+    const { headers } = await seed(p, { bundle: false });
+    expectFailure(await get(p.path, headers), 404);
+  });
+
+  test("a bundle the store fails to read is 503 and not cached, even with a patch for it", async () => {
+    const p = await golden("empty-base");
+    const { headers } = await seed(p, { bundle: false });
+    await harness.putFault(p.bundleKey);
+    expectFailure(await get(p.path, headers), 503);
+  });
+
+  test("a malformed path is 400 and not cached, even with A-IM", async () => {
+    const p = await golden("text");
+    const { headers } = await seed(p);
+    expectFailure(await get(p.path.toUpperCase().replace("/BUNDLES/", "/bundles/"), headers), 400);
   });
 }
 

@@ -12,7 +12,7 @@ import type { Harness } from "../shared/server-cases.ts";
 import { createApp } from "../../src/core/app.ts";
 import { diskStore, startServer, storeFromEnv } from "../../src/node.ts";
 import { fixture } from "../shared/fixtures.ts";
-import { manifestCases, serverCases } from "../shared/server-cases.ts";
+import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
 import { runEntry } from "./entry.ts";
 
 const HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
@@ -81,6 +81,9 @@ describe("node entry with a disk store", () => {
   serverCases(harness);
   describe("/manifest", () => {
     manifestCases(harness);
+  });
+  describe("/bundles patch negotiation", () => {
+    bundleCases(harness);
   });
 });
 
