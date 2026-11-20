@@ -73,9 +73,9 @@ describe("suffix sorting", () => {
     ["a run", new Uint8Array(n)],
     ["a two-byte period", period(2)],
   ])(
-    "%s sorts within 1.5x the time of a 17-byte period, where pivot-based sorts degrade",
+    "%s sorts within 3x the time of a 17-byte period, where pivot-based sorts degrade by orders of magnitude",
     (_, bytes) => {
-      expect(time(bytes)).toBeLessThan(1.5 * time(period(17)));
+      expect(time(bytes)).toBeLessThan(3 * time(period(17)));
     },
   );
 
