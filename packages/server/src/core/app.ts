@@ -18,7 +18,7 @@ import {
   replyKey,
 } from "@tide/protocol";
 
-import type { AnalyticsSink, ManifestPoint } from "./analytics.ts";
+import type { AnalyticsSink } from "./analytics.ts";
 import type { Store, StoredObject } from "./store.ts";
 import { manifestPoint } from "./analytics.ts";
 import { abortable, discard, readBounded } from "./store.ts";
@@ -50,24 +50,13 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   const {
     replyDeadline = () => AbortSignal.timeout(10_000),
     patchDeadline = () => AbortSignal.timeout(2_000),
+    analytics = () => undefined,
   } = options;
   const appId = options.appId === "" ? undefined : options.appId; // Empty is unset.
   // A received header value never has edge whitespace, so such an app ID could never match.
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw new Error("app ID must be printable ASCII without edge whitespace");
   }
-  /** Hands `point` to the sink without waiting; a failure is logged without values and never reaches the reply. */
-  const record = (point: ManifestPoint) => {
-    if (options.analytics === undefined) return;
-    const failed = (e: unknown) => {
-      console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
-    };
-    try {
-      void Promise.resolve(options.analytics(point)).catch(failed);
-    } catch (e) {
-      failed(e);
-    }
-  };
   const app = new Hono();
   app.get("/hc", (c) => c.text("ok"));
 
@@ -110,17 +99,17 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return c.text("accept must allow multipart/mixed\n", 406, NO_STORE);
     }
     // No default channel: a misconfigured app sees a 400 in its logs rather than a silent no-update.
-    const channel = header("expo-channel-name");
-    const runtime = header("expo-runtime-version");
+    const channel = header("expo-channel-name") ?? "";
+    const runtime = header("expo-runtime-version") ?? "";
     let key: string;
     try {
-      key = replyKey(channel ?? "", runtime ?? "", platform);
+      key = replyKey(channel, runtime, platform);
     } catch (e) {
       if (!(e instanceof ProtocolError)) throw e;
       const name = e.field === "channel" ? "expo-channel-name" : "expo-runtime-version";
       const value = e.field === "channel" ? channel : runtime;
       const problem =
-        value === undefined ? "is missing" : "must be 1 to 64 of A-Z, a-z, 0-9, ., _, + and -";
+        value === "" ? "is missing" : "must be 1 to 64 of A-Z, a-z, 0-9, ., _, + and -";
       return c.text(`${name} ${problem}\n`, 400, NO_STORE);
     }
 
@@ -149,18 +138,12 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     } catch (e) {
       console.error(`/manifest for ${key} failed`, e);
     }
-    record(
-      manifestPoint({
-        reply: reply?.kind ?? "503",
-        platform,
-        runtime: runtime ?? "",
-        channel: channel ?? "",
-        currentUpdateId: header("expo-current-update-id"),
-        embeddedUpdateId: header("expo-embedded-update-id"),
-        recentFailedUpdateIds: header("expo-recent-failed-update-ids"),
-        fatalError: header("expo-fatal-error"),
-      }),
-    );
+    try {
+      analytics(manifestPoint(reply?.kind ?? "503", platform, channel, runtime, header));
+    } catch (e) {
+      // The name only: the point holds client values.
+      console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
+    }
     if (reply === undefined) return c.text("storage unavailable\n", 503, NO_STORE);
     const headers: Record<string, string> = {
       "content-type": `multipart/mixed; boundary=${reply.boundary}`,

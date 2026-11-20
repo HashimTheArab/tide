@@ -3,7 +3,7 @@ import { UUID } from "@tide/protocol";
 
 /** Stock clients list at most this many recently failed updates. */
 const MAX_FAILED_IDS = 5;
-const QUOTED_UUID = /^"([0-9A-Fa-f-]{36})"$/;
+const QUOTED_UUID = new RegExp(`^"(${UUID.source.slice(1, -1)})"$`, "i");
 
 /**
  * One `/manifest` request as a Workers Analytics Engine data point; the layout is in `docs/design.md`, Observability.
@@ -15,35 +15,29 @@ export interface ManifestPoint {
   doubles: number[];
 }
 
-/** Receives one point per `/manifest` request that reaches the reply decision. Its result is never awaited. */
-export type AnalyticsSink = (point: ManifestPoint) => unknown;
+/** Receives one point per `/manifest` request that reaches the reply decision; it must not block. */
+export type AnalyticsSink = (point: ManifestPoint) => void;
 
-/** Request values already checked by the route; the rest are raw headers, absent when empty. */
-export interface ManifestRequest {
-  readonly reply: StoredReply["kind"] | "503";
-  readonly platform: "ios" | "android";
-  readonly runtime: string; // Reply key grammar: at most 64 ASCII characters.
-  readonly channel: string;
-  readonly currentUpdateId: string | undefined;
-  readonly embeddedUpdateId: string | undefined;
-  readonly recentFailedUpdateIds: string | undefined;
-  readonly fatalError: string | undefined;
-}
-
-/** Returns the data point for `r`. */
-export function manifestPoint(r: ManifestRequest): ManifestPoint {
+/** `channel` and `runtime` must already match the reply key grammar; every other value is read raw from `header`. */
+export function manifestPoint(
+  reply: StoredReply["kind"] | "503",
+  platform: "ios" | "android",
+  channel: string,
+  runtime: string,
+  header: (name: string) => string | undefined,
+): ManifestPoint {
   return {
-    indexes: [r.channel],
+    indexes: [channel],
     blobs: [
-      r.reply,
-      r.platform,
-      r.runtime,
-      updateId(r.currentUpdateId),
-      updateId(r.embeddedUpdateId),
-      failedUpdateIds(r.recentFailedUpdateIds),
+      reply,
+      platform,
+      runtime,
+      updateId(header("expo-current-update-id")),
+      updateId(header("expo-embedded-update-id")),
+      failedUpdateIds(header("expo-recent-failed-update-ids")),
     ],
     // Only presence: the value is the client's error message, which may hold user data.
-    doubles: [r.fatalError === undefined ? 0 : 1],
+    doubles: [header("expo-fatal-error") === undefined ? 0 : 1],
   };
 }
 
@@ -60,8 +54,8 @@ function updateId(value: string | undefined): string {
 function failedUpdateIds(value: string | undefined): string {
   const ids: string[] = [];
   for (const member of value?.split(",") ?? []) {
-    const id = QUOTED_UUID.exec(member.trim())?.[1]?.toLowerCase() ?? "";
-    if (UUID.test(id)) ids.push(id);
+    const id = QUOTED_UUID.exec(member.trim())?.[1];
+    if (id !== undefined) ids.push(id.toLowerCase());
     if (ids.length === MAX_FAILED_IDS) break;
   }
   return ids.join(",");

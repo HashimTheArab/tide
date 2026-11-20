@@ -6,7 +6,7 @@ import type { ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "./server-cases.ts";
 import { fixture } from "./fixtures.ts";
 
-export type Fault = "throw" | "reject" | "hang";
+export type Fault = "throw" | "hang";
 
 /** One runtime's app with an analytics sink the test observes. */
 export interface AnalyticsHarness extends Pick<Harness, "request" | "put" | "putFault"> {
@@ -14,15 +14,13 @@ export interface AnalyticsHarness extends Pick<Harness, "request" | "put" | "put
   capture(fault?: Fault): () => readonly ManifestPoint[];
 }
 
-/** Returns a write that throws, rejects or never settles. */
+/** Returns a write that throws, or returns a promise that never settles. */
 export function faultySink(fault: Fault): () => unknown {
   switch (fault) {
     case "throw":
       return () => {
         throw new Error("sink failed");
       };
-    case "reject":
-      return () => Promise.reject(new Error("sink failed"));
     case "hang":
       return () => new Promise<never>(() => undefined);
   }
@@ -209,7 +207,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     return { status: res.status, headers, body };
   };
 
-  test.each<Fault>(["throw", "reject", "hang"])(
+  test.each<Fault>(["throw", "hang"])(
     "a sink that %ss leaves 200 and 503 replies byte-identical",
     async (fault) => {
       await pointer("an-sink-ok", MANIFEST);
