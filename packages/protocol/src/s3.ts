@@ -1,4 +1,4 @@
-import { ProtocolError } from "./hash.ts";
+import { ProtocolError, hex, sha256Hex } from "./hash.ts";
 
 /** An S3-compatible bucket, addressed path-style. */
 export interface S3Config {
@@ -16,7 +16,7 @@ export interface S3Target {
   readonly credentials: SigV4Credentials;
 }
 
-interface SigV4Credentials {
+export interface SigV4Credentials {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly region: string;
@@ -128,33 +128,30 @@ export function s3Target(config: S3Config): S3Target {
       "must be 3 to 63 of a-z, 0-9, . and -, starting and ending alphanumeric",
     );
   }
-  if (!/^[a-z0-9-]{1,32}$/.test(config.region)) {
+  return { endpoint, bucket: config.bucket, credentials: sigV4Credentials(config, "s3") };
+}
+
+/** Returns validated credentials for `service`; a rejected one throws a `ProtocolError` naming the field, never the value. */
+export function sigV4Credentials(
+  config: Pick<S3Config, "region" | "accessKeyId" | "secretAccessKey">,
+  service: string,
+): SigV4Credentials {
+  const { region, accessKeyId, secretAccessKey } = config;
+  if (!/^[a-z0-9-]{1,32}$/.test(region)) {
     throw new ProtocolError("region", "must be 1 to 32 of a-z, 0-9 and -");
   }
   // Header-safe: printable ASCII with no whitespace.
-  if (!/^[A-Za-z0-9]{16,128}$/.test(config.accessKeyId)) {
+  if (!/^[A-Za-z0-9]{16,128}$/.test(accessKeyId)) {
     throw new ProtocolError("accessKeyId", "must be 16 to 128 of A-Z, a-z and 0-9");
   }
-  if (!/^[\x21-\x7E]{16,256}$/.test(config.secretAccessKey)) {
+  if (!/^[\x21-\x7E]{16,256}$/.test(secretAccessKey)) {
     throw new ProtocolError("secretAccessKey", "must be 16 to 256 printable ASCII characters");
   }
-  return {
-    endpoint,
-    bucket: config.bucket,
-    credentials: {
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-      region: config.region,
-      service: "s3",
-    },
-  };
+  return { accessKeyId, secretAccessKey, region, service };
 }
 
-/**
- * Signs and sends one request. A 3xx is returned, never followed. Network failures reject with fetch's own error,
- * which the caller replaces with an `S3Error`.
- */
-export async function s3Fetch(
+/** Signs and sends one S3 request through `awsFetch`. */
+export function s3Fetch(
   target: S3Target,
   request: S3Request,
   signal: AbortSignal,
@@ -168,23 +165,37 @@ export async function s3Fetch(
     .map(([k, v]) => `${uriEncode(k)}=${uriEncode(v)}`)
     .join("&");
   const url = new URL(query === "" ? path : `${path}?${query}`, target.endpoint);
-  const body = request.body ?? new Uint8Array();
+  return awsFetch({ ...request, url }, target.credentials, signal);
+}
+
+/**
+ * Signs and sends one request with every header given. A 3xx is returned, never followed. Network failures reject
+ * with fetch's own error, which the caller replaces with its own.
+ */
+export async function awsFetch(
+  request: {
+    readonly method: string;
+    readonly url: URL;
+    readonly headers?: Readonly<Record<string, string>>; // Lowercase names.
+    readonly body?: Uint8Array<ArrayBuffer>;
+  },
+  credentials: SigV4Credentials,
+  signal: AbortSignal,
+): Promise<Response> {
+  const { method, url, body } = request;
   const signed: Record<string, string> = {
     ...request.headers,
     host: url.host,
-    "x-amz-content-sha256": request.body === undefined ? EMPTY_SHA256 : await sha256Hex(body),
+    "x-amz-content-sha256": body === undefined ? EMPTY_SHA256 : await sha256Hex(body),
     "x-amz-date": new Date().toISOString().replace(/[-:]|\.\d{3}/g, ""),
   };
-  const authorization = await signV4(
-    { method: request.method, url, headers: signed },
-    target.credentials,
-  );
+  const authorization = await signV4({ method, url, headers: signed }, credentials);
   const { host: _, ...headers } = signed; // fetch sets Host itself.
   return fetch(url, {
-    method: request.method,
+    method,
     headers: { ...headers, authorization },
-    ...(request.body === undefined ? {} : { body }),
-    redirect: "manual", // workerd has no "error" mode.
+    ...(body === undefined ? {} : { body }),
+    redirect: "manual", // workerd has no "error" mode; a 3xx sends no credential to another origin.
     signal,
   });
 }
@@ -460,19 +471,11 @@ const uriEncode = (s: string): string =>
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
 
-/** Returns the lowercase hex SHA-256 of `bytes`. */
-async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  return hex(await crypto.subtle.digest("SHA-256", bytes));
-}
-
 async function hmac(key: Uint8Array<ArrayBuffer>, data: string): Promise<Uint8Array<ArrayBuffer>> {
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", k, encoder.encode(data)));
 }
-
-const hex = (bytes: ArrayBuffer | Uint8Array) =>
-  Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);

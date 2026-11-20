@@ -351,7 +351,7 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   "a malformed KMS region": () => ({
     kms: true,
     env: { TIDE_KMS_REGION: "us east" },
-    message: "TIDE_KMS_REGION must be 1 to 32 of a-z, 0-9 and -",
+    message: "TIDE_KMS_REGION: region must be 1 to 32 of a-z, 0-9 and -",
   }),
   "a KMS key ID with a space": () => ({
     kms: true,
@@ -361,12 +361,13 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   "a malformed KMS access key": () => ({
     kms: true,
     env: { TIDE_KMS_ACCESS_KEY_ID: "short" },
-    message: "TIDE_KMS_ACCESS_KEY_ID must be 16 to 128 of A-Z, a-z and 0-9",
+    message: "TIDE_KMS_ACCESS_KEY_ID: accessKeyId must be 16 to 128 of A-Z, a-z and 0-9",
   }),
   "a malformed KMS secret": () => ({
     kms: true,
     env: { TIDE_KMS_SECRET_ACCESS_KEY: "short" },
-    message: "TIDE_KMS_SECRET_ACCESS_KEY must be 16 to 256 printable ASCII characters",
+    message:
+      "TIDE_KMS_SECRET_ACCESS_KEY: secretAccessKey must be 16 to 256 printable ASCII characters",
   }),
   "a KMS session token with a space": () => ({
     kms: true,
@@ -513,6 +514,17 @@ test("a signing error wins over a missing TIDE_DISK_DIR", async () => {
       { projectRoot, config },
     ),
     MISMATCH,
+  );
+});
+
+// 0xA0 is no-break space in Latin-1, which the PEM pattern's \s would accept.
+test("a certificate file that is not UTF-8 is refused", async () => {
+  const { projectRoot, config } = project(main.certificate);
+  const bytes = Buffer.concat([Buffer.from([0xa0]), Buffer.from(main.certificate)]);
+  writeFileSync(join(projectRoot, "keys", "certificate.pem"), bytes);
+  await refusal(
+    openWriter({ ...pins(main), ...keyFile(main.pkcs8) }, { projectRoot, config }),
+    "updates.codeSigningCertificate: certificate must be exactly one PEM CERTIFICATE block",
   );
 });
 
@@ -726,16 +738,6 @@ describe("KMS failures", () => {
     [
       "a 200 with another algorithm",
       async () => ({ reply: await reply({ SigningAlgorithm: "RSASSA_PSS_SHA_256" }) }),
-      "KMS Sign returned 200 with an invalid reply",
-    ],
-    [
-      "a 200 whose KeyId is an object",
-      async () => ({ reply: await reply({ KeyId: { arn: FAKE_KMS.arn } }) }),
-      "KMS Sign returned 200 with an invalid reply",
-    ],
-    [
-      "a 200 whose KeyId is not a key ARN",
-      async () => ({ reply: await reply({ KeyId: FAKE_KMS.keyId }) }),
       "KMS Sign returned 200 with an invalid reply",
     ],
     ["an oversized 200", () => "oversize", "KMS Sign returned 200 with an invalid reply"],

@@ -20,9 +20,10 @@ export {
   encodeStoredReply,
   replyKey,
 } from "./reply.ts";
-export type { S3Config, S3Operation, S3Request } from "./s3.ts";
+export type { S3Config, S3Operation, S3Request, SigV4Credentials } from "./s3.ts";
 export {
   S3Error,
+  awsFetch,
   childElements,
   parseS3Xml,
   readS3Text,
@@ -31,6 +32,7 @@ export {
   s3ErrorCode,
   s3Fetch,
   s3Target,
+  sigV4Credentials,
   signV4,
   storageFromEnv,
   textOf,

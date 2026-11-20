@@ -248,8 +248,9 @@ certificate does not pass while the builds hold an expired one.
 
 **Probe.** Before the bucket is opened, the CLI signs `tide signing probe` and verifies it against the certificate
 and `keyid`. Every later signature is verified the same way before it is returned, so a re-pointed KMS alias cannot
-produce a part the app rejects. Every refusal exits before any bucket request, with a fixed message that names
-variables and config fields, never a key, credential or provider text.
+produce a part the app rejects. Every key or config refusal exits before the bucket is opened; the bucket check only
+reads `reply/no-update`. Each refusal has a fixed message that names variables and config fields, never a key,
+credential or provider text.
 
 **One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
 exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured

@@ -1,4 +1,4 @@
-import { ProtocolError, base64, decodeBase64 } from "./hash.ts";
+import { ProtocolError, base64, decodeBase64, sha256Hex } from "./hash.ts";
 import { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
 
 const ALG = "rsa-v1_5-sha256";
@@ -126,13 +126,7 @@ export async function codeSigningCertificate(
   if (cert.version === undefined || !equal(der, cert.version, V3)) {
     throw fail("must be X.509 v3");
   }
-  if (
-    !equal(
-      der,
-      cert.innerAlgorithm,
-      der.subarray(cert.outerAlgorithm.start, cert.outerAlgorithm.end),
-    )
-  ) {
+  if (!equal(der, cert.innerAlgorithm, bytesOf(der, cert.outerAlgorithm))) {
     throw fail("must name the same signature algorithm in the TBSCertificate and outside it");
   }
   const algorithm = sequence(der, cert.outerAlgorithm);
@@ -144,7 +138,7 @@ export async function codeSigningCertificate(
   ) {
     throw fail("must be signed with sha256WithRSAEncryption");
   }
-  if (!equal(der, cert.issuer, der.subarray(cert.subject.start, cert.subject.end))) {
+  if (!equal(der, cert.issuer, bytesOf(der, cert.subject))) {
     throw fail("must be self-issued");
   }
   const validity = sequence(der, cert.validity);
@@ -180,7 +174,7 @@ export async function codeSigningCertificate(
   ) {
     throw fail("has a self-signature that does not verify");
   }
-  return { key, sha256: hexOf(new Uint8Array(await crypto.subtle.digest("SHA-256", der))) };
+  return { key, sha256: await sha256Hex(der) };
 }
 
 function checkKey(key: CryptoKey, type: "public" | "private", usage: "sign" | "verify"): void {
@@ -394,12 +388,12 @@ function time(der: Uint8Array, tlv: Tlv): number | undefined {
 
 /** True when the TLV at `tlv` is exactly `bytes`. */
 function equal(der: Uint8Array, tlv: Tlv, bytes: Uint8Array): boolean {
-  const own = der.subarray(tlv.start, tlv.end);
+  const own = bytesOf(der, tlv);
   return own.length === bytes.length && own.every((b, i) => b === bytes[i]);
 }
 
-const hexOf = (bytes: Uint8Array) =>
-  Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+/** Returns the whole TLV at `tlv`, header included. */
+const bytesOf = (der: Uint8Array, tlv: Tlv) => der.subarray(tlv.start, tlv.end);
 
 /** Returns the TLVs that exactly fill SEQUENCE `parent`. */
 function sequence(der: Uint8Array, parent: Tlv | undefined): Tlv[] {

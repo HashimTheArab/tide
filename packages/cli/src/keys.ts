@@ -38,7 +38,7 @@ interface Identity {
   readonly keyId: string;
 }
 
-type Env = Readonly<Record<string, string | undefined>>;
+export type Env = Readonly<Record<string, string | undefined>>;
 
 const FILE_LIMIT = 64 * 1024;
 const PROBE = new TextEncoder().encode("tide signing probe");
@@ -107,13 +107,8 @@ async function appIdentity(env: Env, { projectRoot, config }: AppProject): Promi
   if (keyId !== buildKeyId) {
     throw new KeyError(`app config updates.codeSigningMetadata.keyid differs from ${BUILD_KEYID}`);
   }
-  const bytes = readSmallFile(join(projectRoot, certificatePath));
-  let pem: string | undefined;
-  try {
-    pem = bytes && new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    pem = undefined;
-  }
+  // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
+  const pem = readSmallFile(join(projectRoot, certificatePath))?.toString("utf8");
   if (pem === undefined) {
     throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
   }
@@ -233,8 +228,10 @@ function readSmallFile(path: string): Buffer | undefined {
   }
 }
 
-/** Empty counts as unset. */
-const read = (env: Env, name: string) => (env[name] === "" ? undefined : env[name]);
+/** Returns the variable `name`; empty counts as unset for every signing variable. */
+export function read(env: Env, name: string): string | undefined {
+  return env[name] === "" ? undefined : env[name];
+}
 
 /** Returns the own field `name` of a plain object, or undefined. */
 function member(value: unknown, name: string): unknown {
