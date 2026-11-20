@@ -91,9 +91,11 @@ so a mismatched runtime looks healthy until the probe, run with the build's own 
 
 ## Routine deploys
 
-Staging deploys from `main`; production deploys a commit only after staging has run it.
+Staging deploys from `main`; production deploys a commit only after staging has run it. Wrangler runs in the
+operator project's directory, which holds Wrangler and `wrangler.jsonc`; the workspace root has neither.
 
-- **Workers Builds.** In each account, connect the repository to that environment's Worker with the deploy command
+- **Workers Builds.** In each account, connect the repository to that environment's Worker with Root directory set
+  to the operator project's folder (for example `examples/operator`) and the deploy command
   `npx wrangler deploy --env <name>`. Staging's Git branch is `main`; production's is a release branch moved forward
   to a commit staging has run. Each account holds its own connection, so no token leaves Cloudflare.
 - **GitHub Actions.** [`examples/deploy-workers.yml`](examples/deploy-workers.yml): a `staging` job on push to `main`
@@ -101,7 +103,6 @@ Staging deploys from `main`; production deploys a commit only after staging has 
   from its own GitHub environment, so production's protection rules decide when its token can be read. Each
   environment has a concurrency group whose runs queue in order, and each job checks that its commit is still the
   head of `main` before it deploys, so a rerun or a late approval cannot replace a newer deploy with an older one.
-  Wrangler runs in the operator project's directory.
 
 How production is gated depends on the GitHub plan:
 

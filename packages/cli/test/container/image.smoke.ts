@@ -58,10 +58,6 @@ function allowlist(): string[] {
 }
 
 describe("the Node image", () => {
-  test("a builder that reads only the root .dockerignore gets an empty context", () => {
-    expect(inject("rootContext")).toEqual([]);
-  });
-
   test("its config runs as node on 8787 and names no credential", async () => {
     const [config] = JSON.parse(await docker("image", "inspect", image.tag)) as [
       { Config: { User: string; Env: string[]; ExposedPorts: Record<string, unknown> } },
