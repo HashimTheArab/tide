@@ -50,7 +50,7 @@ AI agents write most of the code.
   shape must keep working forever.
 - **Putting a key on a server.** Signing happens in the CLI only. The server's storage credentials are read-only,
   except the R2 binding, which cannot be; never call anything but `get` on it.
-- **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide/server types`; the gate fails
+- **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -r types`; the gate fails
   when it is stale.
 - **Committing secrets.** Never commit `.env`, keys or credentials.
 - **Formatting by hand.** Run `pnpm format:fix`; oxfmt orders imports.

@@ -1,0 +1,25 @@
+# Only these tracked files enter the build context; a guard test keeps the list equal to git ls-files.
+*
+!examples/operator/package.json
+!package.json
+!packages/cli/package.json
+!packages/protocol/package.json
+!packages/protocol/src/bzip2.ts
+!packages/protocol/src/hash.ts
+!packages/protocol/src/index.ts
+!packages/protocol/src/manifest.ts
+!packages/protocol/src/multipart.ts
+!packages/protocol/src/patch.ts
+!packages/protocol/src/reply.ts
+!packages/protocol/src/s3.ts
+!packages/protocol/src/sfv.ts
+!packages/protocol/src/signature.ts
+!packages/server/package.json
+!packages/server/src/core/analytics.ts
+!packages/server/src/core/app.ts
+!packages/server/src/core/s3.ts
+!packages/server/src/core/store.ts
+!packages/server/src/node.ts
+!packages/server/src/workers.ts
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
