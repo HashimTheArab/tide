@@ -20,8 +20,8 @@ interface Backend {
   readonly bucket: Bucket;
   /** The bytes the backend holds for `key`, read around the adapter. */
   stored(key: string): Uint8Array | undefined;
-  /** Stores a name outside the key grammar, around the adapter. */
-  plantUnknown(): void;
+  /** Stores a name outside the key grammar, around the adapter, and returns the name the adapter lists. */
+  plantUnknown(): string;
   /** Counts requests that reached the backend; disk does no I/O worth counting, so it reports undefined. */
   requests(): number | undefined;
 }
@@ -49,6 +49,7 @@ const backends: [string, () => Backend][] = [
         plantUnknown: () => {
           mkdirSync(join(root, "reply/.invalid/1"), { recursive: true });
           writeFileSync(join(root, "reply/.invalid/1/ios"), "x");
+          return "reply/.invalid/1/ios";
         },
         requests: () => undefined,
       };
@@ -64,6 +65,7 @@ const backends: [string, () => Backend][] = [
         stored: (key) => fake.objects.get(key),
         plantUnknown: () => {
           fake.objects.set("reply/bad name/1/ios", utf8("x"));
+          return "reply/bad name/1/ios";
         },
         requests: () => fake.requests,
       };
@@ -100,7 +102,7 @@ describe.each(backends)("%s bucket", (_, open) => {
     const key = `reply/${"C".repeat(64)}/${"exposdk:57.0.0(1)".padEnd(64, "+")}/android`;
     await bucket.put(key, utf8("long"));
     expect((await bucket.get(key, 100))?.bytes).toEqual(utf8("long"));
-    expect(await bucket.list("reply/")).toEqual([{ key }]);
+    expect(await bucket.list("reply/")).toEqual([{ key, size: 4 }]);
   });
 
   test("get rejects an object over maxBytes", async () => {
@@ -132,13 +134,22 @@ describe.each(backends)("%s bucket", (_, open) => {
     expect(await bucket.list("reply/zz")).toEqual([]);
   });
 
-  test("a stored name outside the grammar is listed as unknown, and later keys still are", async () => {
-    await bucket.put("reply/zz/1/ios", utf8("z"));
-    b.plantUnknown();
-    const entries = await bucket.list("reply/");
-    expect(entries).toHaveLength(2);
-    expect(entries.filter((e) => "unknown" in e)).toHaveLength(1);
-    expect(entries).toContainEqual({ key: "reply/zz/1/ios" });
+  test("a stored name outside the grammar is listed as itself, and later keys still are", async () => {
+    await bucket.put("reply/zz/1/ios", utf8("zz"));
+    const unknown = b.plantUnknown();
+    expect(await bucket.list("reply/")).toEqual([
+      { unknown, size: 1 },
+      { key: "reply/zz/1/ios", size: 2 },
+    ]);
+  });
+
+  test("every entry carries its stored size, an empty object included", async () => {
+    await bucket.put(ASSET, new Uint8Array(70_000));
+    await bucket.put("reply/no-update", new Uint8Array());
+    expect(await bucket.list("")).toEqual([
+      { key: ASSET, size: 70_000 },
+      { key: "reply/no-update", size: 0 },
+    ]);
   });
 
   test("putIfAbsent on an existing key and putIfMatch with a stale ETag lose, leaving the bytes", async () => {

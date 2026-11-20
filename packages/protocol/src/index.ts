@@ -10,7 +10,9 @@ export type { Part, PartName } from "./multipart.ts";
 export { HEADER_VALUE, encodeMultipart, parseMultipart } from "./multipart.ts";
 export type { StoredReply } from "./reply.ts";
 export {
+  CONTENT_KEY,
   MAX_FILTERS_BYTES,
+  LEGACY_MAP_KEY,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   decodeStoredReply,

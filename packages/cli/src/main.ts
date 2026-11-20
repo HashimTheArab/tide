@@ -4,10 +4,12 @@ import { BucketError } from "./bucket.ts";
 import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { status } from "./status.ts";
+import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}`;
+const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}`;
 const WRITERS = { publish, rollback, republish };
+const READERS = { status, storage };
 
 /** Runs one command; each command documents its exit codes, and 2 is always a usage error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
@@ -18,7 +20,7 @@ async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
       err: (line) => process.stderr.write(`${line}\n`),
     });
   }
-  if (args.length !== 1 || args[0] !== "status") {
+  if (args.length !== 1 || command === undefined || !Object.hasOwn(READERS, command)) {
     console.error(USAGE);
     return 2;
   }
@@ -31,7 +33,7 @@ async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
     return 2;
   }
   try {
-    return await status(
+    return await READERS[command as keyof typeof READERS](
       bucket,
       (line) => process.stdout.write(`${line}\n`),
       (line) => process.stderr.write(`${line}\n`),

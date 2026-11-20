@@ -5,8 +5,10 @@ interface BucketObject {
   readonly etag: string; // Opaque: compared by exact string equality only.
 }
 
-/** A listed name: a store key, or a stored name outside the key grammar. */
-export type ListEntry = { readonly key: string } | { readonly unknown: string };
+/** A listed name, a store key or a stored name outside the key grammar, and its stored bytes. */
+export type ListEntry = ({ readonly key: string } | { readonly unknown: string }) & {
+  readonly size: number; // 0 on disk for anything but a regular file.
+};
 
 /**
  * The CLI's read-write view of the bucket. A conditional write resolves undefined only when its precondition was

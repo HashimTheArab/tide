@@ -36,6 +36,7 @@ bundles/<sha256>                         launch bundles
 updates/<updateId>.json                  release record (CLI, Release records)
 reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
 reply/no-update                          stored reply: the signed noUpdateAvailable
+legacy/map.json                          content keys that URLs from earlier servers name (legacy import)
 bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
 patches/<fromHash>/<toHash>              BSDIFF40 patch
 ```
@@ -158,13 +159,14 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
   also uses; no or an unknown `ext` gives `application/octet-stream`. A 200 is `public, max-age=31536000,
   immutable`; every other reply is `no-store` (404 when absent, 503 when the store fails). Earlier servers also
   served launch bundles this way, so the legacy import stores every object a legacy `?h=` URL names under
-  `assets/`, launch bundles included, and records each key in the legacy map. These URLs get no
-  patches. A frozen map can cover other legacy URL shapes.
+  `assets/`, launch bundles included, and records each key in `legacy/map.json`
+  (`{"version":1,"keys":[...]}`: content keys in strictly ascending order, no trailing newline, at most 64 MiB).
+  These URLs get no patches. A frozen map can cover other legacy URL shapes.
 - `GET /hc`.
 
 ## CLI
 
-**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only from one CI
+**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` (P5) run only from one CI
 workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
@@ -174,9 +176,10 @@ backstop, the pointer write is conditional, so an accidental second writer fails
 The CLI reads the same variables as the Node server: `TIDE_DISK_DIR`, or all five `TIDE_S3_*` (exactly one store;
 empty counts as unset). A configuration error exits before any request.
 
-- **Write credentials.** The CLI's S3 key needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and
-  `s3:ListBucket`; on R2, an Object Read & Write token scoped to the bucket. Keep it a protected CI secret; the server
-  keeps its read-only key. The secret is only used to derive signatures: it is never sent, put in a URL or printed.
+- **Credentials.** `status` and `storage` need `s3:GetObject` and `s3:ListBucket`: the server's read-only key, or an
+  R2 Object Read token. The writers add `s3:PutObject` (on R2, an Object Read & Write token scoped to the bucket);
+  keep that key a protected CI secret. Nothing needs `s3:DeleteObject`. The secret is only used to derive
+  signatures: it is never sent, put in a URL or printed.
 - **Writes.** Every request is signed (SigV4, with the payload hash). Every PUT signs its own `Cache-Control`:
   `public, max-age=31536000, immutable` with a `Content-Type` for bundles and assets, `no-store` for everything
   else (fetch would otherwise add an unsigned `no-cache` to a conditional PUT, which S3 stores). A pointer write is `PutObject` with
@@ -225,19 +228,20 @@ components), the MD5 is its key, and the file's bytes must hash to it. Repeated 
 Steps, in order; every refusal comes before the first write, and all replies are signed in memory first:
 
 1. Read the config, runtimes and export, and open the writer (Keys).
-2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build, or in two
-   of them, comparing keys case-insensitively. An unreadable record refuses too.
+2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build (P5), or in
+   two of them, comparing keys case-insensitively. An unreadable record refuses too.
 3. Read each pointer and its ETag, then the bucket's time. Refuse a local clock more than a minute from it, or a
    certificate invalid by either clock.
 4. Compose each platform's manifest under a fresh UUID with `createdAt = max(now, previous createdAt or commitTime
    + 1 ms)`, one clock sample for all; metadata `channel`, filter `channel="<channel>"`. Sign the exact part bytes
    (RSA PKCS#1 v1.5, SHA-256) through the key source, and build `reply/no-update` if it is missing.
-5. Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the last N
-   updates); apply each and check its hash before upload; keep one only if it is well under the compressed bundle.
+5. (P5) Build `BSDIFF40` patches from every registered base for the runtime and platform (embedded builds plus the
+   last N updates); apply each and check its hash before upload; keep one only if it is well under the compressed
+   bundle.
 6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then
-   `reply/no-update` (a winner must verify under the identity), release records, bases and patches. Then, per
-   platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on its
-   ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
+   `reply/no-update` (a winner must verify under the identity), release records, and (P5) bases and patches. Then,
+   per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
+   its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
    an unknown outcome may be live, and the next run starts from what the bucket holds.
 
 **Release records.** `updates/<updateId>.json` is one JSON object, keys in this order, no trailing newline, at most
@@ -274,8 +278,20 @@ pointer; a referenced bundle or asset that is not stored; and any asset key two 
 race or unknown outcome behaves as publish; a record whose PUT has an unknown outcome is named, and no pointer refers
 to it yet.
 
-Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `status`, and
-`storage` (a read-only report of objects no retained pointer references, with their total size).
+`tide storage` reports, read-only, every object under `assets/`, `bundles/` and `updates/` that nothing
+references, one `<name> <bytes>` row each in byte order, then `<n> unreferenced objects, <total> bytes`. Referenced
+means named by:
+
+- any release record, all of which are retained (a record itself is never reported): `bundles/` for its launch hash
+  and `assets/` for each asset. A pointer serves its release record, so it adds nothing;
+- `legacy/map.json`.
+
+A name outside the key grammar prints as a JSON string with every character outside printable ASCII written `\uXXXX`.
+It writes nothing and takes no lock, so the report is exact for a quiescent bucket: a record committed after the
+listing protects its content only from the next run. Exit 0 with the report; 1, with nothing on stdout, when a
+listing or read fails or a record or the legacy map does not decode; 2 on a usage or configuration error.
+
+`register-build` (P5) records a store build's embedded update ID and bundle as a base.
 
 **Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an

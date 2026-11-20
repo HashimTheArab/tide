@@ -17,7 +17,14 @@ export const LIST_PAGE = 3;
 /** Every request fails this way: a dropped socket, a redirect, or an error document. */
 type Failure = "drop" | "redirect" | { readonly status: number; readonly code: string };
 /** What goes wrong with the next listing's second page. */
-type ListFault = "malformed" | "missing-field" | "common-prefixes" | "repeat-token";
+type ListFault =
+  | "malformed"
+  | "missing-field"
+  | "common-prefixes"
+  | "repeat-token"
+  | "no-size" // Its entries carry no Size.
+  | "bad-name" // Its first entry's Key is %FF, which does not decode as UTF-8.
+  | "repeat-key"; // It starts with the first page's last key again.
 
 export interface FakeS3 {
   readonly endpoint: string;
@@ -28,12 +35,22 @@ export interface FakeS3 {
   readonly tokens: readonly string[];
   /** Every PUT key that reached handling, in order, refused preconditions included. */
   readonly puts: string[];
+  /** Every DELETE key that reached handling, in order. */
+  readonly deletes: string[];
   /** Returns the ETag the fake serves for `key`; tags count up and are never derived from the bytes. */
   etag(key: string): string | undefined;
   behave(key: string, behaviour: Behaviour): void;
   failAll(failure: Failure | undefined): void;
   listFault(fault: ListFault | undefined): void;
+  /** Keys per page from now on, up to the request's max-keys; undefined restores `LIST_PAGE`. */
+  listPage(size: number | undefined): void;
   setNow(ms: number | undefined): void;
+  /** Listings report `text` as `key`'s Size, so a huge size needs no body. */
+  listSize(key: string, text: string): void;
+  /** Calls `fn` once, after the next listing of `prefix` has built its last page. */
+  onList(prefix: string, fn: () => void): void;
+  /** Restores everything a test can set: objects, records, behaviours other than `script/`, faults and hooks. */
+  reset(): void;
   /** The next PUT to `key` finds `bytes` stored first, as another writer's would be. */
   raceOnPut(key: string, bytes: Uint8Array): void;
   /** The next PUT to `key`, or under it when it ends in `/`, commits, then its connection drops before any response. */
@@ -54,10 +71,13 @@ const NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/";
  * which needs no signature.
  */
 export async function startFakeS3(): Promise<FakeS3> {
-  const objects = new Map<string, Uint8Array>();
+  const objects = new Objects();
   // Content-Type and Cache-Control from each PUT, served on GET as a bucket's public domain would.
   const headersOf = new WeakMap<Uint8Array, Record<string, string>>();
   const puts: string[] = [];
+  const deletes: string[] = [];
+  const sizes = new Map<string, string>();
+  const listHooks = new Map<string, () => void>();
   const races = new Map<string, Uint8Array>();
   const drops = new Set<string>();
   const putHooks = new Map<string, () => void>();
@@ -69,12 +89,21 @@ export async function startFakeS3(): Promise<FakeS3> {
     if (tag === undefined) etags.set(bytes, (tag = `"fake-${++etagCount}!~/"`));
     return tag;
   };
-  const behaviours = new Map<string, Behaviour>(BEHAVIOURS.map((b) => [`script/${b}`, b]));
+  const scripted = () => new Map<string, Behaviour>(BEHAVIOURS.map((b) => [`script/${b}`, b]));
+  let behaviours = scripted();
   const issued = new Map<string, string>(); // continuation token -> last key of its page
   const tokens: string[] = [];
   let requests = 0;
   let failure: Failure | undefined;
   let fault: ListFault | undefined;
+  let pageSize = LIST_PAGE;
+  let sorted: { readonly version: number; readonly keys: readonly string[] } | undefined;
+  const sortedKeys = () => {
+    if (sorted?.version !== objects.version) {
+      sorted = { version: objects.version, keys: [...objects.keys()].sort(byteOrder) };
+    }
+    return sorted.keys;
+  };
   let now: number | undefined;
   const events = new Map<string, PromiseWithResolvers<void>>();
   const event = (name: FakeEvent, key: string) => {
@@ -166,6 +195,7 @@ export async function startFakeS3(): Promise<FakeS3> {
         return res.writeHead(200, { etag: etagOf(body) }).end();
       }
       if (req.method === "DELETE") {
+        deletes.push(key);
         objects.delete(key);
         return res.writeHead(204).end();
       }
@@ -265,17 +295,27 @@ export async function startFakeS3(): Promise<FakeS3> {
       after = issued.get(token);
       if (after === undefined) return s3Error(res, 400, "InvalidArgument");
     }
-    const keys = [...objects.keys()]
-      .filter((k) => k.startsWith(prefix) && (after === undefined || byteOrder(k, after) > 0))
-      .sort(byteOrder);
-    const page = keys.slice(0, Math.min(LIST_PAGE, maxKeys));
-    const truncated = keys.length > page.length;
+    // A prefix's keys are contiguous in byte order.
+    const keys = sortedKeys();
+    const start = Math.max(
+      bound(keys, prefix, true),
+      after === undefined ? 0 : bound(keys, after, false),
+    );
+    const size = Math.min(pageSize, maxKeys);
+    const run = keys.slice(start, start + size + 1).filter((k) => k.startsWith(prefix));
+    const page = run.slice(0, size);
+    const truncated = run.length > size;
+    if (!truncated) {
+      listHooks.get(prefix)?.();
+      listHooks.delete(prefix);
+    }
     let next = "";
     if (truncated) {
       next = `t${issued.size}+/=`; // A token holding +, / and = must be sent back byte for byte.
       issued.set(next, page.at(-1) ?? "");
     }
     const pageFault = token === null ? undefined : fault;
+    if (pageFault === "repeat-key" && after !== undefined) page.unshift(after);
     if (pageFault === "repeat-token" && token !== null) next = token;
     const isTruncated =
       pageFault === "missing-field"
@@ -290,10 +330,12 @@ export async function startFakeS3(): Promise<FakeS3> {
       pageFault === "malformed" ? isTruncated.replace("</IsTruncated>", "") : isTruncated,
       token === null ? "" : `<ContinuationToken>${token}</ContinuationToken>`,
       next === "" ? "" : `<NextContinuationToken>${next}</NextContinuationToken>`,
-      ...page.map((k) => {
+      ...page.map((k, i) => {
         const bytes = objects.get(k) ?? new Uint8Array();
         const etag = etagOf(bytes).replaceAll('"', "&quot;");
-        return `<Contents><Key>${urlEncode(k)}</Key><ETag>${etag}</ETag><Size>${bytes.length}</Size></Contents>`;
+        const name = pageFault === "bad-name" && i === 0 ? "%FF" : urlEncode(k);
+        const size = pageFault === "no-size" ? "" : `<Size>${sizes.get(k) ?? bytes.length}</Size>`;
+        return `<Contents><Key>${name}</Key><ETag>${etag}</ETag>${size}</Contents>`;
       }),
       pageFault === "common-prefixes"
         ? "<CommonPrefixes><Prefix>x%2F</Prefix></CommonPrefixes>"
@@ -314,6 +356,7 @@ export async function startFakeS3(): Promise<FakeS3> {
     },
     tokens,
     puts,
+    deletes,
     etag: (key) => {
       const stored = objects.get(key);
       return stored === undefined ? undefined : etagOf(stored);
@@ -327,8 +370,32 @@ export async function startFakeS3(): Promise<FakeS3> {
     listFault: (f) => {
       fault = f;
     },
+    listPage: (size) => {
+      pageSize = size ?? LIST_PAGE;
+    },
     setNow: (ms) => {
       now = ms;
+    },
+    listSize: (key, text) => {
+      sizes.set(key, text);
+    },
+    onList: (prefix, fn) => {
+      listHooks.set(prefix, fn);
+    },
+    reset: () => {
+      objects.clear();
+      puts.length = 0;
+      deletes.length = 0;
+      behaviours = scripted();
+      failure = undefined;
+      fault = undefined;
+      pageSize = LIST_PAGE;
+      now = undefined;
+      sizes.clear();
+      listHooks.clear();
+      races.clear();
+      drops.clear();
+      putHooks.clear();
     },
     raceOnPut: (key, bytes) => {
       races.set(key, bytes);
@@ -390,6 +457,35 @@ async function signedCorrectly(
 const urlEncode = (s: string) => encodeURIComponent(s).replaceAll("%20", "+");
 
 const byteOrder = (a: string, b: string) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+
+/** Returns the index of the first of the sorted `keys` after `key`, or at it when `inclusive`. */
+function bound(keys: readonly string[], key: string, inclusive: boolean): number {
+  let [lo, hi] = [0, keys.length];
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const c = byteOrder(keys[mid] ?? "", key);
+    if (c < 0 || (c === 0 && !inclusive)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** The stored objects, counting changes so a listing sorts the keys once per change, not once per page. */
+class Objects extends Map<string, Uint8Array> {
+  version = 0;
+  override set(key: string, value: Uint8Array): this {
+    this.version++;
+    return super.set(key, value);
+  }
+  override delete(key: string): boolean {
+    this.version++;
+    return super.delete(key);
+  }
+  override clear(): void {
+    this.version++;
+    super.clear();
+  }
+}
 
 function errorDocument(code: string, leak = false): string {
   // A provider's Message is free text; `leak` puts both credentials in it, which no error may repeat.

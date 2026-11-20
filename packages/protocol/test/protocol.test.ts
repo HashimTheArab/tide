@@ -7,6 +7,7 @@ import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   MAX_FILTERS_BYTES,
   MAX_REPLY_BYTES,
+  LEGACY_MAP_KEY,
   NO_UPDATE_KEY,
   ProtocolError,
   assetContentType,
@@ -1590,6 +1591,7 @@ describe("stored reply", () => {
     ["reply/main/1.0.0(1)/ios", "reply/main/1_2e0_2e0_281_29/ios"],
     ["reply/main/exposdk:57.0.0/ios", "reply/main/exposdk_3a57_2e0_2e0/ios"],
     [NO_UPDATE_KEY, NO_UPDATE_KEY],
+    [LEGACY_MAP_KEY, LEGACY_MAP_KEY],
     [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
     [`bundles/${PNG_HEX}`, `bundles/${PNG_HEX}`],
     [
@@ -1612,6 +1614,9 @@ describe("stored reply", () => {
     "updates/0F6A9A3E-6C1B-4C4E-9D55-2B8F3F7C1A90.json",
     "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90",
     "updates/../reply/no-update",
+    "legacy/Map.json",
+    "legacy/map.json/x",
+    "legacy/map",
     "lock",
     "",
   ])("diskPath rejects %j", async (key) => {
@@ -1799,6 +1804,7 @@ describe("s3", () => {
 
   test.each<[string, string]>([
     ["reply/no-update", NO_UPDATE_KEY],
+    ["legacy/map.json", LEGACY_MAP_KEY],
     [`assets/${PNG_HEX}`, `assets/${PNG_HEX}`],
     ["reply/_4dain/1_2e0_2e0/ios", "reply/Main/1.0.0/ios"],
     ["reply/main/exposdk_3a57_2e0_2e0/android", "reply/main/exposdk:57.0.0/android"],

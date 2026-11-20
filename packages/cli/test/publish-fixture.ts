@@ -76,7 +76,7 @@ export let main: Identity;
 export let other: Identity;
 export let s3: FakeS3;
 
-/** Generates the main and other identities and starts the S3 fake for this file, emptying the fake per test. */
+/** Generates the main and other identities and starts the S3 fake for this file, resetting the fake per test. */
 export function useFixture(): void {
   beforeAll(async () => {
     [main, other, s3] = await Promise.all([identity(), identity(), startFakeS3()]);
@@ -85,9 +85,7 @@ export function useFixture(): void {
     await s3.close();
   });
   beforeEach(() => {
-    s3.objects.clear();
-    s3.puts.length = 0;
-    s3.setNow(undefined);
+    s3.reset();
   });
 }
 

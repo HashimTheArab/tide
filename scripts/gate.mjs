@@ -38,7 +38,7 @@ const SECRETS_IGNORE = [];
 // A slice touching any of these always gets the deep review.
 const RISKY = [
   /^packages\/protocol\//,
-  /^packages\/cli\/src\/(sign|keys|publish|pointer|lock|gc)/,
+  /^packages\/cli\/src\/(sign|keys|publish|pointer|lock|storage)/,
   /^packages\/server\/src\/(core|workers\.ts|node\.ts)/,
   /wrangler\.jsonc$/,
   /^\.github\//,
