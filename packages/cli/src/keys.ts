@@ -33,6 +33,18 @@ export interface AppProject {
   readonly config: unknown;
 }
 
+/** The identity an export carries: the certificate PEM and the code-signing metadata, both unchecked. */
+export interface ExportedApp {
+  readonly certificate: string;
+  readonly codeSigningMetadata: unknown;
+}
+
+/** The code-signing metadata a build embeds, holding nothing else. */
+export interface SigningMetadata {
+  readonly keyid: string;
+  readonly alg?: "rsa-v1_5-sha256";
+}
+
 /** What the installed builds trust: the certificate's verify key and the code-signing key ID. */
 interface Identity {
   readonly key: CryptoKey;
@@ -69,7 +81,7 @@ const FINGERPRINT = /^(?:[0-9a-f]{64}|[0-9a-f]{2}(?::[0-9a-f]{2}){31})$/i;
  */
 export async function openWriter(
   env: Env,
-  project: AppProject,
+  project: AppProject | ExportedApp,
   options: { readonly kmsTimeoutMs?: number; readonly now?: () => number } = {},
 ): Promise<Writer> {
   const { now = Date.now } = options;
@@ -101,32 +113,52 @@ async function validCertificate(pem: string, at: number) {
   }
 }
 
-/** Reads the identity from the app config, checked against the build pins and the certificate profile at `now`. */
-async function appIdentity(
-  env: Env,
-  { projectRoot, config }: AppProject,
-  now: number,
-): Promise<Identity> {
-  const updates = member(config, "updates");
-  const certificatePath = member(updates, "codeSigningCertificate");
-  if (typeof certificatePath !== "string" || certificatePath === "") {
-    throw new KeyError(
-      "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
-    );
-  }
-  const metadata = member(updates, "codeSigningMetadata");
-  const keyId = member(metadata, "keyid");
+/**
+ * Returns `{keyid}` or `{keyid, alg}` from code-signing metadata, a new object holding no other member. `field` names
+ * the metadata in each refusal.
+ */
+export function signingMetadata(metadata: unknown, field: string): SigningMetadata {
+  const keyid = member(metadata, "keyid");
   // Expo would fall back to "root"; an implicit key ID is refused instead.
-  if (keyId === undefined) {
-    throw new KeyError("app config has no updates.codeSigningMetadata.keyid");
-  }
-  if (typeof keyId !== "string" || !/^[\x20-\x7E]+$/.test(keyId)) {
-    throw new KeyError("app config updates.codeSigningMetadata.keyid must be printable ASCII");
+  if (keyid === undefined) throw new KeyError(`${field}.keyid is missing`);
+  if (typeof keyid !== "string" || !/^[\x20-\x7E]+$/.test(keyid)) {
+    throw new KeyError(`${field}.keyid must be printable ASCII`);
   }
   const alg = member(metadata, "alg");
-  if (alg !== undefined && alg !== "rsa-v1_5-sha256") {
-    throw new KeyError("app config updates.codeSigningMetadata.alg must be rsa-v1_5-sha256");
+  if (alg === undefined) return { keyid };
+  if (alg !== "rsa-v1_5-sha256") throw new KeyError(`${field}.alg must be rsa-v1_5-sha256`);
+  return { keyid, alg };
+}
+
+/** Reads the app's identity, checked against the build pins and the certificate profile at `now`. */
+async function appIdentity(
+  env: Env,
+  project: AppProject | ExportedApp,
+  now: number,
+): Promise<Identity> {
+  let metadata: unknown;
+  let pem: string | undefined;
+  if ("projectRoot" in project) {
+    const updates = member(project.config, "updates");
+    const certificatePath = member(updates, "codeSigningCertificate");
+    if (typeof certificatePath !== "string" || certificatePath === "") {
+      throw new KeyError(
+        "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
+      );
+    }
+    metadata = member(updates, "codeSigningMetadata");
+    // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
+    pem = readSmallFile(join(project.projectRoot, certificatePath))?.toString("utf8");
+  } else {
+    metadata = project.codeSigningMetadata;
+    pem = project.certificate;
   }
+  const { keyid: keyId } = signingMetadata(
+    metadata,
+    "projectRoot" in project
+      ? "app config updates.codeSigningMetadata"
+      : "tide-export.json codeSigningMetadata",
+  );
   const buildKeyId = read(env, BUILD_KEYID);
   if (buildKeyId === undefined) {
     throw new KeyError(`${BUILD_KEYID} is not set: set it to the keyid the store builds embed`);
@@ -143,8 +175,6 @@ async function appIdentity(
   if (keyId !== buildKeyId) {
     throw new KeyError(`app config updates.codeSigningMetadata.keyid differs from ${BUILD_KEYID}`);
   }
-  // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
-  const pem = readSmallFile(join(projectRoot, certificatePath))?.toString("utf8");
   if (pem === undefined) {
     throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
   }

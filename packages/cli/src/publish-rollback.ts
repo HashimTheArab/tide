@@ -13,9 +13,9 @@ import {
 import type { Env, Writer } from "./keys.ts";
 import type { Draw, Plan, PublishOptions } from "./publish.ts";
 import { isKey } from "./bucket.ts";
+import { environment, expoJson } from "./export.ts";
 import { openWriter } from "./keys.ts";
 import { createdAtFloor } from "./pointer.ts";
-import { expoEnv, expoJson } from "./publish-export.ts";
 import { PublishError, recordKey } from "./publish-record.ts";
 import {
   commit,
@@ -132,7 +132,7 @@ async function run(
   return await execute(options, async () => {
     const { projectRoot, prepare } = parse(cwd);
     // The app config is project code, so it runs without TIDE_ variables or dotenv files.
-    const config = await expoJson(projectRoot, expoEnv(env), "expo", ["config", "--json"]);
+    const config = await expoJson(projectRoot, environment(env, []), ["config", "--json"], "expo");
     const writer = await openWriter(env, { projectRoot, config }, { now });
     const ready = await prepare(writer, now, draws(options));
     return () => commit(ready, options.out);

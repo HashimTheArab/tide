@@ -24,6 +24,7 @@ import {
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
+import { exportProject } from "../src/export.ts";
 import { launchUrl } from "../src/publish-record.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
@@ -153,6 +154,22 @@ export function project(options: { overrides?: object; cert?: string; root?: str
         .split("\n")
         .map((l) => JSON.parse(l) as { tool: string; args: string[]; env: Record<string, string> }),
   };
+}
+
+/** Runs `tide export` in process for the project at `root` into a new `<temp>/out`; returns the result and directory. */
+export async function exportIn(
+  root: string,
+  args: string[] = [],
+  environment: Record<string, string> = { PATH: process.env.PATH ?? "" },
+) {
+  const dir = join(tempRoot(), "out");
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await exportProject(["--project-root", root, "--out", dir, ...args], environment, {
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+  });
+  return { code, out, err, dir };
 }
 
 export const s3Env = () => ({

@@ -1,24 +1,20 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
   fstatSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { join, sep } from "node:path";
 
-import { sha256Base64Url } from "@tide/protocol";
+import type { JsonObject } from "@tide/protocol";
+import { replyKey, sha256Base64Url } from "@tide/protocol";
 
-import type { Env } from "./keys.ts";
 import type { Platform } from "./publish-record.ts";
-import { member } from "./keys.ts";
+import { isObject, member } from "./keys.ts";
 import { PublishError } from "./publish-record.ts";
 
 /** One exported file: its bytes and their SHA-256 as the manifest `hash`. */
@@ -38,7 +34,26 @@ export interface ExportedPlatform {
   readonly assets: readonly ExportedAsset[];
 }
 
-const STDOUT_LIMIT = 16 * 1024 * 1024;
+/** What `tide export` writes beside `dist/`: only what every manifest or shipped build already makes public. */
+export interface ProjectExport {
+  readonly certificate: string; // The PEM the builds embed.
+  readonly codeSigningMetadata: unknown; // The `{keyid, alg?}` the builds embed; checked by the writer.
+  readonly expoClient: JsonObject; // `expo config --type public`, served as `extra.expoClient`.
+  readonly platforms: Readonly<Partial<Record<Platform, { readonly runtimeVersion: string }>>>;
+}
+
+export const EXPORT_FILE = "tide-export.json";
+export const EXPORT_LIMIT = 16 * 1024 * 1024;
+const EXPORT_VERSION = 1;
+// Every field the file holds; the reader refuses any other.
+const EXPORT_FIELDS = {
+  version: true,
+  certificate: true,
+  codeSigningMetadata: true,
+  expoClient: true,
+  platforms: true,
+} as const satisfies Record<keyof ProjectExport | "version", true>;
+const CERTIFICATE_LIMIT = 64 * 1024;
 const METADATA_LIMIT = 16 * 1024 * 1024;
 // O_NOFOLLOW refuses a symlink as the last component; O_NONBLOCK keeps a FIFO from hanging the open.
 const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -48,120 +63,109 @@ const EXT = /^[A-Za-z0-9]{1,16}$/;
 const ASSET_PATH = /^assets\/([0-9a-f]{32})$/;
 const DOM_PATH = /^www\.bundle\/([0-9a-f]{32})\.([A-Za-z0-9]{1,16})$/;
 
-/**
- * Returns the environment for Expo's tools: the caller's without any `TIDE_` variable, no dotenv files, and the
- * production mode `expo export` forces, so config, runtime and bundle are evaluated alike.
- */
-export function expoEnv(env: Env): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (value !== undefined && !name.startsWith("TIDE_")) out[name] = value;
-  }
-  out.EXPO_NO_DOTENV = "1";
-  out.NODE_ENV = "production";
-  // As Expo's own setNodeEnv; the runtime resolver sets none, so it gets the same value explicitly.
-  out.BABEL_ENV =
-    env.BABEL_ENV === undefined || env.BABEL_ENV === "" ? "production" : env.BABEL_ENV;
-  return out;
+/** Returns the bytes of `tide-export.json` for `value`. */
+export function encodeProjectExport(value: ProjectExport): Uint8Array<ArrayBuffer> {
+  const { certificate, codeSigningMetadata, expoClient, platforms } = value;
+  const fields = {
+    version: EXPORT_VERSION,
+    certificate,
+    codeSigningMetadata,
+    expoClient,
+    platforms,
+  };
+  return new Uint8Array(new TextEncoder().encode(JSON.stringify(fields)));
 }
 
-/** Runs `tool` from the project's own dependencies and returns its stdout parsed as JSON. */
-export async function expoJson(
-  projectRoot: string,
-  env: Record<string, string>,
-  tool: "expo" | "expo-updates",
-  args: readonly string[],
-): Promise<unknown> {
-  const stdout = await runTool(projectRoot, env, tool, args, "pipe");
+/**
+ * Reads an export directory `tide export` wrote: `tide-export.json` and each platform's files under `dist/`. Nothing
+ * outside the directory is read; the directory must not change while it is read.
+ */
+export async function readProjectExport(dir: string) {
+  let root: string;
   try {
-    return JSON.parse(stdout);
+    root = realpathSync(dir);
   } catch {
-    throw new PublishError(`${tool} ${args[0] ?? ""} did not print JSON`);
+    throw new PublishError("the export directory is unreadable");
   }
-}
-
-/**
- * Returns each target with its platform's export, read from `exportDir`, or without one from `expo export` into a
- * temporary directory, removed afterwards. Export progress goes to stderr.
- */
-export async function exportFor<T extends { readonly platform: Platform }>(
-  projectRoot: string,
-  env: Record<string, string>,
-  exportDir: string | undefined,
-  targets: readonly T[],
-): Promise<(T & ExportedPlatform)[]> {
-  if (exportDir !== undefined) return await readExport(exportDir, targets);
-  const dir = mkdtempSync(join(tmpdir(), "tide-export-"));
+  let value: unknown;
   try {
-    const platforms = targets.flatMap((t) => ["--platform", t.platform]);
-    await runTool(
-      projectRoot,
-      env,
-      "expo",
-      ["export", "--output-dir", dir, ...platforms],
-      "stderr",
+    const bytes = readRegular(
+      containedPath(root, EXPORT_FILE, EXPORT_FILE),
+      EXPORT_LIMIT,
+      EXPORT_FILE,
     );
-    return await readExport(dir, targets);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (e) {
+    if (e instanceof PublishError) throw e;
+    throw new PublishError(`${EXPORT_FILE} is not UTF-8 JSON`);
   }
+  const { certificate, codeSigningMetadata, expoClient, platforms } = checkExport(value);
+  const targets = Object.entries(platforms).map(([platform, { runtimeVersion }]) => ({
+    platform: platform as Platform,
+    runtime: runtimeVersion,
+  }));
+  const dist = containedPath(root, "dist", "dist");
+  if (!statSync(dist).isDirectory()) throw new PublishError("export dist is not a directory");
+  const exported = (await readExport(dist, targets)).platforms;
+  return { certificate, codeSigningMetadata, expoClient, platforms: exported };
 }
 
-/** Returns the nearest `node_modules/.bin/<tool>` at or above the project root, as npm exec would. */
-function toolPath(projectRoot: string, tool: string): string {
-  for (let dir = projectRoot; ; dir = dirname(dir)) {
-    const path = join(dir, "node_modules", ".bin", tool);
-    if (statSync(path, { throwIfNoEntry: false })?.isFile() === true) return path;
-    if (dirname(dir) === dir) {
+/** Returns `value` as an export, refusing any field it should not hold. */
+function checkExport(value: unknown): ProjectExport {
+  if (!isObject(value) || !Object.keys(value).every((k) => Object.hasOwn(EXPORT_FIELDS, k))) {
+    throw new PublishError(
+      `${EXPORT_FILE} must hold only ${Object.keys(EXPORT_FIELDS).join(", ")}`,
+    );
+  }
+  if (value.version !== EXPORT_VERSION) {
+    throw new PublishError(`${EXPORT_FILE} version must be ${EXPORT_VERSION}`);
+  }
+  const { certificate, codeSigningMetadata, expoClient, platforms } = value;
+  if (
+    typeof certificate !== "string" ||
+    new TextEncoder().encode(certificate).length > CERTIFICATE_LIMIT
+  ) {
+    throw new PublishError(`${EXPORT_FILE} certificate must be a string of at most 64 KiB`);
+  }
+  if (!isObject(expoClient)) throw new PublishError(`${EXPORT_FILE} expoClient must be an object`);
+  const entries = isObject(platforms) ? Object.entries(platforms) : [];
+  if (entries.length === 0) {
+    throw new PublishError(`${EXPORT_FILE} platforms must name at least one platform`);
+  }
+  for (const [platform, entry] of entries) {
+    const runtime = member(entry, "runtimeVersion");
+    if (
+      (platform !== "ios" && platform !== "android") ||
+      !isObject(entry) ||
+      Object.keys(entry).length !== 1 ||
+      typeof runtime !== "string"
+    ) {
       throw new PublishError(
-        `${tool} is not installed in the project: add expo and expo-updates to its dependencies`,
+        `${EXPORT_FILE} platforms must map ios or android to only a string runtimeVersion`,
       );
     }
+    replyKey("main", runtime, platform);
   }
-}
-
-function runTool(
-  projectRoot: string,
-  env: Record<string, string>,
-  tool: string,
-  args: readonly string[],
-  stdout: "pipe" | "stderr",
-): Promise<string> {
-  const command = `${tool} ${args[0] ?? ""}`;
-  const child = spawn(toolPath(projectRoot, tool), args, {
-    cwd: projectRoot,
-    env,
-    shell: false,
-    stdio: ["ignore", stdout === "pipe" ? "pipe" : process.stderr, "inherit"],
-  });
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    child.stdout?.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > STDOUT_LIMIT) child.kill("SIGKILL");
-      else chunks.push(chunk);
-    });
-    child.once("error", () => {
-      reject(new PublishError(`${command} could not be started`));
-    });
-    child.once("close", (code) => {
-      if (size > STDOUT_LIMIT) reject(new PublishError(`${command} printed over 16 MiB`));
-      else if (code !== 0) reject(new PublishError(`${command} failed with exit code ${code}`));
-      else resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-  });
+  return {
+    certificate,
+    codeSigningMetadata,
+    expoClient: expoClient as JsonObject,
+    platforms: platforms as ProjectExport["platforms"],
+  };
 }
 
 /**
- * Reads a production `expo export` of each target's platform from `dir`. Every file must resolve inside the directory
- * and be a regular file, and every asset must hash to the key in its path. The directory must not change while it is
- * read.
+ * Reads a production `expo export` of each target's platform from `dir`, returning each target's export and every file
+ * read, by its path in `metadata.json`. Every file must resolve inside the directory and be a regular file, and every
+ * asset must hash to the key in its path. The directory must not change while it is read.
  */
-async function readExport<T extends { readonly platform: Platform }>(
+export async function readExport<T extends { readonly platform: Platform }>(
   dir: string,
   targets: readonly T[],
-): Promise<(T & ExportedPlatform)[]> {
+): Promise<{
+  platforms: (T & ExportedPlatform)[];
+  files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
+}> {
   let root: string;
   try {
     root = realpathSync(dir);
@@ -169,6 +173,7 @@ async function readExport<T extends { readonly platform: Platform }>(
     throw new PublishError("the export directory is unreadable");
   }
   const cache = new Map<string, ExportedFile>();
+  const files = new Map<string, Uint8Array<ArrayBuffer>>();
   const file = async (path: unknown, field: string): Promise<ExportedFile> => {
     const real = containedPath(root, path, field);
     let found = cache.get(real);
@@ -177,6 +182,7 @@ async function readExport<T extends { readonly platform: Platform }>(
       found = { bytes, hash: await sha256Base64Url(bytes) };
       cache.set(real, found);
     }
+    files.set(path as string, found.bytes);
     return found;
   };
 
@@ -187,6 +193,7 @@ async function readExport<T extends { readonly platform: Platform }>(
       METADATA_LIMIT,
       "export metadata.json",
     );
+    files.set("metadata.json", bytes);
     metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (e) {
     if (e instanceof PublishError) throw e;
@@ -237,7 +244,7 @@ async function readExport<T extends { readonly platform: Platform }>(
     }
     result.push({ ...target, bundle, assets: [...assets.values()] });
   }
-  return result;
+  return { platforms: result, files };
 }
 
 /** Returns the real path of `path` under `root`, refusing any form or symlink that leaves it. */

@@ -426,7 +426,7 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   }),
   "a missing keyid": () => ({
     metadata: { alg: "rsa-v1_5-sha256" },
-    message: "app config has no updates.codeSigningMetadata.keyid",
+    message: "app config updates.codeSigningMetadata.keyid is missing",
   }),
   "an unprintable keyid": () => ({
     metadata: { keyid: "ma\u00efn" },

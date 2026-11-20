@@ -4,22 +4,13 @@ import { expect, test } from "vitest";
 
 import type { Objects } from "./publish-fixture.ts";
 import { publish } from "../src/publish.ts";
-import { prng } from "./helpers.ts";
-import { T, env, project, s3, s3Env, useFixture } from "./publish-fixture.ts";
+import { seeded, tempRoot } from "./helpers.ts";
+import { T, env, exportIn, project, s3, s3Env, tree, useFixture } from "./publish-fixture.ts";
 
 useFixture();
 
 // Each object's SHA-256: secret scanners read a release record's asset key and hash as an API key, even encoded.
 const GOLDEN = new URL("fixtures/published.json", import.meta.url);
-
-/** Fills each array from a fixed sequence, so update IDs and boundaries repeat across runs. */
-function seeded(seed: number): (bytes: Uint8Array<ArrayBuffer>) => Uint8Array {
-  const next = prng(seed);
-  return (bytes) => {
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(next() * 256);
-    return bytes;
-  };
-}
 
 /** Every object as latin1 text, each signature's base64 replaced by as many `A`s: keys are generated per run. */
 function normalised(objects: Objects): Map<string, string> {
@@ -51,20 +42,42 @@ function digests(objects: Map<string, string>): Record<string, string> {
 /** The golden digests, by key. */
 const golden = () => JSON.parse(readFileSync(GOLDEN, "utf8")) as Record<string, string>;
 
-test("a publish at a fixed time and seed stores the golden objects, signatures aside", async () => {
-  s3.setNow(T);
+/** Publishes to `store` at `now` with seed 1, failing the test unless it exits 0. */
+async function publishAt(args: string[], store: Record<string, string>, now: number) {
   const err: string[] = [];
-  const code = await publish(
-    ["--channel", "main", "--project-root", project().root],
-    env(s3Env()),
-    {
-      out: () => undefined,
-      err: (l) => err.push(l),
-      now: () => T,
-      random: seeded(1),
-    },
-  );
+  const code = await publish(["--channel", "main", ...args], env(store), {
+    out: () => undefined,
+    err: (l) => err.push(l),
+    now: () => now,
+    random: seeded(1),
+  });
   expect(err).toEqual([]);
   expect(code).toBe(0);
+}
+
+test("a publish at a fixed time and seed stores the golden objects, signatures aside", async () => {
+  s3.setNow(T);
+  await publishAt(["--project-root", project().root], s3Env(), T);
   expect(digests(normalised(s3.objects))).toEqual(golden());
+});
+
+test("export then publish --from stores the direct publish's bytes, on disk and on S3", async () => {
+  const app = project();
+  const exported = await exportIn(app.root);
+  expect(exported.code).toBe(0);
+  // The disk bucket's time is the local clock, so both runs share one whole-second sample of it.
+  const t = Math.floor(Date.now() / 1000) * 1000;
+  const run = async (args: string[]) => {
+    const disk = tempRoot();
+    await publishAt(args, { TIDE_DISK_DIR: disk }, t);
+    s3.reset();
+    s3.setNow(t);
+    await publishAt(args, s3Env(), t);
+    return { disk: tree(disk), s3: new Map(s3.objects) };
+  };
+  const direct = await run(["--project-root", app.root]);
+  const from = await run(["--from", exported.dir]);
+  expect(from.disk).toEqual(direct.disk);
+  expect(from.s3).toEqual(direct.s3);
+  expect(from.s3.size).toBe(12);
 });

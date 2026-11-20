@@ -1,4 +1,6 @@
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import type { JsonObject } from "@tide/protocol";
@@ -25,9 +27,10 @@ import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
+import { environment, expoJson, runTool } from "./export.ts";
 import { KeyError, isObject, member, openWriter } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
-import { expoEnv, expoJson, exportFor } from "./publish-export.ts";
+import { readExport, readProjectExport } from "./publish-export.ts";
 import { preparePatches, uploadPatches } from "./publish-patch.ts";
 import {
   BASE_PREFIX,
@@ -84,7 +87,7 @@ export type WriteStep = () => Promise<void>;
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
 
 export const PUBLISH_USAGE =
-  "usage: tide publish --channel <name> [--platform ios|android]... [--runtime-version <version>] [--export-dir <dir>] [--project-root <dir>]";
+  "usage: tide publish --channel <name> [--platform ios|android]... [--runtime-version <version>] [--export-dir <dir>] [--project-root <dir>] | --from <dir>";
 const MAX_SKEW_MS = 60_000;
 
 /**
@@ -126,7 +129,7 @@ export async function execute(
 }
 
 /** Prints a write command's own error and returns `code`; anything else is a bug and is rethrown. */
-function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
+export function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
   if (
     !(
       e instanceof PublishError ||
@@ -147,46 +150,71 @@ async function prepare(
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
   draw: Draw,
 ) {
-  const { channel, platforms, runtimeVersion, exportDir, projectRoot } = parse(args, cwd);
+  const { channel, platforms, runtimeVersion, exportDir, projectRoot, from } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
 
-  const toolEnv = expoEnv(env);
-  const config = await expoJson(projectRoot, toolEnv, "expo", ["config", "--json"]);
-  const expoClient = await expoJson(projectRoot, toolEnv, "expo", [
-    "config",
-    "--type",
-    "public",
-    "--json",
-  ]);
-  if (!isObject(expoClient)) {
-    throw new PublishError("expo config --type public did not print an object");
-  }
-  const pointers = [];
-  for (const platform of platforms) {
-    const runtime =
-      runtimeVersion ??
-      member(
-        await expoJson(projectRoot, toolEnv, "expo-updates", [
-          "runtimeversion:resolve",
-          "--platform",
-          platform,
-        ]),
-        "runtimeVersion",
-      );
-    if (runtime === null || runtime === undefined) {
-      throw new PublishError(
-        `no ${platform} runtime version: set runtimeVersion or pass --runtime-version`,
-      );
+  let writer: Writer;
+  let expoClient: unknown;
+  let exported;
+  if (from !== undefined) {
+    const artifact = await readProjectExport(from);
+    expoClient = artifact.expoClient;
+    writer = await openWriter(env, artifact, { now });
+    exported = artifact.platforms.map((p) => ({
+      ...p,
+      key: replyKey(channel, p.runtime, p.platform),
+    }));
+  } else {
+    const toolEnv = environment(env, []);
+    const config = await expoJson(projectRoot, toolEnv, ["config", "--json"], "expo");
+    expoClient = await expoJson(
+      projectRoot,
+      toolEnv,
+      ["config", "--type", "public", "--json"],
+      "expo",
+    );
+    if (!isObject(expoClient)) {
+      throw new PublishError("expo config --type public did not print an object");
     }
-    if (typeof runtime !== "string") {
-      throw new PublishError(`the ${platform} runtime version is not a string`);
+    const pointers = [];
+    for (const platform of platforms) {
+      const runtime =
+        runtimeVersion ??
+        member(
+          await expoJson(
+            projectRoot,
+            toolEnv,
+            ["runtimeversion:resolve", "--platform", platform],
+            "expo-updates",
+          ),
+          "runtimeVersion",
+        );
+      if (runtime === null || runtime === undefined) {
+        throw new PublishError(
+          `no ${platform} runtime version: set runtimeVersion or pass --runtime-version`,
+        );
+      }
+      if (typeof runtime !== "string") {
+        throw new PublishError(`the ${platform} runtime version is not a string`);
+      }
+      pointers.push({ platform, runtime, key: replyKey(channel, runtime, platform) });
     }
-    pointers.push({ platform, runtime, key: replyKey(channel, runtime, platform) });
-  }
 
-  const writer = await openWriter(env, { projectRoot, config }, { now });
-  const exported = await exportFor(projectRoot, toolEnv, exportDir, pointers);
+    writer = await openWriter(env, { projectRoot, config }, { now });
+    if (exportDir !== undefined) exported = (await readExport(exportDir, pointers)).platforms;
+    else {
+      const dir = mkdtempSync(join(tmpdir(), "tide-export-"));
+      try {
+        const selected = pointers.flatMap((t) => ["--platform", t.platform]);
+        await runTool(projectRoot, toolEnv, "expo", ["export", "--output-dir", dir, ...selected]);
+        exported = (await readExport(dir, pointers)).platforms;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+  const pointers = exported;
 
   const { keys, bases } = await recordedKeys(writer.bucket, { targets: pointers });
   for (const { platform, assets } of exported) {
@@ -309,6 +337,7 @@ function parse(args: readonly string[], cwd: string) {
         "runtime-version": { type: "string" },
         "export-dir": { type: "string" },
         "project-root": { type: "string" },
+        from: { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -316,6 +345,7 @@ function parse(args: readonly string[], cwd: string) {
   } catch {
     throw new PublishError(`unrecognised arguments; ${PUBLISH_USAGE}`);
   }
+  const { from } = values;
   const { channel } = values;
   if (channel === undefined) throw new PublishError(`--channel is required; ${PUBLISH_USAGE}`);
   replyKey(channel, "1", "ios"); // Refuses a bad channel before Expo runs.
@@ -326,6 +356,7 @@ function parse(args: readonly string[], cwd: string) {
     runtimeVersion: values["runtime-version"],
     exportDir: exportDir === undefined ? undefined : resolve(cwd, exportDir),
     projectRoot: resolve(cwd, values["project-root"] ?? "."),
+    from: from === undefined ? undefined : resolve(cwd, from),
   };
 }
 
