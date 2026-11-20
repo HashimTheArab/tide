@@ -4,11 +4,14 @@ import {
   closeSync,
   constants,
   fstatSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 
 import { sha256Base64Url } from "@tide/protocol";
@@ -77,20 +80,31 @@ export async function expoJson(
   }
 }
 
-/** Runs `expo export` for `platforms` into `outputDir`; its progress output goes to stderr. */
-export async function expoExport(
+/**
+ * Returns each target with its platform's export, read from `exportDir`, or without one from `expo export` into a
+ * temporary directory, removed afterwards. Export progress goes to stderr.
+ */
+export async function exportFor<T extends { readonly platform: Platform }>(
   projectRoot: string,
   env: Record<string, string>,
-  outputDir: string,
-  platforms: readonly Platform[],
-): Promise<void> {
-  const args = [
-    "export",
-    "--output-dir",
-    outputDir,
-    ...platforms.flatMap((p) => ["--platform", p]),
-  ];
-  await runTool(projectRoot, env, "expo", args, "stderr");
+  exportDir: string | undefined,
+  targets: readonly T[],
+): Promise<(T & ExportedPlatform)[]> {
+  if (exportDir !== undefined) return await readExport(exportDir, targets);
+  const dir = mkdtempSync(join(tmpdir(), "tide-export-"));
+  try {
+    const platforms = targets.flatMap((t) => ["--platform", t.platform]);
+    await runTool(
+      projectRoot,
+      env,
+      "expo",
+      ["export", "--output-dir", dir, ...platforms],
+      "stderr",
+    );
+    return await readExport(dir, targets);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Returns the nearest `node_modules/.bin/<tool>` at or above the project root, as npm exec would. */
@@ -140,13 +154,14 @@ function runTool(
 }
 
 /**
- * Reads a production `expo export` of `platforms` from `dir`. Every file must resolve inside the directory and be a
- * regular file, and every asset must hash to the key in its path. The directory must not change while it is read.
+ * Reads a production `expo export` of each target's platform from `dir`. Every file must resolve inside the directory
+ * and be a regular file, and every asset must hash to the key in its path. The directory must not change while it is
+ * read.
  */
-export async function readExport(
+async function readExport<T extends { readonly platform: Platform }>(
   dir: string,
-  platforms: readonly Platform[],
-): Promise<Map<Platform, ExportedPlatform>> {
+  targets: readonly T[],
+): Promise<(T & ExportedPlatform)[]> {
   let root: string;
   try {
     root = realpathSync(dir);
@@ -180,8 +195,9 @@ export async function readExport(
   if (member(metadata, "version") !== 0 || member(metadata, "bundler") !== "metro") {
     throw new PublishError("export metadata.json is not version 0 from metro");
   }
-  const result = new Map<Platform, ExportedPlatform>();
-  for (const platform of platforms) {
+  const result: (T & ExportedPlatform)[] = [];
+  for (const target of targets) {
+    const { platform } = target;
     const at = `metadata.json fileMetadata.${platform}`;
     const entry = member(member(metadata, "fileMetadata"), platform);
     const list = member(entry, "assets");
@@ -216,7 +232,7 @@ export async function readExport(
         throw new PublishError(`export ${name} lists key ${key} with two extensions`);
       }
     }
-    result.set(platform, { bundle, assets: [...assets.values()] });
+    result.push({ ...target, bundle, assets: [...assets.values()] });
   }
   return result;
 }

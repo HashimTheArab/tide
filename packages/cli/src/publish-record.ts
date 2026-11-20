@@ -1,6 +1,8 @@
 import type { JsonObject } from "@tide/protocol";
 import { MAX_REPLY_BYTES, ProtocolError, assetHash, contentKey, replyKey } from "@tide/protocol";
 
+import { isKey } from "./bucket.ts";
+import { isObject } from "./keys.ts";
 import { isTime } from "./status.ts";
 
 /** A write command's refusal or failure. Its message names keys, variables and rules, never stored data. */
@@ -35,7 +37,6 @@ interface RecordedAsset {
 
 export const RECORD_PREFIX = "updates/";
 const VERSION = 1;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KEY = /^[A-Za-z0-9_-]{1,64}$/;
 const FILE_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/;
 const LOOPBACK = /^(?:127(?:\.\d{1,3}){3}|\[::1\])$/;
@@ -77,7 +78,7 @@ export function urlBase(value: string): string | undefined {
 export function encodeRecord(record: ReleaseRecord): Uint8Array<ArrayBuffer> {
   const r = record;
   const fail = (field: string, rule: string) => new ProtocolError(`record.${field}`, rule);
-  if (typeof r.updateId !== "string" || !UUID.test(r.updateId)) {
+  if (typeof r.updateId !== "string" || !isKey(recordKey(r.updateId))) {
     throw fail("updateId", "must be a lowercase UUID");
   }
   replyKey(r.channel, r.runtimeVersion, r.platform);
@@ -143,26 +144,4 @@ export function decodeRecord(bytes: Uint8Array): ReleaseRecord {
     throw new ProtocolError("record", "is not in the form tide writes");
   }
   return record;
-}
-
-/**
- * Maps each asset key, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 it
- * names. A key seen with another hash is refused, whichever source came first.
- */
-export class KeyIdentity {
-  readonly #hashes = new Map<string, { readonly hash: string; readonly source: string }>();
-
-  add(key: string, hash: string, source: string): void {
-    const seen = this.#hashes.get(key.toLowerCase());
-    if (seen === undefined) this.#hashes.set(key.toLowerCase(), { hash, source });
-    else if (seen.hash !== hash) {
-      throw new PublishError(
-        `asset key ${key} names different bytes in ${seen.source} and ${source}: a key must never change its bytes`,
-      );
-    }
-  }
-}
-
-function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

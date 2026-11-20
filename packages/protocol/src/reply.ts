@@ -39,7 +39,7 @@ const RECORD_FIELDS: Record<Kind, readonly string[]> = {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Content-addressed objects and release records; lowercase, so they are safe on case-insensitive disks.
 const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
-const RECORD_KEY = /^updates\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const RECORD_KEY = new RegExp(`^updates/${UUID.source.slice(1, -1)}\\.json$`);
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
 // Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.
 const NAME = /^[A-Za-z0-9._+():-]{1,64}$/;

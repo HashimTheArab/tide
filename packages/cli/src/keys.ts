@@ -265,10 +265,10 @@ export function read(env: Env, name: string): string | undefined {
 
 /** Returns the own field `name` of a plain object, or undefined. */
 export function member(value: unknown, name: string): unknown {
-  return typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.hasOwn(value, name)
-    ? (value as Record<string, unknown>)[name]
-    : undefined;
+  return isObject(value) && Object.hasOwn(value, name) ? value[name] : undefined;
+}
+
+/** True for a JSON object: not null and not an array. */
+export function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

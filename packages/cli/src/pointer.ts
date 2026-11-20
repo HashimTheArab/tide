@@ -1,7 +1,6 @@
-import { MAX_REPLY_BYTES, NO_UPDATE_KEY } from "@tide/protocol";
+import { MAX_REPLY_BYTES } from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
-import type { Writer } from "./keys.ts";
 import { BucketError } from "./bucket.ts";
 import { PublishError } from "./publish-record.ts";
 import { checkRecord } from "./status.ts";
@@ -52,16 +51,5 @@ export async function writePointer(
     throw new PublishError(
       `${key} was changed by another writer since it was read; it keeps theirs`,
     );
-  }
-}
-
-/** Creates `reply/no-update` from `bytes`, or accepts one another writer created under this identity. */
-export async function ensureNoUpdate(
-  writer: Writer,
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<void> {
-  if ((await writer.bucket.putIfAbsent(NO_UPDATE_KEY, bytes)) !== undefined) return;
-  if (!(await writer.checkNoUpdate())) {
-    throw new PublishError(`${NO_UPDATE_KEY} was removed by another writer during the publish`);
   }
 }

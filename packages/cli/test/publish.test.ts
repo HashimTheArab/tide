@@ -582,7 +582,7 @@ describe("publish to disk", () => {
       [
         "a runtime version outside the key grammar",
         { runtimeVersion: "1.0/2" },
-        "the ios runtime version must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :",
+        "runtimeVersion must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
       ],
     ])("%s is refused with nothing written", async (_, overrides, message) => {
       const root = tempRoot();
@@ -619,6 +619,20 @@ describe("publish to disk", () => {
         code: 2,
         out: [],
         err: [`tide: ${message}`],
+      });
+      expect(readdirSync(app.root)).not.toContain("fake-expo.log");
+      expect(tree(root)).toEqual(new Map());
+    });
+
+    test("a channel outside the key grammar is refused before Expo runs", async () => {
+      const root = tempRoot();
+      const app = project();
+      expect(await publishIn(app.root, env({ TIDE_DISK_DIR: root }), ["--channel", ".."])).toEqual({
+        code: 2,
+        out: [],
+        err: [
+          "tide: channel must be 1 to 64 of A-Z, a-z, 0-9, ., _, +, -, (, ) and :, and not . or ..",
+        ],
       });
       expect(readdirSync(app.root)).not.toContain("fake-expo.log");
       expect(tree(root)).toEqual(new Map());
