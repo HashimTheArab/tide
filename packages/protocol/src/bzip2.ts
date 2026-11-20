@@ -20,6 +20,11 @@ const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, i) => {
   return c >>> 0;
 });
 
+/** Returns the running bzip2 CRC after `byte`; a block's CRC starts at 0xffffffff and ends inverted. */
+export function bzip2CrcStep(crc: number, byte: number): number {
+  return ((crc << 8) ^ (CRC_TABLE[((crc >>> 24) ^ byte) & 0xff] ?? 0)) >>> 0;
+}
+
 /**
  * Returns a reader over the single bzip2 stream that fills `input` exactly. Every malformed, truncated or
  * CRC-failing stream, and any decoded byte past `limit`, is a ProtocolError on `field`.
@@ -278,7 +283,7 @@ export function bunzip2(input: Uint8Array, field: string, limit: number): Bunzip
       }
       if (produced === limit) fail(`decodes to more than ${limit} bytes`);
       produced++;
-      crc = ((crc << 8) ^ (CRC_TABLE[((crc >>> 24) ^ byte) & 0xff] ?? 0)) >>> 0;
+      crc = bzip2CrcStep(crc, byte);
       into[n++] = byte;
     }
     return n;
