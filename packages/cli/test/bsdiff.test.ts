@@ -10,12 +10,6 @@ import { MAX_BSDIFF_INPUT, diffBlocks, makeBsdiff } from "../src/bsdiff.ts";
 import { bundleVersions, serialiseBundle } from "./bundle-fixture.ts";
 import { fixture, prng } from "./helpers.ts";
 
-declare module "vitest" {
-  export interface ProvidedContext {
-    fcSeed: number;
-  }
-}
-
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const EMPTY = new Uint8Array();
 

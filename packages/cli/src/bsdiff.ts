@@ -37,14 +37,6 @@ export const MAX_BSDIFF_INPUT = 64 * 1024 * 1024;
 const WORK_PER_BYTE = 32;
 const WORK_FLOOR = 2 ** 24;
 
-/** Uncompressed BSDIFF40 blocks. `exhausted` is set when matching hit its work budget and stopped early. */
-export interface DiffBlocks {
-  readonly ctrl: Uint8Array<ArrayBuffer>;
-  readonly diff: Uint8Array<ArrayBuffer>;
-  readonly extra: Uint8Array<ArrayBuffer>;
-  readonly exhausted: boolean;
-}
-
 /**
  * Returns a BSDIFF40 patch from `base` to `target`, which depends only on the input bytes. Throws a RangeError when
  * either is over `MAX_BSDIFF_INPUT`, and an Error if protocol `applyBsdiff` does not turn the patch back into `target`.
@@ -75,8 +67,11 @@ export function makeBsdiff(base: Uint8Array, target: Uint8Array): Uint8Array<Arr
   return patch;
 }
 
-/** Returns bsdiff 4.3's ctrl, diff and extra blocks, until matching uses up its work budget. */
-export function diffBlocks(base: Uint8Array, target: Uint8Array): DiffBlocks {
+/**
+ * Returns bsdiff 4.3's uncompressed ctrl, diff and extra blocks; `exhausted` is set when matching hit its work budget
+ * and wrote the rest of the target as extra bytes.
+ */
+export function diffBlocks(base: Uint8Array, target: Uint8Array) {
   if (base.length > MAX_BSDIFF_INPUT || target.length > MAX_BSDIFF_INPUT) {
     throw new RangeError(`makeBsdiff takes inputs of at most ${MAX_BSDIFF_INPUT} bytes`);
   }
@@ -118,7 +113,7 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array): DiffBlocks {
     return x > y ? x : y;
   };
 
-  const ctrl = growable(24 * 64);
+  const ctrl: number[] = []; // Triples of add length, copy length and seek.
   const db = new Uint8Array(newsize);
   const eb = new Uint8Array(newsize);
   let dblen = 0;
@@ -128,7 +123,6 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array): DiffBlocks {
   let lastscan = 0;
   let lastpos = 0;
   let lastoffset = 0;
-  const at = (i: number) => base[i] ?? -1;
   while (scan < newsize) {
     let oldscore = 0;
     for (let scsc = (scan += len); scan < newsize; scan++) {
@@ -137,9 +131,9 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array): DiffBlocks {
         scan = newsize;
         break;
       }
-      for (; scsc < scan + len; scsc++) if (at(scsc + lastoffset) === target[scsc]) oldscore++;
+      for (; scsc < scan + len; scsc++) if (base[scsc + lastoffset] === target[scsc]) oldscore++;
       if ((len === oldscore && len !== 0) || len > oldscore + 8) break;
-      if (at(scan + lastoffset) === target[scan]) oldscore--;
+      if (base[scan + lastoffset] === target[scan]) oldscore--;
     }
 
     if (len !== oldscore || scan === newsize) {
@@ -195,19 +189,17 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array): DiffBlocks {
       dblen += lenf;
       eblen += copy;
 
-      ctrl.reserve(24);
-      offtout(lenf, ctrl.bytes, ctrl.length);
-      offtout(copy, ctrl.bytes, ctrl.length + 8);
-      offtout(pos - lenb - (lastpos + lenf), ctrl.bytes, ctrl.length + 16);
-      ctrl.length += 24;
+      ctrl.push(lenf, copy, pos - lenb - (lastpos + lenf));
 
       lastscan = scan - lenb;
       lastpos = pos - lenb;
       lastoffset = pos - scan;
     }
   }
+  const ctrlBytes = new Uint8Array(8 * ctrl.length);
+  ctrl.forEach((x, i) => offtout(x, ctrlBytes, 8 * i));
   return {
-    ctrl: ctrl.bytes.slice(0, ctrl.length),
+    ctrl: ctrlBytes,
     diff: db.slice(0, dblen),
     extra: eb.slice(0, eblen),
     exhausted: spent(),
@@ -222,18 +214,4 @@ function offtout(x: number, into: Uint8Array, at: number): void {
     y = Math.floor(y / 256);
   }
   if (x < 0) into[at + 7] = (into[at + 7] ?? 0) | 0x80;
-}
-
-function growable(initial: number) {
-  const g = {
-    bytes: new Uint8Array(initial),
-    length: 0,
-    reserve(n: number) {
-      if (g.length + n <= g.bytes.length) return;
-      const grown = new Uint8Array(Math.max(g.bytes.length * 2, g.length + n));
-      grown.set(g.bytes);
-      g.bytes = grown;
-    },
-  };
-  return g;
 }

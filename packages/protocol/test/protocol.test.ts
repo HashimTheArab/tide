@@ -74,7 +74,6 @@ import {
 
 declare module "vitest" {
   export interface ProvidedContext {
-    fcSeed: number;
     fixtures: Record<string, number[]>; // Every file in test/fixtures, as bytes.
   }
 }

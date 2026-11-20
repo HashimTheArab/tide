@@ -1,3 +1,9 @@
+declare module "vitest" {
+  export interface ProvidedContext {
+    fcSeed: number;
+  }
+}
+
 /** The gate's fast-check seed. */
 const DEFAULT_SEED = 20261119;
 

@@ -1,14 +1,10 @@
+import { bzip2CrcStep } from "@tide/protocol";
+
 /** libbzip2's `nblockMAX` at level 9: the most RLE1 bytes one block holds. */
 const BLOCK_MAX = 900_000 - 19;
 const MAX_RUN = 255; // libbzip2's longest RLE1 run.
 const MAX_CODE_LEN = 17; // libbzip2's encoder limit; decoders accept 20.
 const GROUP_SIZE = 50;
-
-const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, i) => {
-  let c = i << 24;
-  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1;
-  return c >>> 0;
-});
 
 /** Returns `input` as one level-9 bzip2 stream; an empty input gives a stream with no blocks. */
 export function bzip2(input: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -38,9 +34,7 @@ export function bzip2(input: Uint8Array): Uint8Array<ArrayBuffer> {
       at += run;
     }
     let crc = 0xffffffff;
-    for (let i = start; i < at; i++) {
-      crc = ((crc << 8) ^ (CRC_TABLE[((crc >>> 24) ^ (input[i] ?? 0)) & 0xff] ?? 0)) >>> 0;
-    }
+    for (let i = start; i < at; i++) crc = bzip2CrcStep(crc, input[i] ?? 0);
     crc = ~crc >>> 0;
     writeBlock(w, block.subarray(0, n), crc);
     combined = (((combined << 1) | (combined >>> 31)) ^ crc) >>> 0;
