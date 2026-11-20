@@ -1,4 +1,4 @@
-export { ProtocolError, assetHash, contentKey, sha256Base64Url } from "./hash.ts";
+export { ProtocolError, assetHash, contentKey, decodeBase64, sha256Base64Url } from "./hash.ts";
 export type { Asset, JsonObject, JsonValue, LaunchAsset, ManifestInput } from "./manifest.ts";
 export {
   assetContentType,
@@ -36,9 +36,10 @@ export {
   textOf,
 } from "./s3.ts";
 export { encodeSfvDictionary } from "./sfv.ts";
-export type { Signer } from "./signature.ts";
+export type { CodeSigningCertificate, Signer } from "./signature.ts";
 export {
   certificatePublicKey,
+  codeSigningCertificate,
   cryptoKeySigner,
   expoSignature,
   parseExpoSignature,

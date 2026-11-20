@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
 import type { ManifestInput, Part, PartName, Signer, StoredReply } from "../src/index.ts";
+import type { CertificateOptions } from "./fixtures.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   MAX_FILTERS_BYTES,
@@ -14,6 +15,7 @@ import {
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
   certificatePublicKey,
+  codeSigningCertificate,
   contentKey,
   cryptoKeySigner,
   S3Error,
@@ -40,8 +42,10 @@ import {
 import { EMPTY_SHA256 } from "../src/s3.ts";
 import { parseSfvDictionary } from "../src/sfv.ts";
 import {
+  ALGORITHM,
   BOUNDARY,
   EXPO_GOLDEN,
+  EXTENSION,
   RSA_SHA256,
   TIDE_GOLDEN,
   TIDE_REPLY_GOLDEN,
@@ -1022,6 +1026,130 @@ describe("certificate", () => {
     const ec = await ecKeys();
     const pemText = await certificate(ec.publicKey, (await mainKeys()).privateKey, new Date());
     await rejects(() => certificatePublicKey(pemText), "certificate", "RSA public key");
+  });
+});
+
+const smallKeys = once(() =>
+  crypto.subtle.generateKey({ ...RSA_SHA256, modulusLength: 1024 }, true, ["sign", "verify"]),
+);
+const DAY = 86_400_000;
+
+describe("codeSigningCertificate", () => {
+  test("the committed certificate.pem passes, fingerprinted by the SHA-256 of its DER", async () => {
+    const pemText = text(fixture("certificate.pem"));
+    const { key, sha256 } = await codeSigningCertificate(pemText, new Date());
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", derOf(pemText)));
+    expect(sha256).toBe(hex(digest));
+    const body = fixture("manifest.json");
+    const [part] = parseMultipart(fixture("manifest.multipart"), B);
+    await expect(verifyExpoSignature(body, part!.signature!, key, "main")).resolves.toBeUndefined();
+  });
+
+  test.each<[string, CertificateOptions]>([
+    ["a GeneralizedTime notAfter from 2050", { notAfter: new Date("2051-01-01T00:00:00Z") }],
+    [
+      "an algorithm identifier without parameters",
+      {
+        outerAlgorithm: ALGORITHM.sha256WithRsaNoParameters,
+        innerAlgorithm: ALGORITHM.sha256WithRsaNoParameters,
+      },
+    ],
+  ])("a certificate with %s passes", async (_, options) => {
+    const keys = await mainKeys();
+    const pemText = await certificate(keys.publicKey, keys.privateKey, new Date(), options);
+    const { sha256 } = await codeSigningCertificate(pemText, new Date());
+    expect(sha256).toBe(hex(new Uint8Array(await crypto.subtle.digest("SHA-256", derOf(pemText)))));
+  });
+
+  const now = new Date();
+  test.each<[string, CertificateOptions, string]>([
+    ["one not valid yet", { notBefore: new Date(now.getTime() + DAY) }, "is not valid yet"],
+    [
+      "an expired one",
+      { notBefore: new Date(now.getTime() - 2 * DAY), notAfter: new Date(now.getTime() - DAY) },
+      "has expired",
+    ],
+    ["no Key Usage", { extensions: [EXTENSION.codeSigning] }, "Key Usage digitalSignature"],
+    [
+      "Key Usage without digitalSignature",
+      { extensions: [EXTENSION.keyCertSignOnly, EXTENSION.codeSigning] },
+      "Key Usage digitalSignature",
+    ],
+    [
+      "no Extended Key Usage",
+      { extensions: [EXTENSION.digitalSignature] },
+      "Extended Key Usage codeSigning",
+    ],
+    [
+      "Extended Key Usage without codeSigning",
+      { extensions: [EXTENSION.digitalSignature, EXTENSION.serverAuthOnly] },
+      "Extended Key Usage codeSigning",
+    ],
+    [
+      "Expo project information",
+      {
+        extensions: [
+          EXTENSION.digitalSignature,
+          EXTENSION.codeSigning,
+          EXTENSION.projectInformation,
+        ],
+      },
+      "must not carry Expo project information",
+    ],
+    // OpenSSL rejects this; Web Crypto alone would accept it.
+    [
+      "Key Usage twice",
+      {
+        extensions: [EXTENSION.digitalSignature, EXTENSION.digitalSignature, EXTENSION.codeSigning],
+      },
+      "repeats an extension",
+    ],
+    ["another issuer name", { issuer: "Other CA" }, "must be self-issued"],
+    [
+      "an unsupported signature algorithm",
+      { outerAlgorithm: ALGORITHM.sha384WithRsa, innerAlgorithm: ALGORITHM.sha384WithRsa },
+      "must be signed with sha256WithRSAEncryption",
+    ],
+    // Web Crypto verifies the TBS under the outer SHA-256 while Node rejects the certificate.
+    [
+      "an inner SHA-384 identifier under an outer SHA-256 one",
+      { innerAlgorithm: ALGORITHM.sha384WithRsa },
+      "must name the same signature algorithm",
+    ],
+    ["version 1", { v1: true }, "must be X.509 v3"],
+  ])("rejects %s", async (_, options, message) => {
+    const keys = await mainKeys();
+    const pemText = await certificate(keys.publicKey, keys.privateKey, now, options);
+    await rejects(() => codeSigningCertificate(pemText, now), "certificate", message);
+  });
+
+  test("rejects a self-signature made by another key", async () => {
+    const [keys, other] = [await mainKeys(), await otherKeys()];
+    const pemText = await certificate(keys.publicKey, other.privateKey, now);
+    await rejects(
+      () => codeSigningCertificate(pemText, now),
+      "certificate",
+      "self-signature that does not verify",
+    );
+  });
+
+  test("rejects a 1024-bit key", async () => {
+    const small = await smallKeys();
+    const pemText = await certificate(small.publicKey, small.privateKey, now);
+    await rejects(() => codeSigningCertificate(pemText, now), "certificate", "2048 to 4096 bits");
+  });
+
+  test("rejects an EC key", async () => {
+    const [ec, keys] = [await ecKeys(), await mainKeys()];
+    const pemText = await certificate(ec.publicKey, keys.privateKey, now);
+    await rejects(() => codeSigningCertificate(pemText, now), "certificate", "RSA public key");
+  });
+
+  test("rejects two certificates and text around one", async () => {
+    const pemText = await mainCertificate();
+    for (const bad of [pemText + pemText, `subject=Tide\n${pemText}`]) {
+      await rejects(() => codeSigningCertificate(bad, now), "certificate", "exactly one PEM");
+    }
   });
 });
 
