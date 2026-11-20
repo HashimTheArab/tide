@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { status } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = "usage: tide status";
+const USAGE = `usage: tide status\n${PUBLISH_USAGE}`;
 
-/** Runs one command; 0 is success, 1 an unreadable record, 2 a usage, configuration or bucket error. */
+/** Runs one command; each command documents its exit codes, and 2 is always a usage error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  if (args[0] === "publish") {
+    return await publish(args.slice(1), env, {
+      out: (line) => process.stdout.write(`${line}\n`),
+      err: (line) => process.stderr.write(`${line}\n`),
+    });
+  }
   if (args.length !== 1 || args[0] !== "status") {
     console.error(USAGE);
     return 2;

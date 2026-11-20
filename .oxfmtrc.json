@@ -4,7 +4,8 @@
   "sortPackageJson": false,
   "ignorePatterns": [
     "**/worker-configuration.d.ts",
-    "packages/protocol/test/fixtures/**"
+    "packages/protocol/test/fixtures/**",
+    "packages/cli/test/fixtures/**"
   ],
   "sortImports": {
     "newlinesBetween": false,

@@ -72,9 +72,11 @@ export async function run(
   script: string,
   args: string[],
   env: Record<string, string>,
+  cwd?: string,
 ): Promise<RunResult> {
   const proc = spawn(process.execPath, [script, ...args], {
     env,
+    cwd,
     stdio: ["ignore", "pipe", "pipe"],
   });
   onTestFinished(() => {
