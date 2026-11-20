@@ -55,6 +55,12 @@ export interface FakeS3 {
   raceOnPut(key: string, bytes: Uint8Array): void;
   /** The next PUT to `key`, or under it when it ends in `/`, commits, then its connection drops before any response. */
   dropAfterPut(key: string): void;
+  /**
+   * The next PUT to `key`, or under it when it ends in `/`, drops its connection before it commits; `landHeld(key)`
+   * commits it later, with its own preconditions as of then, and returns whether it stored.
+   */
+  holdPut(key: string): void;
+  landHeld(key: string): boolean;
   /** Calls `fn` when the next PUT to `key` reaches handling. */
   onPut(key: string, fn: () => void): void;
   arrived(key: string): Promise<void>;
@@ -80,6 +86,7 @@ export async function startFakeS3(): Promise<FakeS3> {
   const listHooks = new Map<string, () => void>();
   const races = new Map<string, Uint8Array>();
   const drops = new Set<string>();
+  const holds = new Map<string, (() => boolean) | undefined>(); // A held PUT's commit, once it has arrived.
   const putHooks = new Map<string, () => void>();
   // Keyed by the stored array, so an object a test sets directly gets a fresh tag.
   const etags = new WeakMap<Uint8Array, string>();
@@ -177,29 +184,16 @@ export async function startFakeS3(): Promise<FakeS3> {
           races.delete(key);
           objects.set(key, raced);
         }
-        const existing = objects.get(key);
-        const ifNoneMatch = req.headers["if-none-match"];
-        const ifMatch = req.headers["if-match"];
-        if (ifNoneMatch !== undefined && ifNoneMatch !== "*") {
-          return s3Error(res, 501, "NotImplemented");
+        const under = (pattern: string) =>
+          pattern === key || (pattern.endsWith("/") && key.startsWith(pattern));
+        const held = [...holds].find(([h, commit]) => commit === undefined && under(h));
+        if (held !== undefined) {
+          holds.set(held[0], () => put(key, body, req.headers) === undefined);
+          return req.socket.destroy();
         }
-        if (ifNoneMatch !== undefined && existing !== undefined) {
-          return s3Error(res, 412, "PreconditionFailed");
-        }
-        if (ifMatch !== undefined) {
-          if (existing === undefined) return s3Error(res, 404, "NoSuchKey"); // As AWS answers.
-          if (etagOf(existing) !== ifMatch) return s3Error(res, 412, "PreconditionFailed");
-        }
-        objects.set(key, body);
-        headersOf.set(
-          body,
-          Object.fromEntries(
-            ["content-type", "cache-control"].flatMap((h) =>
-              req.headers[h] === undefined ? [] : [[h, String(req.headers[h])]],
-            ),
-          ),
-        );
-        const dropped = [...drops].find((d) => d === key || (d.endsWith("/") && key.startsWith(d)));
+        const refused = put(key, body, req.headers);
+        if (refused !== undefined) return s3Error(res, refused.status, refused.code);
+        const dropped = [...drops].find(under);
         if (dropped !== undefined && drops.delete(dropped)) return req.socket.destroy();
         return res.writeHead(200, { etag: etagOf(body) }).end();
       }
@@ -212,6 +206,37 @@ export async function startFakeS3(): Promise<FakeS3> {
       return get(key, res);
     })();
   });
+
+  /** Commits a PUT unless its preconditions fail against what is stored now; returns the refusal. */
+  function put(
+    key: string,
+    body: Uint8Array,
+    headers: IncomingHttpHeaders,
+  ): { status: number; code: string } | undefined {
+    const existing = objects.get(key);
+    const ifNoneMatch = headers["if-none-match"];
+    const ifMatch = headers["if-match"];
+    if (ifNoneMatch !== undefined && ifNoneMatch !== "*") {
+      return { status: 501, code: "NotImplemented" };
+    }
+    if (ifNoneMatch !== undefined && existing !== undefined) {
+      return { status: 412, code: "PreconditionFailed" };
+    }
+    if (ifMatch !== undefined) {
+      if (existing === undefined) return { status: 404, code: "NoSuchKey" }; // As AWS answers.
+      if (etagOf(existing) !== ifMatch) return { status: 412, code: "PreconditionFailed" };
+    }
+    objects.set(key, body);
+    headersOf.set(
+      body,
+      Object.fromEntries(
+        ["content-type", "cache-control"].flatMap((h) =>
+          headers[h] === undefined ? [] : [[h, String(headers[h])]],
+        ),
+      ),
+    );
+    return undefined;
+  }
 
   function get(key: string, res: ServerResponse): void {
     const stored = objects.get(key);
@@ -411,6 +436,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       listHooks.clear();
       races.clear();
       drops.clear();
+      holds.clear();
       putHooks.clear();
     },
     raceOnPut: (key, bytes) => {
@@ -418,6 +444,15 @@ export async function startFakeS3(): Promise<FakeS3> {
     },
     dropAfterPut: (key) => {
       drops.add(key);
+    },
+    holdPut: (key) => {
+      holds.set(key, undefined);
+    },
+    landHeld: (key) => {
+      const commit = holds.get(key);
+      if (commit === undefined) throw new Error(`no PUT to ${key} is held`);
+      holds.delete(key);
+      return commit();
     },
     onPut: (key, fn) => {
       putHooks.set(key, fn);
