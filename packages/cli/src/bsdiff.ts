@@ -26,8 +26,6 @@
 
 // The matching below is a port of bsdiff 4.3's search and scan loop, with a work budget added.
 
-import { applyBsdiff } from "@tide/protocol";
-
 import { bzip2, sortRotations } from "./bzip2.ts";
 
 /** The largest base or target `makeBsdiff` takes, which keeps every suffix index far inside an Int32Array. */
@@ -38,8 +36,8 @@ const WORK_PER_BYTE = 32;
 const WORK_FLOOR = 2 ** 24;
 
 /**
- * Returns a BSDIFF40 patch from `base` to `target`, which depends only on the input bytes. Throws a RangeError when
- * either is over `MAX_BSDIFF_INPUT`, and an Error if protocol `applyBsdiff` does not turn the patch back into `target`.
+ * Returns a BSDIFF40 patch from `base` to `target`, which depends only on the input bytes and is not checked
+ * here. Throws a RangeError when either is over `MAX_BSDIFF_INPUT`.
  */
 export function makeBsdiff(base: Uint8Array, target: Uint8Array): Uint8Array<ArrayBuffer> {
   const blocks = diffBlocks(base, target);
@@ -54,16 +52,6 @@ export function makeBsdiff(base: Uint8Array, target: Uint8Array): Uint8Array<Arr
   patch.set(ctrl, 32);
   patch.set(diff, 32 + ctrl.length);
   patch.set(extra, 32 + ctrl.length + diff.length);
-
-  let applied: Uint8Array;
-  try {
-    applied = applyBsdiff(base, patch, target.length);
-  } catch (e) {
-    throw new Error("makeBsdiff wrote a patch that applyBsdiff refuses", { cause: e });
-  }
-  if (applied.length !== target.length || applied.some((b, i) => b !== target[i])) {
-    throw new Error("makeBsdiff wrote a patch that does not reproduce the target");
-  }
   return patch;
 }
 

@@ -23,11 +23,13 @@ import type { Bucket } from "./bucket.ts";
 import type { Env, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
+import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
 import { KeyError, isObject, member, openWriter } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
 import { expoEnv, expoJson, exportFor } from "./publish-export.ts";
+import { preparePatches, uploadPatches } from "./publish-patch.ts";
 import {
   BASE_PREFIX,
   PublishError,
@@ -89,9 +91,10 @@ export async function publish(
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
   return await execute(options, async () => {
-    const { ready, exported } = await prepare(args, env, options);
+    const { ready, exported, stored, patches } = await prepare(args, env, options);
     return async () => {
-      await uploadObjects(ready.writer.bucket, exported);
+      await uploadObjects(ready.writer.bucket, exported, stored);
+      await uploadPatches(ready.writer.bucket, patches);
       await commit(ready, options.out);
     };
   });
@@ -178,7 +181,7 @@ async function prepare(
   const writer = await openWriter(env, { projectRoot, config }, { now });
   const exported = await exportFor(projectRoot, toolEnv, exportDir, pointers);
 
-  const { keys } = await recordedKeys(writer.bucket);
+  const { keys, bases } = await recordedKeys(writer.bucket, { targets: pointers });
   for (const { platform, assets } of exported) {
     for (const a of assets) addKey(keys, a.key, a.hash, `this export (${platform})`);
   }
@@ -201,7 +204,15 @@ async function prepare(
     records.push(...c.records);
     writes.push(c.pointer);
   }
-  return { ready: await plan(writer, checkCertificate, records, writes), exported };
+  const stored = await storedContent(writer.bucket);
+  // Before the plan, so its fresh certificate check also covers the time spent diffing.
+  const patches = await preparePatches(writer.bucket, exported, bases, stored);
+  return {
+    ready: await plan(writer, checkCertificate, records, writes),
+    exported,
+    stored,
+    patches,
+  };
 }
 
 /**
@@ -343,25 +354,48 @@ function configuredBase(env: Env, name: string): string {
 }
 
 /**
- * Returns the asset keys every retained release record and registered build names, and the release records stored at
- * `wanted` keys. A record that cannot be read refuses, since the key check cannot be proven without it.
+ * Returns the asset keys every retained release record and registered build names, the release records stored at
+ * `wanted` keys, and the bases of each `targets` runtime and platform. A record that cannot be read refuses, since
+ * the key check cannot be proven without it.
  */
-export async function recordedKeys(bucket: Bucket, wanted: readonly string[] = []) {
+export async function recordedKeys(
+  bucket: Bucket,
+  {
+    wanted = [],
+    targets = [],
+  }: {
+    readonly wanted?: readonly string[];
+    readonly targets?: readonly { readonly runtime: string; readonly platform: Platform }[];
+  } = {},
+) {
   const keys: KeyHashes = new Map();
   const records = new Map<string, ReleaseRecord>();
+  const bases: PatchBase[] = [];
+  const created = new Map<string, string>(); // Update ID to createdAt, for target pairs only.
+  const targeted = (r: { readonly runtimeVersion: string; readonly platform: Platform }) =>
+    targets.some((t) => t.runtime === r.runtimeVersion && t.platform === r.platform);
   for (const key of await keysUnder(bucket, RECORD_PREFIX)) {
     const record = await readReleaseRecord(bucket, key);
     if (record === undefined) continue;
     for (const a of record.assets) addKey(keys, a.key, a.hash, key);
     // Others are dropped, so memory follows the key index rather than the release history.
     if (wanted.includes(key)) records.set(key, record);
+    if (targeted(record)) created.set(record.updateId, record.createdAt);
   }
   for (const key of await keysUnder(bucket, BASE_PREFIX)) {
     const base = await readBaseRecord(bucket, key);
-    if (base?.kind !== "embedded") continue;
-    for (const a of base.assets) addKey(keys, a.key, a.hash, key);
+    if (base === undefined) continue;
+    if (base.kind === "embedded") for (const a of base.assets) addKey(keys, a.key, a.hash, key);
+    if (!targeted(base)) continue;
+    const createdAt = created.get(base.updateId);
+    // Writers store the release record first, so only a damaged bucket lacks it.
+    if (base.kind === "update" && createdAt === undefined) {
+      throw new PublishError(`${key} has no release record ${recordKey(base.updateId)}`);
+    }
+    const { kind, runtimeVersion, platform } = base;
+    bases.push({ key, kind, runtimeVersion, platform, hash: base.launchAsset.hash, createdAt });
   }
-  return { keys, records };
+  return { keys, records, bases };
 }
 
 /** Returns the keys listed under `prefix`; a name outside the key grammar refuses. */
@@ -456,11 +490,15 @@ async function ensureNoUpdate(writer: Writer, bytes: Uint8Array<ArrayBuffer>): P
 }
 
 /**
- * Uploads every bundle and asset the bucket lacks, as immutable public content. A lost create means another writer
- * stored the same content-addressed bytes, which is accepted.
+ * Uploads every bundle and asset missing from `stored`, as immutable public content. A lost create means another
+ * writer stored the same content-addressed bytes, which is accepted.
  */
-async function uploadObjects(bucket: Bucket, exported: readonly ExportedPlatform[]): Promise<void> {
-  const existing = new Set(await storedContent(bucket));
+async function uploadObjects(
+  bucket: Bucket,
+  exported: readonly ExportedPlatform[],
+  stored: ReadonlyMap<string, number>,
+): Promise<void> {
+  const existing = new Set(stored.keys());
   const upload = async (key: string, bytes: Uint8Array<ArrayBuffer>, contentType: string) => {
     if (existing.has(key)) return;
     existing.add(key);
@@ -474,9 +512,8 @@ async function uploadObjects(bucket: Bucket, exported: readonly ExportedPlatform
   }
 }
 
-/** Returns every stored bundle and asset key: objects the server can serve. */
-export async function storedContent(bucket: Bucket): Promise<string[]> {
-  return [...(await bucket.list("assets/")), ...(await bucket.list("bundles/"))].flatMap((e) =>
-    "key" in e ? [e.key] : [],
-  );
+/** Returns every stored bundle and asset key, objects the server can serve, with its size. */
+export async function storedContent(bucket: Bucket): Promise<Map<string, number>> {
+  const entries = [...(await bucket.list("assets/")), ...(await bucket.list("bundles/"))];
+  return new Map(entries.flatMap((e) => ("key" in e ? [[e.key, e.size] as const] : [])));
 }

@@ -628,7 +628,7 @@ describe("publish to disk", () => {
     const [a, b] = ["6f9619ff-8b86-4d01-b42d-00cf4fc96401", "6f9619ff-8b86-4d01-b42d-00cf4fc96402"];
     const hash = await sha256Base64Url(utf8("png"));
     for (const id of [a, b]) await bucket.putIfAbsent(recordKey(id), await seededRecord(id, hash));
-    const { keys, records } = await recordedKeys(bucket, [recordKey(a)]);
+    const { keys, records } = await recordedKeys(bucket, { wanted: [recordKey(a)] });
     expect([...records.keys()]).toEqual([recordKey(a)]);
     expect(keys.get(PNG_MD5)?.hash).toBe(hash);
   });
