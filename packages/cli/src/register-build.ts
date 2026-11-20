@@ -21,9 +21,8 @@ import type { PublishOptions, WriteStep } from "./publish.ts";
 import { buildIdentity, checkBucket, member } from "./keys.ts";
 import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
-import { PublishError } from "./publish-record.ts";
-import { parsed } from "./publish-rollback.ts";
-import { addKey, execute, platformOf, recordedKeys } from "./publish.ts";
+import { PublishError, platformOf } from "./publish-record.ts";
+import { addKey, execute, parsed, recordedKeys } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const REGISTER_BUILD_USAGE =

@@ -5,17 +5,23 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import type { JsonObject } from "@tide/protocol";
-import { ProtocolError, codeSigningCertificate, replyKey } from "@tide/protocol";
+import { replyKey } from "@tide/protocol";
 
 import type { Env } from "./keys.ts";
 import type { ProjectExport } from "./publish-export.ts";
 import type { Platform } from "./publish-record.ts";
 import type { PublishOptions } from "./publish.ts";
-import { KeyError, isObject, member, readSmallFile, signingMetadata } from "./keys.ts";
+import {
+  KeyError,
+  isObject,
+  member,
+  readSmallFile,
+  signingMetadata,
+  validCertificate,
+} from "./keys.ts";
 import { EXPORT_FILE, EXPORT_LIMIT, encodeProjectExport, readExport } from "./publish-export.ts";
-import { PublishError } from "./publish-record.ts";
-import { parsed } from "./publish-rollback.ts";
-import { platformsOf, report } from "./publish.ts";
+import { PublishError, platformsOf } from "./publish-record.ts";
+import { parsed, report } from "./publish.ts";
 
 export const EXPORT_USAGE =
   "usage: tide export --out <dir> [--platform ios|android]... [--runtime-version <version>] [--project-root <dir>] [--pass-env <name>]...";
@@ -25,7 +31,6 @@ const INHERITED = /^(?:PATH|HOME|TMPDIR|LANG|LANGUAGE|TZ|CI|LC_[A-Z]+|EXPO_PUBLI
 const NAME = /^[A-Za-z_]\w*$/;
 // Tide's own, cloud and CI credentials; the export holds none, so project code is never given them.
 const SECRET = /^(?:TIDE|AWS|ACTIONS)_/i;
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
  * Exports the app for `tide publish --from`: the public config, each platform's runtime, the certificate and
@@ -197,23 +202,13 @@ async function appCertificate(projectRoot: string, path: unknown, now: number): 
       "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
     );
   }
-  const bytes = readSmallFile(join(projectRoot, path));
-  if (bytes === undefined) {
+  // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
+  const pem = readSmallFile(join(projectRoot, path))?.toString("utf8");
+  if (pem === undefined) {
     throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
   }
-  let pem: string;
-  try {
-    pem = utf8.decode(bytes);
-  } catch {
-    throw new KeyError("updates.codeSigningCertificate is not UTF-8");
-  }
-  try {
-    // One CERTIFICATE block and whitespace only, so the export can carry nothing else from the file.
-    await codeSigningCertificate(pem, new Date(now));
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    throw new KeyError(`updates.codeSigningCertificate: ${e.message}`);
-  }
+  // One CERTIFICATE block and whitespace only, so the export can carry nothing else from the file.
+  await validCertificate(pem, "updates.codeSigningCertificate", now);
   return pem;
 }
 

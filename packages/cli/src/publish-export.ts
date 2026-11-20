@@ -13,8 +13,9 @@ import { join, sep } from "node:path";
 import type { JsonObject } from "@tide/protocol";
 import { replyKey, sha256Base64Url } from "@tide/protocol";
 
+import type { SigningMetadata } from "./keys.ts";
 import type { Platform } from "./publish-record.ts";
-import { isObject, member } from "./keys.ts";
+import { isObject, member, signingMetadata } from "./keys.ts";
 import { PublishError } from "./publish-record.ts";
 
 /** One exported file: its bytes and their SHA-256 as the manifest `hash`. */
@@ -37,7 +38,7 @@ export interface ExportedPlatform {
 /** What `tide export` writes beside `dist/`: only what every manifest or shipped build already makes public. */
 export interface ProjectExport {
   readonly certificate: string; // The PEM the builds embed.
-  readonly codeSigningMetadata: unknown; // The `{keyid, alg?}` the builds embed; checked by the writer.
+  readonly codeSigningMetadata: SigningMetadata; // What the builds embed.
   readonly expoClient: JsonObject; // `expo config --type public`, served as `extra.expoClient`.
   readonly platforms: Readonly<Partial<Record<Platform, { readonly runtimeVersion: string }>>>;
 }
@@ -65,15 +66,9 @@ const DOM_PATH = /^www\.bundle\/([0-9a-f]{32})\.([A-Za-z0-9]{1,16})$/;
 
 /** Returns the bytes of `tide-export.json` for `value`. */
 export function encodeProjectExport(value: ProjectExport): Uint8Array<ArrayBuffer> {
-  const { certificate, codeSigningMetadata, expoClient, platforms } = value;
-  const fields = {
-    version: EXPORT_VERSION,
-    certificate,
-    codeSigningMetadata,
-    expoClient,
-    platforms,
-  };
-  return new Uint8Array(new TextEncoder().encode(JSON.stringify(fields)));
+  return new Uint8Array(
+    new TextEncoder().encode(JSON.stringify({ version: EXPORT_VERSION, ...value })),
+  );
 }
 
 /**
@@ -148,7 +143,7 @@ function checkExport(value: unknown): ProjectExport {
   }
   return {
     certificate,
-    codeSigningMetadata,
+    codeSigningMetadata: signingMetadata(codeSigningMetadata, `${EXPORT_FILE} codeSigningMetadata`),
     expoClient: expoClient as JsonObject,
     platforms: platforms as ProjectExport["platforms"],
   };

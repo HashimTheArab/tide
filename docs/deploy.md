@@ -94,14 +94,14 @@ so a mismatched runtime looks healthy until the probe, run with the build's own 
 ## Publishing
 
 Only `tide export` runs project code (the app config, Babel and Metro), and it reads no credential. The writers
-(`publish --from`, `rollback`, `republish`, `register-build`) start no process. A child of a process holding the key
-could read it as the same user, so the two run in separate jobs of one workflow:
+(`publish --from`, `rollback`, `republish`, `register-build`) start no process (`design.md`, CLI). The two run in
+separate jobs of one workflow:
 
 - **Export job.** A GitHub-hosted runner; `permissions: contents: read`; no `environment`, no `secrets.*`, no
   `id-token`, and no credential in its environment, files or profiles. It checks out the app and Tide at a pinned
   commit, runs `tide export --out <dir>`, and uploads `<dir>` with `actions/upload-artifact`, exposing its
-  `artifact-id` output as a job output. Expo's tools see only `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAGE`, `LC_*`,
-  `TZ`, `CI`, `EXPO_PUBLIC_*` and each `--pass-env` name; `TIDE_*`, `AWS_*` and `ACTIONS_*` cannot be passed.
+  `artifact-id` output as a job output. Expo's tools get only an allowlisted environment (`design.md`, CLI); pass
+  anything else the app config needs with `--pass-env`.
 - **Writer job.** `needs` the export job and runs in the protected environment holding the key and bucket secrets.
   - **Runner.** GitHub-hosted, or a self-hosted runner freshly provisioned or reset for each job: a just-in-time
     registration limits a runner to one job, but a reused host keeps files and processes from earlier ones. Never a
@@ -131,15 +131,10 @@ The writer job also reads `TIDE_BUILD_KEYID` and the build certificate, and refu
 `keyid` is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
 binding above.
 
-**One concurrency group.** Every writer for a bucket, in every workflow, is a job in one repository with the same
-`concurrency` group, `cancel-in-progress: false` and `queue: max`; the export job is outside it. GitHub, Workflow
-syntax (`concurrency`, checked 2026-11-20): a job waits while another "using the same concurrency group in the
-repository" is in progress, so the same name in two repositories serialises nothing. By default "any existing
-`pending` job or workflow in the same concurrency group will be canceled"; `queue: max` keeps up to 100 pending and
-"is not allowed" with `cancel-in-progress: true`. Pending runs start first in, first out, but "ordering is not
-guaranteed", so the head check, not the queue, keeps an older commit from publishing over a newer one. The page
-asks for names unique across workflows so one workflow cannot cancel another's runs; sharing one group is the
-point here, and with `cancel-in-progress: false` and `queue: max` a writer only waits.
+**One concurrency group.** Every writer for a bucket is a job in one repository sharing one `concurrency` group with
+`cancel-in-progress: false` and `queue: max`; the export job is outside it. GitHub does not guarantee queue order
+([Workflow syntax, `concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)),
+so the head check, not the queue, keeps older code from publishing over newer.
 
 **Recovery.** A writer that exits 1 failed after writes began; one that exits 2 wrote nothing. Rerun the failed job
 (Re-run failed jobs) before any other writer runs: it downloads the same artifact by ID and publishes to the same

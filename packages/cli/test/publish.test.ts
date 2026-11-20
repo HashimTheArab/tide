@@ -466,6 +466,21 @@ describe("publish to disk", () => {
         "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
       ],
       [
+        "an unprintable keyid",
+        fields({ codeSigningMetadata: { keyid: "ma\u00efn" } }),
+        "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
+      ],
+      [
+        "no keyid",
+        fields({ codeSigningMetadata: { alg: "rsa-v1_5-sha256" } }),
+        "tide-export.json codeSigningMetadata.keyid is missing",
+      ],
+      [
+        "an unsupported alg",
+        fields({ codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha512" } }),
+        "tide-export.json codeSigningMetadata.alg must be rsa-v1_5-sha256",
+      ],
+      [
         "another keyid",
         fields({ codeSigningMetadata: { keyid: "other" } }),
         "tide-export.json codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",

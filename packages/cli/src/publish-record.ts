@@ -25,6 +25,24 @@ export class PublishError extends Error {
 
 export type Platform = "ios" | "android";
 
+/** Returns the `--platform` values, both by default; a repeat is refused. */
+export function platformsOf(values: readonly string[] | undefined): Platform[] {
+  const platforms: Platform[] = [];
+  for (const p of (values ?? ["ios", "android"]).map(platformOf)) {
+    // Two writes over one read ETag would fail the run against its own pointer.
+    if (platforms.includes(p)) throw new PublishError(`--platform ${p} is given twice`);
+    platforms.push(p);
+  }
+  return platforms;
+}
+
+/** Returns `value` as a platform, or refuses it. */
+export function platformOf(value: string): Platform {
+  if (value !== "ios" && value !== "android")
+    throw new PublishError("--platform must be ios or android");
+  return value;
+}
+
 /** What `updates/<updateId>.json` holds: enough to rebuild the update's manifest byte for byte, URLs included. */
 export interface ReleaseRecord {
   readonly updateId: string;

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -45,14 +46,7 @@ export interface PublishOptions {
   readonly out: (line: string) => void;
   readonly err: (line: string) => void;
   readonly now?: () => number; // The local clock, epoch milliseconds.
-  readonly random?: (bytes: Uint8Array<ArrayBuffer>) => Uint8Array; // Fills `bytes`; update IDs and boundaries come from it.
   readonly cwd?: string;
-}
-
-/** Update IDs (v4 UUIDs) and multipart boundaries, drawn from one source of random bytes. */
-export interface Draw {
-  readonly uuid: () => string;
-  readonly boundary: () => string;
 }
 
 /** A release record before it has an update ID and a time: everything its manifest is built from. */
@@ -95,7 +89,7 @@ export async function publish(
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
   return await execute(options, async () => {
-    const { ready, exported, stored, patches } = await prepare(args, env, options, draws(options));
+    const { ready, exported, stored, patches } = await prepare(args, env, options);
     return async () => {
       await uploadObjects(ready.writer.bucket, exported, stored);
       await uploadPatches(ready.writer.bucket, patches);
@@ -143,7 +137,6 @@ async function prepare(
   args: readonly string[],
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
-  draw: Draw,
 ) {
   const { channel, from } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
@@ -175,7 +168,7 @@ async function prepare(
       assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
       extra: { expoClient: artifact.expoClient },
     };
-    const c = await compose(writer, draw, draft, createdAtFloor(local, t.previous), t);
+    const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
     writes.push(c.pointer);
   }
@@ -183,7 +176,7 @@ async function prepare(
   // Before the plan, so its fresh certificate check also covers the time spent diffing.
   const patches = await preparePatches(writer.bucket, exported, bases, stored);
   return {
-    ready: await plan(writer, draw, checkCertificate, records, writes),
+    ready: await plan(writer, checkCertificate, records, writes),
     exported,
     stored,
     patches,
@@ -225,12 +218,11 @@ export async function readTargets<T extends { readonly key: string }>(
  */
 export async function plan(
   writer: Writer,
-  draw: Draw,
   checkCertificate: () => Promise<void>,
   records: Plan["records"],
   pointers: Plan["pointers"],
 ): Promise<Plan> {
-  const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer, draw);
+  const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer);
   await checkCertificate();
   return { writer, noUpdate, records, pointers, checkCertificate };
 }
@@ -267,17 +259,14 @@ export async function commit(
 }
 
 function parse(args: readonly string[], cwd: string) {
-  let values;
-  try {
-    ({ values } = parseArgs({
+  const { values } = parsed(PUBLISH_USAGE, () =>
+    parseArgs({
       args: [...args],
       options: { from: { type: "string" }, channel: { type: "string" } },
       strict: true,
       allowPositionals: false,
-    }));
-  } catch {
-    throw new PublishError(`unrecognised arguments; ${PUBLISH_USAGE}`);
-  }
+    }),
+  );
   const { from, channel } = values;
   if (from === undefined || channel === undefined) {
     throw new PublishError(`--from and --channel are required; ${PUBLISH_USAGE}`);
@@ -286,40 +275,13 @@ function parse(args: readonly string[], cwd: string) {
   return { channel, from: resolve(cwd, from) };
 }
 
-/** Returns the draws of `options.random`, by default the system's secure random source. */
-export function draws({ random = (b) => crypto.getRandomValues(b) }: PublishOptions): Draw {
-  const hex = (bytes: Uint8Array) =>
-    Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return {
-    uuid: () => {
-      // Version 4 and the RFC 9562 variant, as randomUUID sets them.
-      const h = hex(
-        random(new Uint8Array(16)).map((b, i) =>
-          i === 6 ? (b & 0x0f) | 0x40 : i === 8 ? (b & 0x3f) | 0x80 : b,
-        ),
-      );
-      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-    },
-    boundary: () => hex(random(new Uint8Array(16))),
-  };
-}
-
-/** Returns the `--platform` values, both by default; a repeat is refused. */
-export function platformsOf(values: readonly string[] | undefined): Platform[] {
-  const platforms: Platform[] = [];
-  for (const p of (values ?? ["ios", "android"]).map(platformOf)) {
-    // Two writes over one read ETag would fail the run against its own pointer.
-    if (platforms.includes(p)) throw new PublishError(`--platform ${p} is given twice`);
-    platforms.push(p);
+/** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
+export function parsed<T>(usage: string, parse: () => T): T {
+  try {
+    return parse();
+  } catch {
+    throw new PublishError(`unrecognised arguments; ${usage}`);
   }
-  return platforms;
-}
-
-/** Returns `value` as a platform, or refuses it. */
-export function platformOf(value: string): Platform {
-  if (value !== "ios" && value !== "android")
-    throw new PublishError("--platform must be ios or android");
-  return value;
 }
 
 function configuredBase(env: Env, name: string): string {
@@ -404,12 +366,11 @@ export function addKey(keys: KeyHashes, key: string, hash: string, source: strin
 /** Builds and signs a new update from `draft` under a fresh ID: its records and its write to `target`. */
 export async function compose(
   writer: Writer,
-  draw: Draw,
   draft: DraftRecord,
   createdAtMs: number,
   { key, previous }: { readonly key: string; readonly previous: PointerState },
 ): Promise<{ records: Plan["records"]; pointer: PointerWrite }> {
-  const updateId = draw.uuid();
+  const updateId = randomUUID();
   const date = new Date(createdAtMs);
   const createdAt = date.toISOString();
   const manifest = buildManifest({
@@ -433,10 +394,7 @@ export async function compose(
     extra: draft.extra,
   });
   const signature = await expoSignature(manifest, writer.signer);
-  const { boundary, body } = encodeMultipart(
-    [{ name: "manifest", body: manifest, signature }],
-    draw.boundary,
-  );
+  const { boundary, body } = encodeMultipart([{ name: "manifest", body: manifest, signature }]);
   const reply = encodeStoredReply({
     kind: "manifest",
     updateId,
@@ -461,13 +419,10 @@ export async function compose(
 }
 
 /** Builds and signs the stored `reply/no-update`. */
-async function noUpdateReply(writer: Writer, draw: Draw): Promise<Uint8Array<ArrayBuffer>> {
+async function noUpdateReply(writer: Writer): Promise<Uint8Array<ArrayBuffer>> {
   const directive = buildNoUpdateAvailable();
   const signature = await expoSignature(directive, writer.signer);
-  const { boundary, body } = encodeMultipart(
-    [{ name: "directive", body: directive, signature }],
-    draw.boundary,
-  );
+  const { boundary, body } = encodeMultipart([{ name: "directive", body: directive, signature }]);
   return encodeStoredReply({ kind: "noUpdateAvailable", boundary, body });
 }
 

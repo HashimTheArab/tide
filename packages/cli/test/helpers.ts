@@ -24,15 +24,6 @@ export function prng(seed: number): () => number {
   };
 }
 
-/** Fills each array from `prng(seed)`, so update IDs and boundaries repeat across runs. */
-export function seeded(seed: number): (bytes: Uint8Array<ArrayBuffer>) => Uint8Array {
-  const next = prng(seed);
-  return (bytes) => {
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(next() * 256);
-    return bytes;
-  };
-}
-
 export const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
 
 /** Returns a fresh directory, removed when the test finishes. */

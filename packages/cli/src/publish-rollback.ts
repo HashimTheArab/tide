@@ -10,18 +10,17 @@ import {
 } from "@tide/protocol";
 
 import type { Env, Writer } from "./keys.ts";
-import type { Draw, Plan, PublishOptions } from "./publish.ts";
+import type { Plan, PublishOptions } from "./publish.ts";
 import { isKey } from "./bucket.ts";
 import { openWriter } from "./keys.ts";
 import { createdAtFloor } from "./pointer.ts";
-import { PublishError, recordKey } from "./publish-record.ts";
+import { PublishError, platformsOf, recordKey } from "./publish-record.ts";
 import {
   commit,
   compose,
-  draws,
   execute,
+  parsed,
   plan,
-  platformsOf,
   readTargets,
   recordedKeys,
   storedContent,
@@ -33,7 +32,7 @@ export const REPUBLISH_USAGE =
   "usage: tide republish <updateId>... [--channel <name>] [--runtime-version <version>]";
 
 /** What a write command does once its arguments are parsed, given the opened writer. */
-type Prepare = (writer: Writer, now: () => number, draw: Draw) => Promise<Plan>;
+type Prepare = (writer: Writer, now: () => number) => Promise<Plan>;
 
 /**
  * Rolls pointers back: `--embedded` serves a signed `rollBackToEmbedded`, `--to` republishes each update onto its own
@@ -120,18 +119,9 @@ async function run(env: Env, options: PublishOptions, parse: () => Prepare): Pro
   return await execute(options, async () => {
     const prepare = parse();
     const writer = await openWriter(env, { now });
-    const ready = await prepare(writer, now, draws(options));
+    const ready = await prepare(writer, now);
     return () => commit(ready, options.out);
   });
-}
-
-/** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
-export function parsed<T>(usage: string, parse: () => T): T {
-  try {
-    return parse();
-  } catch {
-    throw new PublishError(`unrecognised arguments; ${usage}`);
-  }
 }
 
 /** Returns the IDs, each a lowercase UUID, given once. */
@@ -145,7 +135,7 @@ function updateIds(ids: readonly string[]): readonly string[] {
 
 /** Signs a `rollBackToEmbedded` for each existing pointer, committed after the time it replaces. */
 function rollingBack(keys: readonly string[]): Prepare {
-  return async (writer, now, draw) => {
+  return async (writer, now) => {
     const { targets, local, checkCertificate } = await readTargets(
       writer,
       keys.map((key) => ({ key })),
@@ -160,7 +150,7 @@ function rollingBack(keys: readonly string[]): Prepare {
       const commitTime = new Date(createdAtFloor(local, previous));
       const body = buildRollBackToEmbedded({ commitTime });
       const signature = await expoSignature(body, writer.signer);
-      const multipart = encodeMultipart([{ name: "directive", body, signature }], draw.boundary);
+      const multipart = encodeMultipart([{ name: "directive", body, signature }]);
       pointers.push({
         key,
         previous,
@@ -168,7 +158,7 @@ function rollingBack(keys: readonly string[]): Prepare {
         line: `${key} - ${commitTime.toISOString()}`,
       });
     }
-    return await plan(writer, draw, checkCertificate, [], pointers);
+    return await plan(writer, checkCertificate, [], pointers);
   };
 }
 
@@ -177,7 +167,7 @@ function rollingBack(keys: readonly string[]): Prepare {
  * stored already; nothing is uploaded.
  */
 function republishing(ids: readonly string[], channel?: string, runtime?: string): Prepare {
-  return async (writer, now, draw) => {
+  return async (writer, now) => {
     const { bucket } = writer;
     // Every retained record decodes and agrees on asset keys, the source's included, as a publish requires.
     const { records: retained } = await recordedKeys(bucket, { wanted: ids.map(recordKey) });
@@ -216,13 +206,10 @@ function republishing(ids: readonly string[], channel?: string, runtime?: string
       // Newer than the code it copies too, even when that was stamped by a clock ahead of this one.
       const createdAt = Math.max(createdAtFloor(local, previous), Date.parse(record.createdAt) + 1);
       const { updateId: _, createdAt: __, ...draft } = record;
-      const c = await compose(writer, draw, { ...draft, channel: target }, createdAt, {
-        key,
-        previous,
-      });
+      const c = await compose(writer, { ...draft, channel: target }, createdAt, { key, previous });
       records.push(...c.records);
       pointers.push(c.pointer);
     }
-    return await plan(writer, draw, checkCertificate, records, pointers);
+    return await plan(writer, checkCertificate, records, pointers);
   };
 }

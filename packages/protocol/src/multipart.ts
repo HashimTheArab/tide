@@ -34,15 +34,14 @@ const CRLF = encoder.encode("\r\n");
 const DASHES = encoder.encode("--");
 
 /**
- * Returns a multipart/mixed body of `parts` in order. A function `boundary` (by default a random one) is drawn from
- * again while its result occurs in a part; a given string that occurs anywhere in a part is rejected, so every
- * CRLF--boundary in the body is a delimiter.
+ * Returns a multipart/mixed body of `parts` in order. Without `boundary` a random one is drawn; a given boundary
+ * that occurs anywhere in a part is rejected, so every CRLF--boundary in the body is a delimiter.
  */
 export function encodeMultipart(
   parts: readonly Part[],
-  boundary: string | (() => string) = randomBoundary,
+  boundary?: string,
 ): { boundary: string; body: Uint8Array<ArrayBuffer> } {
-  if (typeof boundary !== "function") checkBoundary(boundary);
+  if (boundary !== undefined) checkBoundary(boundary);
   if (parts.length === 0) throw new ProtocolError("parts", "must not be empty");
   const names = new Set<PartName>();
   const framed = parts.map((part, i) => {
@@ -76,11 +75,9 @@ export function encodeMultipart(
   });
 
   let chosen: string;
-  if (typeof boundary === "function") {
-    do {
-      chosen = boundary();
-      checkBoundary(chosen);
-    } while (framed.some((p) => containsBoundary(p.head, p.body, encoder.encode(chosen))));
+  if (boundary === undefined) {
+    do chosen = randomBoundary();
+    while (framed.some((p) => containsBoundary(p.head, p.body, encoder.encode(chosen))));
   } else {
     chosen = boundary;
     for (const p of framed) {

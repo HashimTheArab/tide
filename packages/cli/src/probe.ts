@@ -17,7 +17,7 @@ import {
 } from "@tide/protocol";
 
 import type { Env } from "./keys.ts";
-import { KeyError, buildIdentity, isObject, member } from "./keys.ts";
+import { BUILD_KEYID, KeyError, buildIdentity, isObject, member } from "./keys.ts";
 import { urlBase } from "./publish-record.ts";
 
 /** Exit codes by failure class; 1 is left to Node's exit on an uncaught error, so it always means a bug. */
@@ -38,7 +38,6 @@ export const PROBE_USAGE =
 /** Per-request deadlines: the manifest's matches a stock client's read timeout; a bundle may be megabytes. */
 const MANIFEST_TIMEOUT_MS = 10_000;
 const BUNDLE_TIMEOUT_MS = 60_000;
-const KEYID = "TIDE_BUILD_KEYID";
 const DIRECTIVES = {
   rollBackToEmbedded: true,
   noUpdateAvailable: true,
@@ -253,7 +252,7 @@ async function verify(part: Part, { key, keyId }: Probe): Promise<void> {
     if (!(e instanceof ProtocolError)) throw e;
     throw fail(
       e.field === "signature.keyid"
-        ? `is signed under another keyid than ${KEYID}`
+        ? `is signed under another keyid than ${BUILD_KEYID}`
         : e.field === "signature.sig"
           ? "does not verify under the pinned certificate"
           : "has a malformed expo-signature",

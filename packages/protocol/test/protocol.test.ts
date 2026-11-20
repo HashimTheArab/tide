@@ -677,18 +677,6 @@ describe("multipart", () => {
     expect(parseMultipart(body, boundary)[0]!.body).toEqual(buildNoUpdateAvailable());
   });
 
-  test("a given drawer is drawn from again while its boundary occurs in a part, and a bad draw is rejected", () => {
-    const draws = ["inbody", "other"];
-    const encoded = encodeMultipart([part("manifest", ascii('{"a":"inbody"}'))], () =>
-      draws.shift()!,
-    );
-    expect(encoded.boundary).toBe("other");
-    expect(draws).toEqual([]);
-    expect(() => encodeMultipart([part("manifest", ascii("{}"))], () => "a b")).toThrow(
-      ProtocolError,
-    );
-  });
-
   test.each<[string, () => Uint8Array<ArrayBuffer>, string, string]>([
     [
       "a missing closing boundary",

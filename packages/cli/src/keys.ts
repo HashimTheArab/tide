@@ -13,6 +13,7 @@ import {
 } from "@tide/protocol";
 
 import type { Bucket } from "./bucket.ts";
+import type { ProjectExport } from "./publish-export.ts";
 import type { Verdict } from "./status.ts";
 import { KMS_VARIABLES, kmsSigner } from "./keys-kms.ts";
 import { readRecord } from "./status.ts";
@@ -24,12 +25,6 @@ export class KeyError extends Error {
     super(message);
     this.name = "KeyError";
   }
-}
-
-/** The identity an export carries: the certificate PEM and the code-signing metadata, both unchecked. */
-export interface ExportedApp {
-  readonly certificate: string;
-  readonly codeSigningMetadata: unknown;
 }
 
 /** The code-signing metadata a build embeds, holding nothing else. */
@@ -66,10 +61,10 @@ const PROBE = new TextEncoder().encode("tide signing probe");
 const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
 const KEY_FILE = "TIDE_SIGNING_KEY_FILE";
 const KEY_PEM = "TIDE_SIGNING_KEY";
-const BUILD_KEYID = "TIDE_BUILD_KEYID";
+export const BUILD_KEYID = "TIDE_BUILD_KEYID";
+const KEYID = /^[\x20-\x7E]+$/;
 const CERTIFICATE_FILE = "TIDE_BUILD_CERTIFICATE_FILE";
 const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
-const EXPORT_METADATA = "tide-export.json codeSigningMetadata";
 
 /**
  * Returns a signer proven against the shipped builds' certificate and the bucket it may write; with `app`, refused
@@ -81,7 +76,7 @@ export async function openWriter(
   options: {
     readonly kmsTimeoutMs?: number;
     readonly now?: () => number;
-    readonly app?: ExportedApp;
+    readonly app?: Pick<ProjectExport, "certificate" | "codeSigningMetadata">;
   } = {},
 ): Promise<Writer> {
   const { now = Date.now, app } = options;
@@ -114,7 +109,7 @@ export async function buildIdentity(env: Env, now: number): Promise<Identity> {
   if (keyId === undefined) {
     throw new KeyError(`${BUILD_KEYID} is not set: set it to the keyid the builds embed`);
   }
-  if (!/^[\x20-\x7E]+$/.test(keyId)) throw new KeyError(`${BUILD_KEYID} must be printable ASCII`);
+  if (!KEYID.test(keyId)) throw new KeyError(`${BUILD_KEYID} must be printable ASCII`);
   const file = read(env, CERTIFICATE_FILE);
   const value = read(env, CERTIFICATE_PEM);
   if ((file === undefined) === (value === undefined)) {
@@ -131,10 +126,13 @@ export async function buildIdentity(env: Env, now: number): Promise<Identity> {
 }
 
 /** Refuses an export whose certificate or key ID is not the shipped builds'. */
-async function checkApp(app: ExportedApp, identity: Identity, now: number): Promise<void> {
-  const { keyid } = signingMetadata(app.codeSigningMetadata, EXPORT_METADATA);
-  if (keyid !== identity.keyId) {
-    throw new KeyError(`${EXPORT_METADATA}.keyid differs from ${BUILD_KEYID}`);
+async function checkApp(
+  app: Pick<ProjectExport, "certificate" | "codeSigningMetadata">,
+  identity: Identity,
+  now: number,
+): Promise<void> {
+  if (app.codeSigningMetadata.keyid !== identity.keyId) {
+    throw new KeyError(`tide-export.json codeSigningMetadata.keyid differs from ${BUILD_KEYID}`);
   }
   const { sha256 } = await validCertificate(app.certificate, "tide-export.json certificate", now);
   if (sha256 !== identity.sha256) {
@@ -143,7 +141,7 @@ async function checkApp(app: ExportedApp, identity: Identity, now: number): Prom
 }
 
 /** Returns the certificate checked against the code-signing profile at epoch milliseconds `at`. */
-async function validCertificate(pem: string, source: string, at: number) {
+export async function validCertificate(pem: string, source: string, at: number) {
   try {
     return await codeSigningCertificate(pem, new Date(at));
   } catch (e) {
@@ -160,7 +158,7 @@ export function signingMetadata(metadata: unknown, field: string): SigningMetada
   const keyid = member(metadata, "keyid");
   // Expo would fall back to "root"; an implicit key ID is refused instead.
   if (keyid === undefined) throw new KeyError(`${field}.keyid is missing`);
-  if (typeof keyid !== "string" || !/^[\x20-\x7E]+$/.test(keyid)) {
+  if (typeof keyid !== "string" || !KEYID.test(keyid)) {
     throw new KeyError(`${field}.keyid must be printable ASCII`);
   }
   const alg = member(metadata, "alg");

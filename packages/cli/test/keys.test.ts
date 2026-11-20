@@ -16,6 +16,7 @@ import {
 
 import type { CertificateOptions } from "../../protocol/test/fixtures.ts";
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
+import type { SigningMetadata } from "../src/keys.ts";
 import type { FakeKms, KmsFault } from "./fake-kms.ts";
 import { EXTENSION, RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
@@ -87,7 +88,10 @@ afterEach(() => {
 });
 
 /** The identity an export of `cert` carries. */
-const app = (cert: string, metadata: unknown = { keyid: "main", alg: "rsa-v1_5-sha256" }) => ({
+const app = (
+  cert: string,
+  metadata: SigningMetadata = { keyid: "main", alg: "rsa-v1_5-sha256" },
+) => ({
   certificate: cert,
   codeSigningMetadata: metadata,
 });
@@ -274,7 +278,7 @@ interface Refusal {
   readonly env?: Record<string, string | undefined>;
   readonly cert?: Identity; // The certificate the pins name and, unless `exported` is given, the export carries.
   readonly exported?: string; // The export's certificate.
-  readonly metadata?: unknown; // The export's codeSigningMetadata.
+  readonly metadata?: SigningMetadata; // The export's codeSigningMetadata.
   readonly fault?: KmsFault;
   readonly message: string;
 }
@@ -394,18 +398,6 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   "an export keyid that differs from the build's": () => ({
     metadata: { keyid: "mian" },
     message: "tide-export.json codeSigningMetadata.keyid differs from TIDE_BUILD_KEYID",
-  }),
-  "an export without a keyid": () => ({
-    metadata: { alg: "rsa-v1_5-sha256" },
-    message: "tide-export.json codeSigningMetadata.keyid is missing",
-  }),
-  "an unprintable export keyid": () => ({
-    metadata: { keyid: "ma\u00efn" },
-    message: "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
-  }),
-  "an unsupported export alg": () => ({
-    metadata: { keyid: "main", alg: "rsa-v1_5-sha512" },
-    message: "tide-export.json codeSigningMetadata.alg must be rsa-v1_5-sha256",
   }),
   "an export certificate that is not a certificate": () => ({
     exported: "not a certificate",

@@ -5,12 +5,15 @@ import { readFileSync } from "node:fs";
 
 import { expoSignature } from "@tide/protocol";
 
-import type { ExportedApp } from "../src/keys.ts";
+import type { ProjectExport } from "../src/publish-export.ts";
 import { BucketError } from "../src/bucket.ts";
 import { KeyError, openWriter } from "../src/keys.ts";
 
 const [appPath = "", partPath = ""] = process.argv.slice(2);
-const app = JSON.parse(readFileSync(appPath, "utf8")) as ExportedApp;
+const app = JSON.parse(readFileSync(appPath, "utf8")) as Pick<
+  ProjectExport,
+  "certificate" | "codeSigningMetadata"
+>;
 try {
   const { signer } = await openWriter(process.env, { app });
   const part = new Uint8Array(readFileSync(partPath));
