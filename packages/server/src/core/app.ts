@@ -18,7 +18,9 @@ import {
   replyKey,
 } from "@tide/protocol";
 
+import type { AnalyticsSink, ManifestPoint } from "./analytics.ts";
 import type { Store, StoredObject } from "./store.ts";
+import { manifestPoint } from "./analytics.ts";
 import { abortable, discard, readBounded } from "./store.ts";
 
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
@@ -38,6 +40,8 @@ export interface AppOptions {
   readonly replyDeadline?: () => AbortSignal;
   /** Returns the deadline of a `/bundles` request's patch lookup; past it the full bundle is served. */
   readonly patchDeadline?: () => AbortSignal;
+  /** Receives a data point per `/manifest` request that reaches the reply decision. */
+  readonly analytics?: AnalyticsSink | undefined;
 }
 
 /** Returns the Tide HTTP app; it uses only web-standard APIs, so every runtime serves the same app. */
@@ -52,6 +56,18 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw new Error("app ID must be printable ASCII without edge whitespace");
   }
+  /** Hands `point` to the sink without waiting; a failure is logged without values and never reaches the reply. */
+  const record = (point: ManifestPoint) => {
+    if (options.analytics === undefined) return;
+    const failed = (e: unknown) => {
+      console.error(`analytics sink failed: ${e instanceof Error ? e.name : typeof e}`);
+    };
+    try {
+      void Promise.resolve(options.analytics(point)).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
+  };
   const app = new Hono();
   app.get("/hc", (c) => c.text("ok"));
 
@@ -109,7 +125,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     }
 
     const signal = replyDeadline();
-    let reply: StoredReply;
+    let reply: StoredReply | undefined;
     try {
       const pointer = await readRecord(key, MAX_REPLY_BYTES, decodeStoredReply, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
@@ -132,8 +148,20 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       }
     } catch (e) {
       console.error(`/manifest for ${key} failed`, e);
-      return c.text("storage unavailable\n", 503, NO_STORE);
     }
+    record(
+      manifestPoint({
+        reply: reply?.kind ?? "503",
+        platform,
+        runtime: runtime ?? "",
+        channel: channel ?? "",
+        currentUpdateId: header("expo-current-update-id"),
+        embeddedUpdateId: header("expo-embedded-update-id"),
+        recentFailedUpdateIds: header("expo-recent-failed-update-ids"),
+        fatalError: header("expo-fatal-error"),
+      }),
+    );
+    if (reply === undefined) return c.text("storage unavailable\n", 503, NO_STORE);
     const headers: Record<string, string> = {
       "content-type": `multipart/mixed; boundary=${reply.boundary}`,
       "expo-protocol-version": "1",

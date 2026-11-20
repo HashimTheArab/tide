@@ -4,13 +4,16 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { serve } from "@hono/node-server";
+import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
 import { NO_UPDATE_KEY, contentKey, diskPath, replyKey, sha256Base64Url } from "@tide/protocol";
 
+import type { AnalyticsSink, ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "../shared/server-cases.ts";
 import { createApp } from "../../src/core/app.ts";
 import { diskStore, startServer, storeFromEnv } from "../../src/node.ts";
+import { analyticsCases, faultySink } from "../shared/analytics-cases.ts";
 import { fixture } from "../shared/fixtures.ts";
 import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
 import { runEntry } from "./entry.ts";
@@ -84,6 +87,39 @@ describe("node entry with a disk store", () => {
   });
   describe("/bundles patch negotiation", () => {
     bundleCases(harness);
+  });
+});
+
+// The Node entry records nothing; this proves the core sink contract on Node.
+describe("node app with an analytics sink", () => {
+  const root = tempRoot();
+  let base = "";
+  let sink: AnalyticsSink = () => undefined;
+  beforeAll(async () => {
+    const app = createApp(diskStore(root), { appId: "tide-test", analytics: (p) => sink(p) });
+    const server = await new Promise<ReturnType<typeof serve>>((resolve) => {
+      const s = serve({ fetch: app.fetch, port: 0 }, () => resolve(s));
+    });
+    cleanup.push(() => new Promise((resolve) => server.close(resolve)));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  analyticsCases({
+    request: (path, headers) => exactRequest(`${base}${path}`, headers),
+    put: (key, bytes) => replace(root, diskPath(key), bytes),
+    putFault: (key) => replace(root, diskPath(key)),
+    capture(fault) {
+      const points: ManifestPoint[] = [];
+      const fail = fault === undefined ? undefined : faultySink(fault);
+      sink = (point) => {
+        points.push(point);
+        return fail?.();
+      };
+      onTestFinished(() => {
+        sink = () => undefined;
+      });
+      return () => points;
+    },
   });
 });
 

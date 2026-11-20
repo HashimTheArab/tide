@@ -5,6 +5,8 @@
   "compatibility_date": "2026-11-01",
   // A binding cannot be read-only; the Worker only calls get (see docs/design.md, Storage).
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tide" }],
+  // One data point per /manifest request; the layout is in docs/design.md, Observability.
+  "analytics_engine_datasets": [{ "binding": "ANALYTICS", "dataset": "tide_manifest" }],
   // When set, a request whose expo-app-id is present and differs is rejected; empty means unset.
   "vars": { "TIDE_APP_ID": "" },
 }
