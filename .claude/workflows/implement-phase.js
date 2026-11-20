@@ -310,7 +310,7 @@ ${
 }
 - The findings are in the last "Full review comments:" block, or "Review comment:" when there is one. Each entry looks like "- [P1] title — path:lines" followed by its explanation.
 - Return severity, file (repository-relative: strip any ${WT}/ or other worktree prefix; use "design" when the entry names no file), line (the first line, if given), title, and scenario (the explanation).
-- status "findings" when that block lists findings; "clean" only when the final message explicitly says there are no findings or issues; "missing" when the file is absent or empty, or ends without a final review, for example on an error.`,
+- status "findings" when that block lists findings; "clean" when a final message exists and has no findings block or an empty one (a summary that reports no problems is clean); "missing" only when the file is absent or empty, or the run ended without a final message, for example on an error.`,
       { label, model: "sonnet", effort: "medium", schema: CONVERTED },
     ),
     label,
