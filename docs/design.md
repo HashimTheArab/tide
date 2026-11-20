@@ -129,11 +129,11 @@ and extra bytes copied.
 
 The CLI's `makeBsdiff(base, target)` writes them: bsdiff 4.3's matching under a work budget (past it, the rest of the
 target goes to extra), then level-9 bzip2 streams. It takes inputs of at most 64 MiB and depends only on the input
-bytes. It only builds: publish applies and hash-checks every patch it makes (CLI, publish step 5).
+bytes.
 
 Protocol `applyBsdiff(base, patch, maxOutput)` runs in the CLI, which applies and hash-checks every patch before
-upload; the server only serves stored bytes. It is stricter than reference bspatch, and accepts every patch bsdiff
-writes:
+upload (publish step 5); the server only serves stored bytes. It is stricter than reference bspatch, and accepts
+every patch bsdiff writes:
 
 - `maxOutput` must be a non-negative safe integer, and a declared output over it is refused before anything is allocated. Header lengths
   are non-negative and below 2^53, and the ctrl and diff blocks fit in the patch.

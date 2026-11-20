@@ -36,8 +36,8 @@ const WORK_PER_BYTE = 32;
 const WORK_FLOOR = 2 ** 24;
 
 /**
- * Returns a BSDIFF40 patch from `base` to `target`, which depends only on the input bytes; publish applies and
- * hash-checks it before upload. Throws a RangeError when either is over `MAX_BSDIFF_INPUT`.
+ * Returns a BSDIFF40 patch from `base` to `target`, which depends only on the input bytes and is not checked
+ * here. Throws a RangeError when either is over `MAX_BSDIFF_INPUT`.
  */
 export function makeBsdiff(base: Uint8Array, target: Uint8Array): Uint8Array<ArrayBuffer> {
   const blocks = diffBlocks(base, target);

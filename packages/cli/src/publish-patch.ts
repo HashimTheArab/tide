@@ -28,7 +28,7 @@ interface PatchTarget {
 }
 
 /** Patches by store key, each applied to its base and hash-checked. */
-export type Patches = Map<string, Uint8Array<ArrayBuffer>>;
+type Patches = Map<string, Uint8Array<ArrayBuffer>>;
 
 /**
  * Returns the patches to store for each target's new bundle, from every embedded build and the newest
