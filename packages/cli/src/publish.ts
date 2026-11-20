@@ -46,7 +46,7 @@ export interface PublishOptions {
 }
 
 /** A release record before it has an update ID and a time: everything its manifest is built from. */
-export type DraftRecord = Omit<ReleaseRecord, "updateId" | "createdAt">;
+type DraftRecord = Omit<ReleaseRecord, "updateId" | "createdAt">;
 
 /** One pointer's reply, built and signed before anything is written, the state it replaces and its stdout line. */
 interface PointerWrite {
@@ -64,6 +64,7 @@ export interface Plan {
   readonly pointers: readonly PointerWrite[];
   /** Refuses unless the certificate is valid by both clocks, each read afresh. */
   readonly checkCertificate: () => Promise<void>;
+  readonly upload?: () => Promise<void>; // Stores content before any record or pointer is written.
 }
 
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
@@ -82,15 +83,26 @@ export async function publish(
   env: Env,
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
-  let plan;
+  return await execute(options, () => prepare(args, env, options));
+}
+
+/**
+ * Runs a write command: 0 once every pointer is written, 2 when `prepare` refuses before any write, 1 when a write
+ * fails.
+ */
+export async function execute(
+  options: PublishOptions,
+  prepare: () => Promise<Plan>,
+): Promise<0 | 1 | 2> {
+  let ready;
   try {
-    plan = await prepare(args, env, options);
+    ready = await prepare();
   } catch (e) {
     return report(e, options, 2);
   }
   try {
-    await uploadObjects(plan.writer.bucket, plan.exported);
-    await commit(plan, options.out);
+    await ready.upload?.();
+    await commit(ready, options.out);
   } catch (e) {
     return report(e, options, 1);
   }
@@ -98,7 +110,7 @@ export async function publish(
 }
 
 /** Prints a write command's own error and returns `code`; anything else is a bug and is rethrown. */
-export function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
+function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, code: Code): Code {
   if (
     !(
       e instanceof PublishError ||
@@ -117,7 +129,7 @@ async function prepare(
   args: readonly string[],
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
-): Promise<Plan & { readonly exported: readonly ExportedPlatform[] }> {
+): Promise<Plan> {
   const { channel, platforms, runtimeVersion, exportDir, projectRoot } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
@@ -165,8 +177,8 @@ async function prepare(
   }
 
   const { targets, local, checkCertificate } = await readTargets(writer, exported, now);
-  const records: (readonly [string, Uint8Array<ArrayBuffer>])[] = [];
-  const writes: PointerWrite[] = [];
+  const records = [];
+  const writes = [];
   for (const t of targets) {
     const draft: DraftRecord = {
       channel,
@@ -178,15 +190,13 @@ async function prepare(
       assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
       extra: { expoClient: expoClient as JsonObject },
     };
-    const c = await compose(writer, draft, createdAtFloor(local, t.previous));
-    records.push([recordKey(c.updateId), c.record]);
-    writes.push({ key: t.key, previous: t.previous, reply: c.reply, line: c.line(t.key) });
+    const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
+    records.push(c.record);
+    writes.push(c.pointer);
   }
   return {
-    ...(await finish(writer, checkCertificate)),
-    records,
-    pointers: writes,
-    exported,
+    ...(await plan(writer, checkCertificate, records, writes)),
+    upload: () => uploadObjects(writer.bucket, exported),
   };
 }
 
@@ -223,17 +233,22 @@ export async function readTargets<T extends { readonly key: string }>(
  * Ends a plan once everything is signed: builds `reply/no-update` if the bucket lacks one, then checks the
  * certificate afresh, so an expiry before the first write is a refusal.
  */
-export async function finish(writer: Writer, checkCertificate: () => Promise<void>) {
+export async function plan(
+  writer: Writer,
+  checkCertificate: () => Promise<void>,
+  records: Plan["records"],
+  pointers: Plan["pointers"],
+): Promise<Plan> {
   const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer);
   await checkCertificate();
-  return { writer, noUpdate, checkCertificate };
+  return { writer, noUpdate, records, pointers, checkCertificate };
 }
 
 /**
  * Writes `reply/no-update` if needed, the release records, then each pointer. The certificate is re-checked before a
  * pointer only once a PUT has been attempted since the plan's final check, so every failure here follows a write.
  */
-export async function commit(
+async function commit(
   { writer, noUpdate, records, pointers, checkCertificate }: Plan,
   out: (line: string) => void,
 ): Promise<void> {
@@ -357,8 +372,13 @@ function addKey(keys: KeyHashes, key: string, hash: string, source: string): voi
   }
 }
 
-/** Builds and signs a new update from `draft` under a fresh ID: its stored reply and its release record. */
-export async function compose(writer: Writer, draft: DraftRecord, createdAtMs: number) {
+/** Builds and signs a new update from `draft` under a fresh ID: its release record and its write to `target`. */
+export async function compose(
+  writer: Writer,
+  draft: DraftRecord,
+  createdAtMs: number,
+  { key, previous }: { readonly key: string; readonly previous: PointerState },
+): Promise<{ record: Plan["records"][number]; pointer: PointerWrite }> {
   const updateId = randomUUID();
   const date = new Date(createdAtMs);
   const createdAt = date.toISOString();
@@ -384,17 +404,16 @@ export async function compose(writer: Writer, draft: DraftRecord, createdAtMs: n
   });
   const signature = await expoSignature(manifest, writer.signer);
   const { boundary, body } = encodeMultipart([{ name: "manifest", body: manifest, signature }]);
-  return {
+  const reply = encodeStoredReply({
+    kind: "manifest",
     updateId,
-    reply: encodeStoredReply({
-      kind: "manifest",
-      updateId,
-      boundary,
-      manifestFilters: encodeSfvDictionary({ channel: draft.channel }),
-      body,
-    }),
-    record: encodeRecord({ ...draft, updateId, createdAt }),
-    line: (key: string) => `${key} ${updateId} ${createdAt}`,
+    boundary,
+    manifestFilters: encodeSfvDictionary({ channel: draft.channel }),
+    body,
+  });
+  return {
+    record: [recordKey(updateId), encodeRecord({ ...draft, updateId, createdAt })],
+    pointer: { key, previous, reply, line: `${key} ${updateId} ${createdAt}` },
   };
 }
 

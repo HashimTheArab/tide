@@ -12,8 +12,8 @@ const WRITERS = { publish, rollback, republish };
 /** Runs one command; each command documents its exit codes, and 2 is always a usage error. */
 async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const command = args[0];
-  if (command === "publish" || command === "rollback" || command === "republish") {
-    return await WRITERS[command](args.slice(1), env, {
+  if (command !== undefined && Object.hasOwn(WRITERS, command)) {
+    return await WRITERS[command as keyof typeof WRITERS](args.slice(1), env, {
       out: (line) => process.stdout.write(`${line}\n`),
       err: (line) => process.stderr.write(`${line}\n`),
     });

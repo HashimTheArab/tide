@@ -18,13 +18,12 @@ import { createdAtFloor } from "./pointer.ts";
 import { expoEnv, expoJson } from "./publish-export.ts";
 import { PublishError, recordKey } from "./publish-record.ts";
 import {
-  commit,
   compose,
-  finish,
+  execute,
+  plan,
   platformsOf,
   readTargets,
   recordedKeys,
-  report,
   storedContent,
 } from "./publish.ts";
 
@@ -128,21 +127,12 @@ async function run(
   parse: (cwd: string) => { readonly projectRoot: string; readonly prepare: Prepare },
 ): Promise<0 | 1 | 2> {
   const { now = Date.now, cwd = process.cwd() } = options;
-  let plan;
-  try {
+  return await execute(options, async () => {
     const { projectRoot, prepare } = parse(cwd);
     // The app config is project code, so it runs without TIDE_ variables or dotenv files.
     const config = await expoJson(projectRoot, expoEnv(env), "expo", ["config", "--json"]);
-    plan = await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
-  } catch (e) {
-    return report(e, options, 2);
-  }
-  try {
-    await commit(plan, options.out);
-  } catch (e) {
-    return report(e, options, 1);
-  }
-  return 0;
+    return await prepare(await openWriter(env, { projectRoot, config }, { now }), now);
+  });
 }
 
 /** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
@@ -155,12 +145,12 @@ function parsed<T>(usage: string, parse: () => T): T {
 }
 
 /** Returns the IDs, each a lowercase UUID, given once. */
-function updateIds(ids: readonly string[]): string[] {
+function updateIds(ids: readonly string[]): readonly string[] {
   for (const [i, id] of ids.entries()) {
     if (!isKey(recordKey(id))) throw new PublishError("an update ID is not a lowercase UUID");
     if (ids.indexOf(id) !== i) throw new PublishError(`update ID ${id} is given twice`);
   }
-  return [...ids];
+  return ids;
 }
 
 /** Signs a `rollBackToEmbedded` for each existing pointer, committed after the time it replaces. */
@@ -188,7 +178,7 @@ function rollingBack(keys: readonly string[]): Prepare {
         line: `${key} - ${commitTime.toISOString()}`,
       });
     }
-    return { ...(await finish(writer, checkCertificate)), records: [], pointers };
+    return await plan(writer, checkCertificate, [], pointers);
   };
 }
 
@@ -236,10 +226,10 @@ function republishing(ids: readonly string[], channel?: string, runtime?: string
       // Newer than the code it copies too, even when that was stamped by a clock ahead of this one.
       const createdAt = Math.max(createdAtFloor(local, previous), Date.parse(record.createdAt) + 1);
       const { updateId: _, createdAt: __, ...draft } = record;
-      const c = await compose(writer, { ...draft, channel: target }, createdAt);
-      records.push([recordKey(c.updateId), c.record] as const);
-      pointers.push({ key, previous, reply: c.reply, line: c.line(key) });
+      const c = await compose(writer, { ...draft, channel: target }, createdAt, { key, previous });
+      records.push(c.record);
+      pointers.push(c.pointer);
     }
-    return { ...(await finish(writer, checkCertificate)), records, pointers };
+    return await plan(writer, checkCertificate, records, pointers);
   };
 }
