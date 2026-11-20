@@ -1104,6 +1104,17 @@ describe("codeSigningCertificate", () => {
       },
       "repeats an extension",
     ],
+    // Apple's certificate parser refuses these two, so iOS would reject every signature.
+    [
+      "a Key Usage unused-bit count over 7",
+      { extensions: [EXTENSION.digitalSignatureUnusedBits8, EXTENSION.codeSigning] },
+      "has a malformed extension",
+    ],
+    [
+      "an Extended Key Usage entry that is not an OID",
+      { extensions: [EXTENSION.digitalSignature, EXTENSION.codeSigningAndBoolean] },
+      "has a malformed extension",
+    ],
     ["another issuer name", { issuer: "Other CA" }, "must be self-issued"],
     [
       "an unsupported signature algorithm",
@@ -1143,6 +1154,26 @@ describe("codeSigningCertificate", () => {
     const [ec, keys] = [await ecKeys(), await mainKeys()];
     const pemText = await certificate(ec.publicKey, keys.privateKey, now);
     await rejects(() => codeSigningCertificate(pemText, now), "certificate", "RSA public key");
+  });
+
+  test("passes CRLF line ends and blank lines around the block", async () => {
+    const pemText = await mainCertificate();
+    for (const ok of [pemText.replaceAll("\n", "\r\n"), `\n \n${pemText}\n\n`]) {
+      await expect(codeSigningCertificate(ok, new Date())).resolves.toBeDefined();
+    }
+  });
+
+  test("rejects PEM text the iOS decoder cannot read", async () => {
+    const pemText = await mainCertificate();
+    for (const bad of [
+      `\uFEFF${pemText}`,
+      ` ${pemText}`,
+      pemText.replace("\n-----END", "-----END"),
+      pemText.replace("CERTIFICATE-----\n", "CERTIFICATE----- \n"),
+      pemText.replace("-----END CERTIFICATE-----", "-----END CERTIFICATE----- "),
+    ]) {
+      await rejects(() => codeSigningCertificate(bad, now), "certificate", "exactly one PEM");
+    }
   });
 
   test("rejects two certificates and text around one", async () => {

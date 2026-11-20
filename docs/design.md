@@ -229,10 +229,10 @@ a loopback IP literal). Throttling, access denied, a disabled key, a timeout or 
 
 **Identity.** The app config gives the certificate (`updates.codeSigningCertificate`, relative to the project root)
 and `updates.codeSigningMetadata`. `keyid` is required, since Expo's implicit `root` is refused, and `alg` must be
-absent or `rsa-v1_5-sha256`. The certificate must be one self-signed X.509 v3 certificate, valid now, signed with
-`sha256WithRSAEncryption` (the same identifier inside and outside the TBS), with Key Usage `digitalSignature`,
-Extended Key Usage `codeSigning`, no repeated extension, no Expo project-information extension, and an RSA key of
-2048 to 4096 bits.
+absent or `rsa-v1_5-sha256`. The certificate must be one ASCII PEM block, each delimiter alone on its line, holding
+one self-signed X.509 v3 certificate, valid now, signed with `sha256WithRSAEncryption` (the same identifier inside and
+outside the TBS), with well-formed Key Usage `digitalSignature`, Extended Key Usage `codeSigning`, no repeated
+extension, no Expo project-information extension, and an RSA key of 2048 to 4096 bits.
 
 **Build pins.** The checkout can drift from what installed builds embed, so two required variables record the store
 builds' identity, read from a shipped binary rather than the checkout:

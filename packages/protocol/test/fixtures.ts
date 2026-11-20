@@ -134,8 +134,13 @@ const name = (cn: string) =>
 export const EXTENSION = {
   digitalSignature: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020780")), // keyUsage critical
   keyCertSignOnly: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020204")),
+  digitalSignatureUnusedBits8: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020880")),
   codeSigning: der(SEQUENCE, hexBytes("0603551d250101ff040c300a06082b06010505070303")), // extKeyUsage critical
   serverAuthOnly: der(SEQUENCE, hexBytes("0603551d25040c300a06082b06010505070301")),
+  codeSigningAndBoolean: der(
+    SEQUENCE,
+    hexBytes("0603551d250101ff040f300d06082b060105050703030101ff"),
+  ),
   // Expo's project information (1.2.840.113556.1.8000.2554.43437.254.128.102.157.7894389.20439.2.1).
   projectInformation: der(
     SEQUENCE,

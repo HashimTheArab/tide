@@ -112,8 +112,9 @@ export async function codeSigningCertificate(
   pem: string,
   now: Date,
 ): Promise<CodeSigningCertificate> {
+  // ASCII, with each delimiter alone on its line: iOS decodes nothing else.
   const block =
-    /^\s*-----BEGIN CERTIFICATE-----\r?\n([A-Za-z0-9+/=\r\n]*)-----END CERTIFICATE-----\s*$/.exec(
+    /^(?:[\t\n\r ]*\n)?-----BEGIN CERTIFICATE-----\r?\n((?:[A-Za-z0-9+/=]*\r?\n)*)-----END CERTIFICATE-----(?:\r?\n[\t\n\r ]*)?$/.exec(
       pem,
     )?.[1];
   if (block === undefined) {
@@ -315,6 +316,10 @@ function extensionsOf(der: Uint8Array, wrapper: Tlv | undefined): Map<string, Ui
 function digitalSignature(value: Uint8Array | undefined): boolean {
   if (value === undefined) return false;
   const bits = readTlv(value, 0, value.length);
+  // Apple's parser refuses the whole certificate for an unused-bit count over 7.
+  if (bits.tag === BIT_STRING && (value[bits.body] ?? 0) > 7) {
+    throw new ProtocolError("certificate", "has a malformed extension");
+  }
   return (
     bits.tag === BIT_STRING &&
     bits.end === value.length &&
@@ -329,7 +334,11 @@ function extendedKeyUsages(value: Uint8Array | undefined): string[] {
   const outer = readTlv(value, 0, value.length);
   if (outer.end !== value.length)
     throw new ProtocolError("certificate", "has a malformed extension");
-  return sequence(value, outer).map((t) => (t.tag === OID ? oid(value, t) : ""));
+  // Apple's parser refuses the whole certificate for any entry that is not an OID.
+  return sequence(value, outer).map((t) => {
+    if (t.tag !== OID) throw new ProtocolError("certificate", "has a malformed extension");
+    return oid(value, t);
+  });
 }
 
 /** Returns the dotted form of the OBJECT IDENTIFIER at `tlv`. */
