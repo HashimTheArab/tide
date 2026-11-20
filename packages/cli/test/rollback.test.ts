@@ -21,7 +21,6 @@ import {
   diskObjects,
   env,
   identity,
-  installFakeExpo,
   main,
   other,
   project,
