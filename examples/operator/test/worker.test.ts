@@ -4,7 +4,6 @@ import { expect, inject, onTestFinished, test, vi } from "vitest";
 declare module "vitest" {
   export interface ProvidedContext {
     fixtures: { noUpdateReply: number[]; noUpdateMultipart: number[] };
-    appId: string; // This environment's TIDE_APP_ID.
   }
 }
 
@@ -33,7 +32,7 @@ test("/manifest serves the environment's bucket and records one point through it
   onTestFinished(() => {
     spy.mockRestore();
   });
-  const res = await manifest(inject("appId"));
+  const res = await manifest(env.TIDE_APP_ID);
   expect(res.status).toBe(200);
   expect(new Uint8Array(await res.arrayBuffer())).toEqual(
     new Uint8Array(fixtures.noUpdateMultipart),

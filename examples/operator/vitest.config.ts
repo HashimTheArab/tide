@@ -18,7 +18,7 @@ export default defineConfig({
       test: {
         name: environment,
         include: ["test/**/*.test.ts"],
-        provide: { fixtures, appId: `example-app-${environment}` },
+        provide: { fixtures },
       },
     })),
   },

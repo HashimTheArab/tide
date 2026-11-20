@@ -15,7 +15,7 @@
       "matchPackageNames": ["oxlint", "oxfmt", "oxlint-tsgolint", "typescript"]
     },
     {
-      "description": "Run `pnpm -r types` after a bump; the gate checks the generated types.",
+      "description": "Run `pnpm -F @tide/server types` after a bump; the gate checks the generated types.",
       "groupName": "Cloudflare",
       "matchPackageNames": ["wrangler", "@cloudflare/**"]
     },

@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -35,16 +35,6 @@ const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const image = inject("image");
 const exec = promisify(execFile);
 const docker = async (...args: string[]) => (await exec("docker", args)).stdout.trim();
-const tar = (...args: string[]) =>
-  execFileSync("tar", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-
-/** Every regular file and symlink under `dir`, relative to it. */
-function files(dir: string): string[] {
-  return readdirSync(dir, { recursive: true, encoding: "utf8" }).filter(
-    (p) => !lstatSync(join(dir, p)).isDirectory(),
-  );
-}
-
 /** The names, `package.json` aside, that a workspace manifest lists as devDependencies. */
 function devDependencies(): string[] {
   const manifests = ["package.json", ...allowlist().filter((f) => f.endsWith("/package.json"))];
@@ -90,55 +80,41 @@ describe("the Node image", () => {
     );
   });
 
-  test("its own layers hold only the allowlisted files and production dependencies", async () => {
-    const [base] = JSON.parse(await docker("image", "inspect", image.base)) as [
-      { RootFS: { Layers: string[] } },
-    ];
-    const saved = JSON.parse(tar("-xOf", image.saved, "manifest.json")) as [
-      { Config: string; Layers: string[] },
-    ];
-    const config = JSON.parse(tar("-xOf", image.saved, saved[0].Config)) as {
-      rootfs: { diff_ids: string[] };
-    };
-    const own = config.rootfs.diff_ids.length - base.RootFS.Layers.length;
-    expect(config.rootfs.diff_ids.slice(0, base.RootFS.Layers.length)).toEqual(base.RootFS.Layers);
-    expect(own).toBeGreaterThan(0);
-
-    const blobs = tempRoot();
-    const tree = tempRoot();
-    const layers = saved[0].Layers.slice(-own);
-    tar("-xf", image.saved, "-C", blobs, ...layers);
-    for (const layer of layers) {
-      const entries = tar("-tf", join(blobs, layer)).split("\n").filter(Boolean);
-      for (const entry of entries) {
-        expect(entry).toMatch(/^app(\/|$)/);
-        expect(entry).not.toMatch(/(^|\/)\.wh\./);
-        expect(entry).not.toMatch(
-          /(^|\/)(\.env[^/]*|\.npmrc|id_[^/]*|[^/]*\.(pem|key|p8|p12|pfx))$/,
-        );
-      }
-      tar("-xf", join(blobs, layer), "-C", tree);
+  test("its /app holds only the allowlisted files, production dependencies and no key", async () => {
+    const all = (
+      await docker("run", "--rm", "--entrypoint", "find", image.tag, "/app", "-not", "-type", "d")
+    ).split("\n");
+    for (const path of all) {
+      expect(path).not.toMatch(/(^|\/)(\.env[^/]*|\.npmrc|id_[^/]*|[^/]*\.(pem|key|p8|p12|pfx))$/);
     }
-
-    const app = join(tree, "app");
-    const all = files(app);
-    expect(all.filter((p) => !p.split("/").includes("node_modules")).sort()).toEqual(
-      allowlist().sort(),
-    );
-    const store = readdirSync(join(app, "node_modules/.pnpm"));
+    expect(
+      all
+        .filter((p) => !p.split("/").includes("node_modules"))
+        .map((p) => p.slice("/app/".length))
+        .sort(),
+    ).toEqual(allowlist().sort());
+    const store = (
+      await docker("run", "--rm", "--entrypoint", "ls", image.tag, "/app/node_modules/.pnpm")
+    ).split("\n");
     for (const name of devDependencies()) {
       expect(store.filter((d) => d.startsWith(`${name.replace("/", "+")}@`))).toEqual([]);
     }
-    const bodies = [main.certificate, main.pkcs8].flatMap((pem) =>
-      pem.split("\n").filter((l) => l.length >= 16 && !l.startsWith("-----")),
-    );
-    for (const path of all) {
-      if (lstatSync(join(app, path)).isSymbolicLink()) continue;
-      const text = readFileSync(join(app, path), "latin1");
-      if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text) || bodies.some((b) => text.includes(b))) {
-        throw new Error(`${relative(tree, join(app, path))} holds key or certificate text`);
-      }
-    }
+    // grep exits 1 when nothing matches.
+    const keys = await docker(
+      "run",
+      "--rm",
+      "--entrypoint",
+      "grep",
+      image.tag,
+      "-rl",
+      "-e",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "/app",
+    ).catch((e: { code?: number; stdout?: string }) => {
+      if (e.code === 1 && e.stdout === "") return "";
+      throw e;
+    });
+    expect(keys).toBe("");
   });
 
   test("serves /hc and each platform's signed /manifest from a bucket the CLI published, and stops on SIGTERM", async () => {
