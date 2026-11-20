@@ -68,9 +68,9 @@ read-only token.
   A 404 is absence only when the body is an S3 error document with one direct `Code` of `NoSuchKey`.
   SigV4 and these rules live in protocol `s3.ts`, shared by the server and the CLI.
 - **Disk** (Node, tests and single-host development): `TIDE_DISK_DIR`. The root is trusted: only the publisher
-  writes it, and the server reads it with the publisher's access. Containment is the key grammar alone, checked
-  before any filesystem call; there are no symlink, realpath or volume checks and no metadata files except `.tide/`,
-  which holds the CLI's writer mutex and staged files and which no key can name. A root missing after startup is an outage (503), not a miss.
+  writes it; the server only reads it. Containment is the key grammar alone, checked before any filesystem call;
+  there are no symlink, realpath or volume checks and no metadata files except `.tide/`, which holds the CLI's writer
+  mutex and staged files and which no key can name. A root missing after startup is an outage (503), not a miss.
   Protocol `diskPath` maps a key to its file: in a reply key, every character of channel and runtime outside
   `a-z 0-9` becomes `_` and two hex digits (`Main` is `_4dain`), so names differing only in case stay distinct on a
   case-insensitive filesystem and no channel collides with the `reply/no-update` file.
@@ -272,9 +272,9 @@ first write; arguments are checked before Expo runs.
 
 Refused: an ID that is not a lowercase UUID or is given twice; an ID with no release record; a release record that
 is unreadable or names another ID; a record whose runtime differs from `--runtime-version`; two IDs with one target
-pointer; a referenced bundle or asset that is not stored (on disk, a regular file the CLI can open); and any
-asset key two retained records disagree on. A lost race or unknown outcome behaves as publish; a record whose PUT
-has an unknown outcome is named, and no pointer refers to it yet.
+pointer; a referenced bundle or asset that is not stored; and any asset key two retained records disagree on. A lost
+race or unknown outcome behaves as publish; a record whose PUT has an unknown outcome is named, and no pointer refers
+to it yet.
 
 Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `status`, and
 `gc` (dry-run by default; never deletes anything a retained update, rollback, base or legacy map

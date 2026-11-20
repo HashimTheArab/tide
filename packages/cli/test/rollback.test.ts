@@ -1,8 +1,8 @@
-import { appendFileSync, chmodSync, cpSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, cpSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { NO_UPDATE_KEY, decodeStoredReply, diskPath, sha256Base64Url } from "@tide/protocol";
+import { NO_UPDATE_KEY, decodeStoredReply, sha256Base64Url } from "@tide/protocol";
 
 import type { Manifest } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
@@ -10,7 +10,7 @@ import { diskBucket } from "../src/disk.ts";
 import { decodeRecord, recordKey } from "../src/publish-record.ts";
 import { republish, rollback } from "../src/publish-rollback.ts";
 import { publish } from "../src/publish.ts";
-import { run, tempRoot, unprivileged, utf8 } from "./helpers.ts";
+import { run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
   EXPORT,
@@ -495,40 +495,6 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 });
 
 describe("on disk", () => {
-  test.each(["dir", "locked"] as const)(
-    "a source bundle the server cannot open (%s) is refused",
-    async (mode) => {
-      const parent = tempRoot();
-      const store = STORES.disk(join(parent, "bucket"));
-      mkdirSync(store.root);
-      installFakeExpo(join(parent, "app"));
-      const app = project({ root: join(parent, "app") });
-      const a = await publishIos(store, app.root);
-      const key = new URL(a.launchAsset.url).pathname.slice(1);
-      const bundle = join(store.root, diskPath(key));
-      if (mode === "dir") {
-        rmSync(bundle);
-        mkdirSync(bundle);
-      }
-      const before = store.snapshot();
-      await unprivileged(parent, async () => {
-        if (mode === "locked") chmodSync(bundle, 0);
-        try {
-          expect(
-            await cmd("republish", [a.id, "--project-root", app.root], writerEnv(store)),
-          ).toEqual({
-            code: 2,
-            out: [],
-            err: [`tide: update ${a.id} references ${key}, which is missing`],
-          });
-        } finally {
-          if (mode === "locked") chmodSync(bundle, 0o644);
-        }
-      });
-      expect(store.snapshot()).toEqual(before);
-    },
-  );
-
   test.each<[string, string[], string]>([
     ["rollback --to A B", ["rollback", "--to", UNKNOWN_ID, UNKNOWN_ID], "unrecognised arguments"],
     ["rollback with no mode", ["rollback"], "give --embedded or --to;"],
