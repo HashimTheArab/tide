@@ -77,7 +77,7 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array) {
   }
   const oldsize = base.length;
   const newsize = target.length;
-  const I = sortRotations(base, true);
+  const I = sortRotations(base, true).order;
 
   // Every byte `search` compares counts; once the budget is spent, matching stops.
   const budget = WORK_PER_BYTE * (oldsize + newsize) + WORK_FLOOR;
@@ -137,10 +137,12 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array) {
     }
 
     if (len !== oldscore || scan === newsize) {
+      // Out of budget, nothing is extended: the rest of the target is extra bytes and the seek is zero.
+      const out = spent();
       let s = 0;
       let best = 0;
       let lenf = 0;
-      for (let i = 0; lastscan + i < scan && lastpos + i < oldsize;) {
+      for (let i = 0; !out && lastscan + i < scan && lastpos + i < oldsize;) {
         if (base[lastpos + i] === target[lastscan + i]) s++;
         i++;
         if (s * 2 - i > best * 2 - lenf) {
@@ -179,8 +181,7 @@ export function diffBlocks(base: Uint8Array, target: Uint8Array) {
         lenb -= lens;
       }
 
-      // Out of budget, the rest of the target is extra bytes and the seek is zero.
-      if (spent()) pos = lastpos + lenf;
+      if (out) pos = lastpos;
       for (let i = 0; i < lenf; i++) {
         db[dblen + i] = (target[lastscan + i] ?? 0) - (base[lastpos + i] ?? 0);
       }

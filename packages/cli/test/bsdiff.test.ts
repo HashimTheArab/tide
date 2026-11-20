@@ -7,6 +7,7 @@ import { applyBsdiff } from "@tide/protocol";
 
 import type { BundleModule } from "./bundle-fixture.ts";
 import { MAX_BSDIFF_INPUT, diffBlocks, makeBsdiff } from "../src/bsdiff.ts";
+import { sortRotations } from "../src/bzip2.ts";
 import { bundleVersions, serialiseBundle } from "./bundle-fixture.ts";
 import { fixture, prng } from "./helpers.ts";
 
@@ -42,14 +43,31 @@ describe("makeBsdiff", () => {
     expect(() => makeBsdiff(small, over)).toThrow(RangeError);
   });
 
-  test("a long near-match stops at the work budget and still reproduces its target", () => {
+  test("a long near-match stops at the work budget, writes the rest as extra bytes and reproduces its target", () => {
     // Each search follows equal prefixes down to a short match, so the unbounded scan compares about 1.3 n^2 bytes.
     const n = 2 ** 14;
     const base = new Uint8Array(2 * n).fill(0x61);
     base[n - 1] = 0x62;
     const target = new Uint8Array(n).fill(0x61);
-    expect(diffBlocks(base, target).exhausted).toBe(true);
+    const ctrl = new Uint8Array(24);
+    new DataView(ctrl.buffer).setUint32(8, n, true); // One triple: add 0, copy n, seek 0.
+    expect(diffBlocks(base, target)).toEqual({ ctrl, diff: EMPTY, extra: target, exhausted: true });
     expect(roundTrip(base, target)).toEqual(target);
+  });
+});
+
+describe("suffix sorting", () => {
+  const n = 2 ** 20;
+  test.each([
+    ["a run", new Uint8Array(n)],
+    ["a two-byte period", Uint8Array.from({ length: n }, (_, i) => i % 2)],
+  ])("%s reads under 5 n log2 n ranks, where median-of-three pivots alone degrade", (_, base) => {
+    expect(sortRotations(base, true).reads).toBeLessThan(5 * n * Math.log2(n));
+  });
+
+  test("a run's suffixes sort shortest first", () => {
+    const { order } = sortRotations(new Uint8Array(n), true);
+    expect(order).toEqual(Int32Array.from({ length: n + 1 }, (_, i) => n - i));
   });
 });
 
@@ -147,6 +165,24 @@ describe(`properties (seed ${inject("fcSeed")})`, () => {
     fc.tuple(runs, runs),
     smallEdits(runs),
   );
+
+  test("suffix sorting puts every suffix after the one before it", () => {
+    /** Returns whether `b[x..]` sorts before `b[y..]`, the shorter first on a common prefix. */
+    const before = (b: Uint8Array, x: number, y: number) => {
+      for (; x < b.length && y < b.length && b[x] === b[y]; x++, y++);
+      return x === b.length || (y < b.length && (b[x] ?? 0) < (b[y] ?? 0));
+    };
+    fc.assert(
+      fc.property(fc.oneof(bytes(1024), runs), (b) => {
+        const { order } = sortRotations(b, true);
+        expect([...order].toSorted((x, y) => x - y)).toEqual([...Array(b.length + 1).keys()]);
+        for (let i = 1; i <= b.length; i++) {
+          expect(before(b, order[i - 1] ?? 0, order[i] ?? 0)).toBe(true);
+        }
+      }),
+      { seed },
+    );
+  });
 
   test("a patch from any base reproduces its target, and the same inputs give the same bytes", () => {
     fc.assert(
