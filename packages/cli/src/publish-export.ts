@@ -173,7 +173,7 @@ async function readExport<T extends { readonly platform: Platform }>(
     const real = containedPath(root, path, field);
     let found = cache.get(real);
     if (found === undefined) {
-      const bytes = readRegular(real, Infinity, field);
+      const bytes = readRegular(real, Infinity, `export ${field}`);
       found = { bytes, hash: await sha256Base64Url(bytes) };
       cache.set(real, found);
     }
@@ -185,7 +185,7 @@ async function readExport<T extends { readonly platform: Platform }>(
     const bytes = readRegular(
       containedPath(root, "metadata.json", "metadata.json"),
       METADATA_LIMIT,
-      "metadata.json",
+      "export metadata.json",
     );
     metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (e) {
@@ -260,18 +260,18 @@ function containedPath(root: string, path: unknown, field: string): string {
   return real;
 }
 
-/** Returns the bytes of the regular file at `path`, read through one descriptor. */
-function readRegular(path: string, limit: number, field: string): Uint8Array<ArrayBuffer> {
+/** Returns the bytes of the regular file at `path`, read through one descriptor; `name` leads each refusal. */
+export function readRegular(path: string, limit: number, name: string): Uint8Array<ArrayBuffer> {
   let fd: number;
   try {
     fd = openSync(path, OPEN_FLAGS);
   } catch {
-    throw new PublishError(`export ${field} is missing or unreadable`);
+    throw new PublishError(`${name} is missing or unreadable`);
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile()) throw new PublishError(`export ${field} is not a regular file`);
-    if (stat.size > limit) throw new PublishError(`export ${field} is over ${limit} bytes`);
+    if (!stat.isFile()) throw new PublishError(`${name} is not a regular file`);
+    if (stat.size > limit) throw new PublishError(`${name} is over ${limit} bytes`);
     return new Uint8Array(readFileSync(fd));
   } finally {
     closeSync(fd);

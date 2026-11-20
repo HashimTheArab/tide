@@ -3,12 +3,13 @@ import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
 import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "./publish.ts";
+import { REGISTER_BUILD_USAGE, registerBuild } from "./register-build.ts";
 import { status } from "./status.ts";
 import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}`;
-const WRITERS = { publish, rollback, republish };
+const USAGE = `usage: tide status\nusage: tide storage\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}`;
+const WRITERS = { publish, rollback, republish, "register-build": registerBuild };
 const READERS = { status, storage };
 
 /** Runs one command; each command documents its exit codes, and 2 is always a usage error. */

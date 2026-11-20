@@ -2,13 +2,14 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { LEGACY_MAP_KEY, contentKey, sha256Base64Url } from "@tide/protocol";
+import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide/protocol";
 import { FAKE_S3 } from "@tide/server/test/fake-s3";
 
 import { byteOrder } from "../src/bucket.ts";
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { republish, rollback } from "../src/publish-rollback.ts";
 import { publish } from "../src/publish.ts";
+import { registerBuild } from "../src/register-build.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import { run, tempRoot, utf8 } from "./helpers.ts";
 import {
@@ -54,7 +55,7 @@ const STORES = {
 };
 type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
 
-const COMMANDS = { publish, rollback, republish };
+const COMMANDS = { publish, rollback, republish, "register-build": registerBuild };
 const UPDATE_ID = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
 const SUMMARY = (n: number, total: bigint | number) => `${n} unreferenced objects, ${total} bytes`;
 
@@ -150,13 +151,24 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       [r3, "--channel", "beta", "--project-root", app.root],
       writerEnv(store),
     );
+    const build = tempRoot();
+    writeFileSync(join(build, "app.manifest"), JSON.stringify({ id: UPDATE_ID, assets: [] }));
+    writeFileSync(join(build, "main.jsbundle"), "embedded");
+    await write(
+      "register-build",
+      [
+        ...["--platform", "ios", "--runtime-version", "1.0.0"],
+        ...["--manifest", join(build, "app.manifest"), "--bundle", join(build, "main.jsbundle")],
+      ],
+      store.env,
+    );
 
-    // Each object below is protected by one traversal alone, so dropping any traversal changes the report.
+    // Each object below is protected by one traversal alone, so dropping any traversal changes the report. Every
+    // update's bundle has two roots, its release record and its base record.
     const exported = (path: string) => new Uint8Array(readFileSync(join(EXPORT, path)));
     const protectedKeys = [
       await contentOf("assets", exported("assets/75d117bbd0d2fe64c29bb45b5abe285e")), // The font, only in R1.
-      await contentOf("bundles", exported("_expo/static/js/ios/index-ios.hbc")), // Only in R1.
-      await contentOf("bundles", exported("_expo/static/js/android/index-android.hbc")), // Rolled-back R2.
+      await contentOf("bundles", utf8("embedded")), // Only in the registered build.
     ];
     const bucket = bucketFromEnv(store.env);
     const stored = async (prefix: "assets" | "bundles", bytes: Uint8Array<ArrayBuffer>) => {
@@ -178,6 +190,14 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     for (const [name, printed, bytes] of odd) {
       store.plant(name, bytes);
       expect(JSON.parse(printed)).toBe(name);
+    }
+    // Never reported: base records are roots, and patches are served only beside their bundles.
+    for (const name of [
+      "bases/notes.txt",
+      "patches/notes",
+      `patches/${"a".repeat(64)}/${"b".repeat(64)}`,
+    ]) {
+      store.plant(name, utf8("never reported"));
     }
     for (const key of protectedKeys) expect(store.objects().has(key), key).toBe(true);
 
@@ -216,6 +236,12 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json",
       undefined,
       "updates/0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90.json is unreadable: its updateId differs from its name",
+    ],
+    [
+      "a base record that does not decode",
+      baseKey(UPDATE_ID),
+      utf8("{}"),
+      `${baseKey(UPDATE_ID)} is unreadable: version must be an integer`,
     ],
     [
       "a legacy map with a trailing newline",
@@ -311,6 +337,8 @@ describe("on S3", () => {
     const bytes = s3.objects.get(key)!;
     s3.objects.delete(key);
     s3.objects.delete(IOS);
+    // Its base record would protect the bundle in both runs.
+    s3.objects.delete([...s3.objects.keys()].find((k) => k.startsWith("bases/"))!);
     s3.onList("updates/", () => s3.objects.set(key, bytes));
     const content = [...s3.objects]
       .filter(([k]) => /^(?:assets|bundles)\//.test(k))
