@@ -22,10 +22,9 @@ import {
   IOS,
   MAIN,
   diskObjects,
+  artifact,
   env,
-  installFakeExpo,
   main,
-  project,
   useFixture,
 } from "../publish-fixture.ts";
 
@@ -118,16 +117,12 @@ describe("the Node image", () => {
   });
 
   test("serves /hc and each platform's signed /manifest from a bucket the CLI published, and stops on SIGTERM", async () => {
-    const workspace = tempRoot();
-    installFakeExpo(workspace);
-    const app = project({ root: join(workspace, "apps", "app") });
     const bucket = tempRoot();
     // The key reaches only the CLI, through its environment; the mount holds what it published.
     const published = await run(
       MAIN,
-      ["publish", "--channel", "main", "--project-root", app.root],
+      ["publish", "--channel", "main", "--from", artifact()],
       env({ TIDE_DISK_DIR: bucket }),
-      tempRoot(),
     );
     expect(published.code).toBe(0);
     execFileSync("chmod", ["-R", "a+rX", bucket]); // The container runs as uid 1000.

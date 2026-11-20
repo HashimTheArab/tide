@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -7,6 +16,8 @@ import { expectNoPem, run, tempRoot } from "./helpers.ts";
 import {
   MAIN,
   PNG_MD5,
+  artifact,
+  env,
   exportIn,
   installFakeExpo,
   main,
@@ -215,6 +226,38 @@ describe("child processes", () => {
   );
 });
 
+test("no writer starts a child process, even from inside a project with Expo installed", async () => {
+  // Every command a writer could reach on PATH leaves a marker instead.
+  const shims = tempRoot();
+  const marker = join(shims, "marker");
+  for (const name of ["node", "sh", "npx", "npm", "pnpm", "expo", "expo-updates", "git"]) {
+    writeFileSync(join(shims, name), `#!/bin/sh\necho ${name} >> '${marker}'\n`);
+    chmodSync(join(shims, name), 0o755);
+  }
+  const app = project();
+  const bucket = tempRoot();
+  const environment = { ...env({ TIDE_DISK_DIR: bucket }), PATH: shims };
+  const tide = async (...args: string[]) => {
+    const result = await run(MAIN, args, environment, app.root);
+    expect([args[0], result.code, result.stderr]).toEqual([args[0], 0, ""]);
+    return result.stdout;
+  };
+  const published = await tide("publish", "--from", artifact(), "--channel", "main");
+  const id = published.split(" ")[1] ?? "";
+  await tide("republish", id, "--channel", "beta");
+  await tide("rollback", "--to", id);
+  await tide("rollback", "--embedded", "--channel", "main", "--runtime-version", "1.0.0");
+  const build = tempRoot();
+  writeFileSync(join(build, "app.manifest"), JSON.stringify({ id: randomUUID(), assets: [] }));
+  writeFileSync(join(build, "main.jsbundle"), "embedded");
+  await tide(
+    ...["register-build", "--platform", "ios", "--runtime-version", "1.0.0"],
+    ...["--manifest", join(build, "app.manifest"), "--bundle", join(build, "main.jsbundle")],
+  );
+  expect(existsSync(marker)).toBe(false);
+  expect(readdirSync(app.root)).not.toContain("fake-expo.log");
+});
+
 describe("refusals", () => {
   const updates = (metadata: unknown, certificate?: string) => ({
     updates: {
@@ -278,6 +321,36 @@ describe("refusals", () => {
     expect(result).toMatchObject({ code: 2, out: [], err: [`tide: ${message}`] });
     expectNoPem(result.err.join("\n"), main.pkcs8);
     expect(result.err.join("\n")).not.toContain(SENTINEL);
+    expect(existsSync(result.dir)).toBe(false);
+  });
+
+  test("a missing certificate file is refused", async () => {
+    const app = project();
+    rmSync(join(app.root, "keys", "certificate.pem"));
+    expect(await exportIn(app.root, [], PATH)).toMatchObject({
+      code: 2,
+      err: ["tide: updates.codeSigningCertificate is unreadable or over 64 KiB"],
+    });
+  });
+
+  test("a project without Expo installed is refused", async () => {
+    const app = project({ root: join(tempRoot(), "app") });
+    expect(await exportIn(app.root, [], PATH)).toMatchObject({
+      code: 2,
+      err: [
+        "tide: expo is not installed in the project: add expo and expo-updates to its dependencies",
+      ],
+    });
+  });
+
+  test("an Expo tool that fails refuses the export", async () => {
+    const app = project();
+    writeFileSync(join(app.root, "app.config.mjs"), 'throw new Error("broken config");\n');
+    const result = await exportIn(app.root, [], PATH);
+    expect(result).toMatchObject({
+      code: 2,
+      err: ["tide: expo config failed with exit code 1"],
+    });
     expect(existsSync(result.dir)).toBe(false);
   });
 

@@ -1,6 +1,5 @@
 import { createPrivateKey } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { KeyObject } from "node:crypto";
 
 import type { Signer } from "@tide/protocol";
@@ -27,12 +26,6 @@ export class KeyError extends Error {
   }
 }
 
-/** The app whose updates are signed: its root and the `exp` object `expo config --json` prints. */
-export interface AppProject {
-  readonly projectRoot: string;
-  readonly config: unknown;
-}
-
 /** The identity an export carries: the certificate PEM and the code-signing metadata, both unchecked. */
 export interface ExportedApp {
   readonly certificate: string;
@@ -45,11 +38,13 @@ export interface SigningMetadata {
   readonly alg?: "rsa-v1_5-sha256";
 }
 
-/** What the installed builds trust: the certificate's verify key and the code-signing key ID. */
-interface Identity {
+/** What the shipped builds trust: their certificate, its verify key and DER SHA-256, and their key ID. */
+export interface Identity {
   readonly key: CryptoKey;
   readonly keyId: string;
   readonly pem: string;
+  readonly sha256: string;
+  readonly source: string; // The variable the certificate came from.
 }
 
 /** A proven signer and the bucket it may write, with the checks a write command repeats before activating. */
@@ -72,20 +67,27 @@ const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
 const KEY_FILE = "TIDE_SIGNING_KEY_FILE";
 const KEY_PEM = "TIDE_SIGNING_KEY";
 const BUILD_KEYID = "TIDE_BUILD_KEYID";
-const BUILD_CERTIFICATE = "TIDE_BUILD_CERTIFICATE_SHA256";
-const FINGERPRINT = /^(?:[0-9a-f]{64}|[0-9a-f]{2}(?::[0-9a-f]{2}){31})$/i;
+const CERTIFICATE_FILE = "TIDE_BUILD_CERTIFICATE_FILE";
+const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
+const EXPORT_METADATA = "tide-export.json codeSigningMetadata";
 
 /**
- * Returns a signer proven against the app's certificate and the bucket it may write. Every refusal about the key or
- * the app comes before the bucket is constructed; the bucket check then only reads replies.
+ * Returns a signer proven against the shipped builds' certificate and the bucket it may write; with `app`, refused
+ * unless an export carries that same certificate and key ID. Every refusal about the key or identity comes before the
+ * bucket is constructed; the bucket check then only reads replies.
  */
 export async function openWriter(
   env: Env,
-  project: AppProject | ExportedApp,
-  options: { readonly kmsTimeoutMs?: number; readonly now?: () => number } = {},
+  options: {
+    readonly kmsTimeoutMs?: number;
+    readonly now?: () => number;
+    readonly app?: ExportedApp;
+  } = {},
 ): Promise<Writer> {
-  const { now = Date.now } = options;
-  const identity = await appIdentity(env, project, now());
+  const { now = Date.now, app } = options;
+  const at = now();
+  const identity = await buildIdentity(env, at);
+  if (app !== undefined) await checkApp(app, identity, at);
   const signer = verifying(
     keySource(env, identity.keyId, options.kmsTimeoutMs ?? 30_000),
     identity,
@@ -98,18 +100,55 @@ export async function openWriter(
     noUpdate: await checkBucket(bucket, identity),
     checkNoUpdate: () => checkBucket(bucket, identity),
     checkCertificate: async (at) => {
-      await validCertificate(identity.pem, at);
+      await validCertificate(identity.pem, identity.source, at);
     },
   };
 }
 
+/**
+ * Returns the shipped builds' identity: `TIDE_BUILD_KEYID` and the certificate in exactly one of
+ * `TIDE_BUILD_CERTIFICATE_FILE` and `TIDE_BUILD_CERTIFICATE`, checked against the profile at epoch milliseconds `now`.
+ */
+export async function buildIdentity(env: Env, now: number): Promise<Identity> {
+  const keyId = read(env, BUILD_KEYID);
+  if (keyId === undefined) {
+    throw new KeyError(`${BUILD_KEYID} is not set: set it to the keyid the builds embed`);
+  }
+  if (!/^[\x20-\x7E]+$/.test(keyId)) throw new KeyError(`${BUILD_KEYID} must be printable ASCII`);
+  const file = read(env, CERTIFICATE_FILE);
+  const value = read(env, CERTIFICATE_PEM);
+  if ((file === undefined) === (value === undefined)) {
+    throw new KeyError(`set exactly one of ${CERTIFICATE_FILE} and ${CERTIFICATE_PEM}`);
+  }
+  const source = file === undefined ? CERTIFICATE_PEM : CERTIFICATE_FILE;
+  // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
+  const pem = file === undefined ? value : readSmallFile(file)?.toString("utf8");
+  if (pem === undefined) {
+    throw new KeyError(`${CERTIFICATE_FILE} unreadable: not a regular file of at most 64 KiB`);
+  }
+  const { key, sha256 } = await validCertificate(pem, source, now);
+  return { key, keyId, pem, sha256, source };
+}
+
+/** Refuses an export whose certificate or key ID is not the shipped builds'. */
+async function checkApp(app: ExportedApp, identity: Identity, now: number): Promise<void> {
+  const { keyid } = signingMetadata(app.codeSigningMetadata, EXPORT_METADATA);
+  if (keyid !== identity.keyId) {
+    throw new KeyError(`${EXPORT_METADATA}.keyid differs from ${BUILD_KEYID}`);
+  }
+  const { sha256 } = await validCertificate(app.certificate, "tide-export.json certificate", now);
+  if (sha256 !== identity.sha256) {
+    throw new KeyError(`tide-export.json certificate differs from ${identity.source}`);
+  }
+}
+
 /** Returns the certificate checked against the code-signing profile at epoch milliseconds `at`. */
-async function validCertificate(pem: string, at: number) {
+async function validCertificate(pem: string, source: string, at: number) {
   try {
     return await codeSigningCertificate(pem, new Date(at));
   } catch (e) {
     if (!(e instanceof ProtocolError)) throw e;
-    throw new KeyError(`updates.codeSigningCertificate: ${e.message}`);
+    throw new KeyError(`${source}: ${e.message}`);
   }
 }
 
@@ -128,61 +167,6 @@ export function signingMetadata(metadata: unknown, field: string): SigningMetada
   if (alg === undefined) return { keyid };
   if (alg !== "rsa-v1_5-sha256") throw new KeyError(`${field}.alg must be rsa-v1_5-sha256`);
   return { keyid, alg };
-}
-
-/** Reads the app's identity, checked against the build pins and the certificate profile at `now`. */
-async function appIdentity(
-  env: Env,
-  project: AppProject | ExportedApp,
-  now: number,
-): Promise<Identity> {
-  let metadata: unknown;
-  let pem: string | undefined;
-  if ("projectRoot" in project) {
-    const updates = member(project.config, "updates");
-    const certificatePath = member(updates, "codeSigningCertificate");
-    if (typeof certificatePath !== "string" || certificatePath === "") {
-      throw new KeyError(
-        "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
-      );
-    }
-    metadata = member(updates, "codeSigningMetadata");
-    // Invalid UTF-8 decodes to U+FFFD, which the certificate's PEM pattern refuses.
-    pem = readSmallFile(join(project.projectRoot, certificatePath))?.toString("utf8");
-  } else {
-    metadata = project.codeSigningMetadata;
-    pem = project.certificate;
-  }
-  const { keyid: keyId } = signingMetadata(
-    metadata,
-    "projectRoot" in project
-      ? "app config updates.codeSigningMetadata"
-      : "tide-export.json codeSigningMetadata",
-  );
-  const buildKeyId = read(env, BUILD_KEYID);
-  if (buildKeyId === undefined) {
-    throw new KeyError(`${BUILD_KEYID} is not set: set it to the keyid the store builds embed`);
-  }
-  const buildCertificate = read(env, BUILD_CERTIFICATE);
-  if (buildCertificate === undefined) {
-    throw new KeyError(
-      `${BUILD_CERTIFICATE} is not set: set it to the fingerprint of the certificate the store builds embed`,
-    );
-  }
-  if (!FINGERPRINT.test(buildCertificate)) {
-    throw new KeyError(`${BUILD_CERTIFICATE} must be a SHA-256 fingerprint: 64 hex digits`);
-  }
-  if (keyId !== buildKeyId) {
-    throw new KeyError(`app config updates.codeSigningMetadata.keyid differs from ${BUILD_KEYID}`);
-  }
-  if (pem === undefined) {
-    throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
-  }
-  const certificate = await validCertificate(pem, now);
-  if (certificate.sha256 !== buildCertificate.replaceAll(":", "").toLowerCase()) {
-    throw new KeyError(`app code-signing certificate differs from ${BUILD_CERTIFICATE}`);
-  }
-  return { key: certificate.key, keyId, pem };
 }
 
 /** Returns the signer for the one configured key source. */
@@ -235,7 +219,7 @@ function pemSigner(pem: string | Buffer, source: string, keyId: string): Signer 
   return cryptoKeySigner(key.toCryptoKey(RSA, false, ["sign"]), keyId);
 }
 
-/** Wraps `inner` so no signature resolves unless it verifies under the app's certificate and key ID. */
+/** Wraps `inner` so no signature resolves unless it verifies under the builds' certificate and key ID. */
 function verifying(inner: Signer, { key, keyId }: Identity): Signer {
   return {
     keyId,
@@ -257,7 +241,7 @@ function verifying(inner: Signer, { key, keyId }: Identity): Signer {
  * serves gets that one reply, so all of them trust one certificate and key ID. Without one, every pointer must
  * verify instead, so only a new bucket or one of this identity's gets it repaired. Returns whether it exists.
  */
-async function checkBucket(bucket: Bucket, identity: Identity): Promise<boolean> {
+export async function checkBucket(bucket: Bucket, identity: Identity): Promise<boolean> {
   const record = await readRecord(bucket, NO_UPDATE_KEY);
   if (record !== undefined) {
     await checkSigned(NO_UPDATE_KEY, record, identity);

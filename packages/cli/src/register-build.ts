@@ -18,7 +18,7 @@ import {
 import type { Bucket } from "./bucket.ts";
 import type { Env } from "./keys.ts";
 import type { PublishOptions, WriteStep } from "./publish.ts";
-import { member } from "./keys.ts";
+import { buildIdentity, checkBucket, member } from "./keys.ts";
 import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError } from "./publish-record.ts";
@@ -48,10 +48,12 @@ export async function registerBuild(
 async function prepare(
   args: readonly string[],
   env: Env,
-  { out, cwd = process.cwd() }: PublishOptions,
+  { out, now = Date.now, cwd = process.cwd() }: PublishOptions,
 ): Promise<WriteStep> {
   const given = parse(args);
   replyKey("main", given.runtime, given.platform); // Refuses a bad runtime.
+  // The bucket must serve the shipped builds' identity, so a build is never registered in another environment's.
+  const identity = await buildIdentity(env, now());
   const bucket = bucketFromEnv(env);
 
   const { id, key, keys } = readManifest(resolve(cwd, given.manifest));
@@ -70,6 +72,7 @@ async function prepare(
     assets,
   });
 
+  await checkBucket(bucket, identity);
   const stored = await bucket.get(key, MAX_BASE_BYTES);
   if (stored !== undefined && !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);

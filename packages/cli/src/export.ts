@@ -177,7 +177,7 @@ function parse(args: readonly string[], cwd: string) {
  * Returns the environment every child gets: the inherited allowlist, each `--pass-env` name, no dotenv files, and
  * the production mode `expo export` forces, so config, runtime and bundle are evaluated alike.
  */
-export function environment(env: Env, passEnv: readonly string[]): Record<string, string> {
+function environment(env: Env, passEnv: readonly string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
     if (value !== undefined && (INHERITED.test(name) || passEnv.includes(name))) out[name] = value;
@@ -228,7 +228,7 @@ function write(path: string, bytes: Uint8Array): void {
 }
 
 /** Runs `tool` from the project's own dependencies and returns its stdout parsed as JSON. */
-export async function expoJson(
+async function expoJson(
   projectRoot: string,
   env: Record<string, string>,
   args: readonly string[],
@@ -256,7 +256,7 @@ function toolPath(projectRoot: string, tool: string): string {
 }
 
 /** Runs `tool` with no shell; its stdout is returned, or with "stderr" passed through as progress. */
-export function runTool(
+function runTool(
   projectRoot: string,
   env: Record<string, string>,
   tool: string,

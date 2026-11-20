@@ -1,7 +1,7 @@
 // Identities, projects, stores and readers shared by the write-command tests. Keys and certificates are generated
 // per run; nothing here is a committed secret.
 import { createHash, KeyObject } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach } from "vitest";
@@ -62,7 +62,6 @@ export interface Identity {
   readonly keys: Awaited<ReturnType<typeof generate>>;
   readonly certificate: string;
   readonly pkcs8: string;
-  readonly fingerprint: string;
 }
 
 export async function identity(notAfter?: Date): Promise<Identity> {
@@ -79,9 +78,6 @@ export async function identity(notAfter?: Date): Promise<Identity> {
     keys,
     certificate: cert,
     pkcs8: KeyObject.from(keys.privateKey).export({ type: "pkcs8", format: "pem" }).toString(),
-    fingerprint: createHash("sha256")
-      .update(Buffer.from(cert.replace(/-----[^-]+-----|\s/g, ""), "base64"))
-      .digest("hex"),
   };
 }
 
@@ -180,12 +176,49 @@ export const s3Env = () => ({
   TIDE_S3_SECRET_ACCESS_KEY: FAKE_S3.secretAccessKey,
 });
 
-/** The publish configuration for `id`, over `store`. */
+/** The public config the fixture project exports in production mode. */
+const EXPO_CLIENT = {
+  name: "Fixture",
+  slug: "fixture",
+  version: "1.0.0",
+  runtimeVersion: "1.0.0",
+  extra: { mode: "production" },
+  updates: { url: "https://updates.example.com/manifest" },
+};
+
+/**
+ * Writes an export directory as `tide export` would for both platforms at runtime 1.0.0, with `dist` (by default the
+ * fixture export) copied in and `fields` replacing those of `tide-export.json`. Returns its path, under `parent` or a
+ * directory removed when the test finishes.
+ */
+export function artifact(
+  options: { dist?: string; fields?: Record<string, unknown>; parent?: string } = {},
+): string {
+  const dir = join(options.parent ?? tempRoot(), "out");
+  cpSync(options.dist ?? EXPORT, join(dir, "dist"), { recursive: true });
+  const fields = {
+    version: 1,
+    certificate: main.certificate,
+    codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha256" },
+    expoClient: EXPO_CLIENT,
+    platforms: { ios: { runtimeVersion: "1.0.0" }, android: { runtimeVersion: "1.0.0" } },
+    ...options.fields,
+  };
+  writeFileSync(join(dir, "tide-export.json"), JSON.stringify(fields));
+  return dir;
+}
+
+/** The shipped builds' identity: the main certificate and key ID, as probe and every writer read them. */
+export const pins = (id = main): Record<string, string> => ({
+  TIDE_BUILD_KEYID: "main",
+  TIDE_BUILD_CERTIFICATE: id.certificate,
+});
+
+/** The publish configuration for `id`'s key, over `store`. */
 export const env = (store: Record<string, string>, id = main): Record<string, string> => ({
   PATH: process.env.PATH ?? "",
   TIDE_SIGNING_KEY: id.pkcs8,
-  TIDE_BUILD_KEYID: "main",
-  TIDE_BUILD_CERTIFICATE_SHA256: main.fingerprint,
+  ...pins(),
   TIDE_SERVER_URL: SERVER_URL,
   TIDE_ASSET_URL: ASSET_URL,
   ...store,

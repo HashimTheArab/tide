@@ -2,10 +2,26 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 
+import { NO_UPDATE_KEY, decodeStoredReply } from "@tide/protocol";
+
 import type { Objects } from "./publish-fixture.ts";
 import { publish } from "../src/publish.ts";
 import { seeded, tempRoot } from "./helpers.ts";
-import { T, env, exportIn, project, s3, s3Env, tree, useFixture } from "./publish-fixture.ts";
+import {
+  ANDROID,
+  IOS,
+  T,
+  artifact,
+  diskObjects,
+  env,
+  exportIn,
+  project,
+  s3,
+  s3Env,
+  signedManifest,
+  signedPart,
+  useFixture,
+} from "./publish-fixture.ts";
 
 useFixture();
 
@@ -28,6 +44,14 @@ function normalised(objects: Objects): Map<string, string> {
   }
   return out;
 }
+
+/** Every object as base64, by key in order. */
+const base64 = (objects: Objects) =>
+  new Map(
+    [...objects]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([k, v]) => [k, Buffer.from(v).toString("base64")]),
+  );
 
 /** The SHA-256 of each normalised object, by key. */
 function digests(objects: Map<string, string>): Record<string, string> {
@@ -55,29 +79,26 @@ async function publishAt(args: string[], store: Record<string, string>, now: num
   expect(code).toBe(0);
 }
 
-test("a publish at a fixed time and seed stores the golden objects, signatures aside", async () => {
+test("export then publish --from at a fixed time and seed stores the golden objects, every signature verifying", async () => {
+  const exported = await exportIn(project().root);
+  expect(exported.code).toBe(0);
   s3.setNow(T);
-  await publishAt(["--project-root", project().root], s3Env(), T);
+  await publishAt(["--from", exported.dir], s3Env(), T);
   expect(digests(normalised(s3.objects))).toEqual(golden());
+  // The golden replaces each signature; the real ones verify under the run's certificate.
+  for (const key of [IOS, ANDROID]) await signedManifest(s3.objects, key);
+  const noUpdate = decodeStoredReply(s3.objects.get(NO_UPDATE_KEY)!);
+  await signedPart(noUpdate.body, noUpdate.boundary, "directive");
 });
 
-test("export then publish --from stores the direct publish's bytes, on disk and on S3", async () => {
-  const app = project();
-  const exported = await exportIn(app.root);
-  expect(exported.code).toBe(0);
+test("one export published with one time and seed stores the same bytes on disk and S3", async () => {
   // The disk bucket's time is the local clock, so both runs share one whole-second sample of it.
   const t = Math.floor(Date.now() / 1000) * 1000;
-  const run = async (args: string[]) => {
-    const disk = tempRoot();
-    await publishAt(args, { TIDE_DISK_DIR: disk }, t);
-    s3.reset();
-    s3.setNow(t);
-    await publishAt(args, s3Env(), t);
-    return { disk: tree(disk), s3: new Map(s3.objects) };
-  };
-  const direct = await run(["--project-root", app.root]);
-  const from = await run(["--from", exported.dir]);
-  expect(from.disk).toEqual(direct.disk);
-  expect(from.s3).toEqual(direct.s3);
-  expect(from.s3.size).toBe(12);
+  const dir = artifact();
+  const disk = tempRoot();
+  await publishAt(["--from", dir], { TIDE_DISK_DIR: disk }, t);
+  s3.setNow(t);
+  await publishAt(["--from", dir], s3Env(), t);
+  expect(s3.objects.size).toBe(12);
+  expect(base64(diskObjects(disk))).toEqual(base64(s3.objects));
 });

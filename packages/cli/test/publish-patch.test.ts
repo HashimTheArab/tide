@@ -1,4 +1,4 @@
-import { cpSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { describe, expect, test } from "vitest";
@@ -25,12 +25,12 @@ import { registerBuild } from "../src/register-build.ts";
 import { prng, rejection, tempRoot } from "./helpers.ts";
 import {
   ASSET_URL,
-  EXPORT,
   IOS,
   SERVER_URL,
   diskObjects,
   env,
-  project,
+  artifact,
+  pins,
   s3,
   s3Env,
   tree,
@@ -56,12 +56,14 @@ function edited(bytes: Uint8Array<ArrayBuffer>, seed: number): Uint8Array<ArrayB
   return out;
 }
 
-/** A copy of the fixture export with the given platforms' bundles replaced. */
+/** An export of the given platforms at runtime 1.0.0, each with its bundle replaced. */
 function exportWith(bundles: Partial<Record<Platform, Uint8Array<ArrayBuffer>>>): string {
-  const dir = join(tempRoot(), "export");
-  cpSync(EXPORT, dir, { recursive: true });
+  const platforms = Object.fromEntries(
+    Object.keys(bundles).map((p) => [p, { runtimeVersion: "1.0.0" }]),
+  );
+  const dir = artifact({ fields: { platforms } });
   for (const [platform, bytes] of Object.entries(bundles)) {
-    writeFileSync(join(dir, "_expo/static/js", platform, `index-${platform}.hbc`), bytes);
+    writeFileSync(join(dir, "dist/_expo/static/js", platform, `index-${platform}.hbc`), bytes);
   }
   return dir;
 }
@@ -73,24 +75,10 @@ async function publishBundles(
 ) {
   const out: string[] = [];
   const err: string[] = [];
-  const platforms = Object.keys(bundles).flatMap((p) => ["--platform", p]);
-  // The runtime is given, so no resolver runs.
-  const args = [
-    "--channel",
-    "main",
-    "--runtime-version",
-    "1.0.0",
-    "--project-root",
-    project().root,
-  ];
-  const code = await publish(
-    [...args, ...platforms, "--export-dir", exportWith(bundles)],
-    env(store),
-    {
-      out: (l) => out.push(l),
-      err: (l) => err.push(l),
-    },
-  );
+  const code = await publish(["--channel", "main", "--from", exportWith(bundles)], env(store), {
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+  });
   return { code, out, err, id: out[0]?.split(" ")[1] };
 }
 
@@ -106,7 +94,10 @@ async function register(
   const args = ["--platform", "ios", "--runtime-version", "1.0.0"];
   const files = ["--manifest", join(dir, "app.manifest"), "--bundle", join(dir, "main.jsbundle")];
   const ignore = () => undefined;
-  expect(await registerBuild([...args, ...files], store, { out: ignore, err: ignore })).toBe(0);
+  const environment = { ...pins(), ...store };
+  expect(await registerBuild([...args, ...files], environment, { out: ignore, err: ignore })).toBe(
+    0,
+  );
 }
 
 /** Every stored patch key; each patch applied to its stored base bundle must hash to the bundle it names. */
