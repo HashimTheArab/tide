@@ -127,6 +127,36 @@ export function serverCases(harness: Harness): void {
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
+  test("/bundles/<hex> streams the stored launch bundle as immutable JavaScript", async () => {
+    const a = await asset("bundle");
+    const key = a.key.replace("assets/", "bundles/");
+    await harness.put(key, a.bytes);
+    for (const method of ["GET", "HEAD"]) {
+      const { res, body } = await get(`/${key}`, { method });
+      expect(res.status).toBe(200);
+      expect(body).toEqual(method === "GET" ? a.bytes : new Uint8Array());
+      expect(res.headers.get("content-type")).toBe("application/javascript");
+      expect(res.headers.get("cache-control")).toBe(IMMUTABLE);
+      expect(res.headers.get("content-length")).toBe(String(a.bytes.length));
+    }
+  });
+
+  test("/bundles never serves an asset, an absent bundle or a malformed hex", async () => {
+    const a = await asset("not a bundle");
+    await harness.put(a.key, a.bytes);
+    const hex = contentKey(a.hash);
+    for (const [path, status] of [
+      [`/bundles/${hex}`, 404],
+      [`/bundles/${hex.toUpperCase()}`, 400],
+      [`/bundles/${hex.slice(1)}`, 400],
+      [`/bundles/${a.hash}`, 400],
+    ] as const) {
+      const { res } = await get(path);
+      expect([path, res.status]).toEqual([path, status]);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
   test("a store fault is a 503 that is not cached, and /hc still answers", async () => {
     const a = await asset("fault");
     await harness.putFault(a.key);

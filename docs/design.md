@@ -143,7 +143,8 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
 - With `A-IM: bsdiff`: resolve `Expo-Current-Update-ID` through `bases/`, confirm `Expo-Requested-Update-ID` names an
   update whose launch hash is this one, and look up `patches/<base>/<this>`. Found: 226, `im: bsdiff`,
   `expo-base-update-id`, `cache-control: private, no-store`, `vary: A-IM, Expo-Current-Update-ID`.
-- Otherwise: 200, the full bundle, `public, max-age=31536000, immutable`.
+- Otherwise: 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`.
+- A path that is not 64 lowercase hex is 400, an absent bundle 404 and a store failure 503, each `no-store`.
 - Patches are never shared-cached: a cached patch under the plain URL would break the client's full-file retry.
 
 ### Other routes
@@ -237,9 +238,9 @@ Steps, in order; every refusal comes before the first write, and all replies are
    updates); apply each and check its hash before upload; keep one only if it is well under the compressed bundle.
 6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then
    `reply/no-update` (a winner must verify under the identity), release records, bases and patches. Then, per
-   platform, re-check the certificate by both clocks and write the pointer with `If-Match` on its ETag, or
-   `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer; an
-   unknown outcome may be live, and the next run starts from what the bucket holds.
+   platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on its
+   ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
+   an unknown outcome may be live, and the next run starts from what the bucket holds.
 
 **Release records.** `updates/<updateId>.json` is one JSON object, keys in this order, no trailing newline, at most
 2 MiB; decode refuses anything encode would not write byte for byte:

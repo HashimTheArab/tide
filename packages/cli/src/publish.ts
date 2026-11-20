@@ -176,13 +176,13 @@ async function prepare(
       "the local clock differs from the bucket's by more than a minute: fix the clock",
     );
   }
-  // Valid by both clocks, so a skewed publisher cannot activate an update after the certificate expires.
+  await writer.checkCertificate(local);
+  await writer.checkCertificate(bucketTime);
+  // Valid by both clocks, each read afresh, so neither clock alone can activate an update past expiry.
   const checkCertificate = async () => {
-    const at = now();
-    await writer.checkCertificate(at);
-    await writer.checkCertificate(at + bucketTime - local);
+    await writer.checkCertificate(now());
+    await writer.checkCertificate(await bucket.time());
   };
-  await checkCertificate();
 
   const updates: (readonly [Target, Composed])[] = [];
   for (const t of targets) {

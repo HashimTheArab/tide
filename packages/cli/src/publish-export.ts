@@ -230,6 +230,9 @@ async function readExport<T extends { readonly platform: Platform }>(
       if (seen === undefined) assets.set(key, { ...exported, key, ext });
       else if (seen.ext !== ext) {
         throw new PublishError(`export ${name} lists key ${key} with two extensions`);
+      } else if (seen.hash !== exported.hash) {
+        // MD5 collides; SHA-256 is the identity the manifest promises.
+        throw new PublishError(`export ${name} lists key ${key} for two different files`);
       }
     }
     result.push({ ...target, bundle, assets: [...assets.values()] });

@@ -51,6 +51,8 @@ const PNG_MD5 = createHash("md5").update(fixture("asset.png")).digest("hex");
 const IOS = "reply/main/1.0.0/ios";
 const ANDROID = "reply/main/1.0.0/android";
 const T = Date.UTC(2030, 0, 1); // A whole second, so the fake's Date header carries it exactly.
+const MD5_COLLISION =
+  "d131dd02c5e6eec4693d9a0698aff95c2fcab58712467eab4004583eb8fb7f8955ad340609f4b30283e488832571415a085125e8f7cdc99fd91dbdf280373c5bd8823e3156348f5bae6dacd436c919c6dd53e2b487da03fd02396306d248cda0e99f33420f577ee8ce54b67080a80d1ec69821bcb6a8839396f9652b6ff72a70";
 const MISMATCH = "the signing key does not match the app's code-signing certificate";
 
 type Objects = ReadonlyMap<string, Uint8Array>;
@@ -401,6 +403,12 @@ describe("publish to disk", () => {
         `multipart/mixed; boundary=${published.reply.boundary}`,
       );
       expect(new Uint8Array(await res.arrayBuffer())).toEqual(published.reply.body);
+      // The signed launch URL, on this server, serves bytes with the signed hash.
+      const { pathname } = new URL(published.manifest.launchAsset.url);
+      const bundle = await fetch(`http://127.0.0.1:${port}${pathname}`);
+      expect(bundle.status).toBe(200);
+      const bytes = new Uint8Array(await bundle.arrayBuffer());
+      expect(await sha256Base64Url(bytes)).toBe(published.manifest.launchAsset.hash);
     }
 
     const res = await request("ios", ios.manifest.id);
@@ -750,6 +758,30 @@ describe("publish to disk", () => {
         },
         "export metadata.json fileMetadata.ios.assets[0].path is not a regular file",
       ],
+      [
+        "one MD5 key on two files with different bytes",
+        (dir) => {
+          // A known MD5 collision: two 128-byte blocks with one digest.
+          const block = (diff: Record<number, number>) => {
+            const bytes = Buffer.from(MD5_COLLISION, "hex");
+            for (const [i, b] of Object.entries(diff)) bytes[Number(i)] = b;
+            return bytes;
+          };
+          const key = "79054025255fb1a26e4bc422aef54eb4";
+          writeFileSync(join(dir, "assets", key), block({}));
+          writeFileSync(
+            join(dir, "www.bundle", `${key}.bin`),
+            block({ 19: 0x07, 45: 0xf1, 59: 0x72, 83: 0x34, 109: 0x28, 123: 0xab }),
+          );
+          const m = metadataOf(dir);
+          m.fileMetadata.ios!.assets.push(
+            { path: `assets/${key}`, ext: "bin" },
+            { path: `www.bundle/${key}.bin`, ext: "bin" },
+          );
+          writeMetadata(dir, m);
+        },
+        "export metadata.json fileMetadata.ios.assets[5] lists key 79054025255fb1a26e4bc422aef54eb4 for two different files",
+      ],
     ])("%s is refused with nothing written", async (_, damage, message) => {
       const dir = join(tempRoot(), "export");
       cpSync(EXPORT, dir, { recursive: true });
@@ -855,25 +887,36 @@ describe("publish to S3", () => {
       expect(s3.puts).toEqual([]);
     });
 
-    test("a certificate that expires after the first pointer stops the second", async () => {
-      const expiry = T + 3_600_000;
-      const expiring = await identity(new Date(expiry));
-      const app = project({ cert: expiring.certificate });
-      s3.setNow(T);
-      const now = () => (s3.puts.includes(IOS) ? expiry + 1000 : T);
-      const result = await publishIn(
-        app.root,
-        { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
-        [],
-        now,
-      );
-      expect(result.code).toBe(1);
-      expect(result.err).toEqual(["tide: updates.codeSigningCertificate: certificate has expired"]);
-      expect(result.out).toHaveLength(1);
-      expect(result.out[0]).toMatch(/^reply\/main\/1\.0\.0\/ios /);
-      expect(s3.objects.has(IOS)).toBe(true);
-      expect(s3.puts).not.toContain(ANDROID);
-    });
+    test.each(["local", "bucket"])(
+      "a certificate that expires by the %s clock after the first pointer stops the second",
+      async (clock) => {
+        const expiry = T + 3_600_000;
+        const expiring = await identity(new Date(expiry));
+        const app = project({ cert: expiring.certificate });
+        s3.setNow(T);
+        // Once the first pointer lands, one clock passes expiry while the other stays behind it.
+        const now = () => {
+          if (!s3.puts.includes(IOS)) return T;
+          if (clock === "local") return expiry + 1000;
+          s3.setNow(expiry + 1000);
+          return T;
+        };
+        const result = await publishIn(
+          app.root,
+          { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
+          [],
+          now,
+        );
+        expect(result.code).toBe(1);
+        expect(result.err).toEqual([
+          "tide: updates.codeSigningCertificate: certificate has expired",
+        ]);
+        expect(result.out).toHaveLength(1);
+        expect(result.out[0]).toMatch(/^reply\/main\/1\.0\.0\/ios /);
+        expect(s3.objects.has(IOS)).toBe(true);
+        expect(s3.puts).not.toContain(ANDROID);
+      },
+    );
   });
 
   describe("other writers", () => {
