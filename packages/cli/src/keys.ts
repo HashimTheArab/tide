@@ -262,7 +262,7 @@ async function checkSigned(
 }
 
 /** Returns the file's bytes if it is a regular file of at most 64 KiB, else undefined. */
-function readSmallFile(path: string): Buffer | undefined {
+export function readSmallFile(path: string): Buffer | undefined {
   let fd: number;
   try {
     // Non-blocking, so a FIFO cannot hang the open.

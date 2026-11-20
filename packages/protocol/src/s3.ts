@@ -291,6 +291,21 @@ export async function s3Absent(operation: S3Operation, res: Response): Promise<u
  */
 export async function readS3Text(res: Response, limit: number): Promise<string | undefined> {
   if (res.body === null) return undefined;
+  const bytes = await readLimited(res, limit);
+  if (bytes === undefined) return undefined;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns the body's bytes, empty when absent, or undefined once it passes `limit`, cancelling the rest. */
+export async function readLimited(
+  res: Response,
+  limit: number,
+): Promise<Uint8Array<ArrayBuffer> | undefined> {
+  if (res.body === null) return new Uint8Array(0);
   const reader: ReadableStreamDefaultReader<Uint8Array> = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -310,11 +325,7 @@ export async function readS3Text(res: Response, limit: number): Promise<string |
     bytes.set(c, at);
     at += c.byteLength;
   }
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return undefined;
-  }
+  return bytes;
 }
 
 export interface XmlElement {
