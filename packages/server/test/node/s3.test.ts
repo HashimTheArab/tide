@@ -1,3 +1,5 @@
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import type { S3Config } from "@tide/protocol";
@@ -55,6 +57,31 @@ describe("s3Store against a local S3-compatible endpoint", () => {
     fake.objects.set("assets/all-bytes", bytes);
     const object = await s3Store(config).get("assets/all-bytes");
     expect(object?.size).toBe(256);
+    expect(new Uint8Array(await new Response(object?.body).arrayBuffer())).toEqual(bytes);
+  });
+
+  test("a body keeps its response reachable, so a collection cannot cancel it before it is read", async () => {
+    // Node's fetch cancels a body once its Response is collected, which a bundle waiting on a patch lookup allows.
+    const bytes = new Uint8Array(64).fill(9);
+    fake.objects.set("assets/kept", bytes);
+    const responses: WeakRef<Response>[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (...args) => {
+      const res = await realFetch(...args);
+      responses.push(new WeakRef(res));
+      return res;
+    };
+    let object;
+    try {
+      object = await s3Store(config).get("assets/kept");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as (o: object) => Promise<void>;
+    // An async collection runs in a later task, after the job that made the WeakRef has ended.
+    await gc({ type: "major", execution: "async" });
+    expect(responses.map((r) => r.deref() !== undefined)).toEqual([true]);
     expect(new Uint8Array(await new Response(object?.body).arrayBuffer())).toEqual(bytes);
   });
 
