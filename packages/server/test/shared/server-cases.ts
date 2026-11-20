@@ -365,6 +365,8 @@ export function bundleCases(harness: Harness): void {
     ["A-IM bsdiff;q=x", () => ({ "a-im": "bsdiff;q=x" })],
     ["A-IM bsdiff;q=1.5", () => ({ "a-im": "bsdiff;q=1.5" })],
     ["bsdiff only inside a quoted parameter", () => ({ "a-im": 'gzip;note="x, bsdiff, y"' })],
+    ["bsdiff after an escaped quote", () => ({ "a-im": 'gzip;note="a\\", bsdiff"' })],
+    ["bsdiff inside an unterminated quote", () => ({ "a-im": 'gzip;note="x, bsdiff' })],
     ["no current ID", () => ({ "expo-current-update-id": undefined })],
     ["an empty current ID", () => ({ "expo-current-update-id": "" })],
     ["a malformed current ID", ({ current }) => ({ "expo-current-update-id": current.slice(1) })],

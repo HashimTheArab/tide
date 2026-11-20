@@ -8,6 +8,7 @@ import {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   ProtocolError,
+  UUID,
   assetContentType,
   baseKey,
   contentKey,
@@ -27,6 +28,7 @@ const CONTENT_HEX = /^[0-9a-f]{64}$/; // A bundle key's SHA-256, as stored.
 // Media-type parameters and q-values are ignored: stock clients send multipart/mixed, the only type Tide stores.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
 const QVALUE = /^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$/; // RFC 9110 12.4.2.
+const QUOTED = /"(?:[^"\\]|\\[\s\S]?)*(?:"|$)/g; // A quoted-string, to the end when unterminated.
 
 export interface AppOptions {
   /** When set and not empty, a request whose `expo-app-id` is present and differs is rejected. */
@@ -52,12 +54,17 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   const app = new Hono();
   app.get("/hc", (c) => c.text("ok"));
 
-  /** Returns the decoded reply at `key`, or undefined when there is none. */
-  const read = async (key: string, signal: AbortSignal): Promise<StoredReply | undefined> => {
+  /** Returns the record at `key` read through `decode`, or undefined when there is none. */
+  const readRecord = async <T>(
+    key: string,
+    limit: number,
+    decode: (bytes: Uint8Array) => T,
+    signal: AbortSignal,
+  ): Promise<T | undefined> => {
     try {
       const object = await abortable(store.get(key, signal), signal);
       if (object === undefined) return undefined;
-      return decodeStoredReply(await readBounded(object, MAX_REPLY_BYTES, signal));
+      return decode(await readBounded(object, limit, signal));
     } catch (e) {
       throw new Error(`reading ${key} failed`, { cause: e });
     }
@@ -103,14 +110,19 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     const signal = replyDeadline();
     let reply: StoredReply;
     try {
-      const pointer = await read(key, signal);
+      const pointer = await readRecord(key, MAX_REPLY_BYTES, decodeStoredReply, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
       // A rollback is always served: the client applies it only when its commitTime is newer than what it runs.
       const current = header("expo-current-update-id")?.toLowerCase();
       if (pointer !== undefined && (pointer.kind !== "manifest" || current !== pointer.updateId)) {
         reply = pointer;
       } else {
-        const noUpdate = await read(NO_UPDATE_KEY, signal);
+        const noUpdate = await readRecord(
+          NO_UPDATE_KEY,
+          MAX_REPLY_BYTES,
+          decodeStoredReply,
+          signal,
+        );
         if (noUpdate === undefined) throw new Error(`${NO_UPDATE_KEY} is missing`);
         if (noUpdate.kind !== "noUpdateAvailable") {
           throw new Error(`${NO_UPDATE_KEY} holds ${noUpdate.kind}`);
@@ -162,22 +174,18 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   };
 
   /** Returns the base record for `updateId`, or undefined when there is none; a record of another ID rejects. */
-  const readBase = async (
-    updateId: string,
-    signal: AbortSignal,
-  ): Promise<BaseRecord | undefined> => {
-    const key = baseKey(updateId);
-    try {
-      const object = await abortable(store.get(key, signal), signal);
-      if (object === undefined) return undefined;
-      const record = decodeBaseRecord(await readBounded(object, MAX_BASE_BYTES, signal));
-      // The codec never sees the key, so only here can a record filed under another ID be caught.
-      if (record.updateId !== updateId) throw new Error(`it holds update ${record.updateId}`);
-      return record;
-    } catch (e) {
-      throw new Error(`reading ${key} failed`, { cause: e });
-    }
-  };
+  const readBase = (updateId: string, signal: AbortSignal): Promise<BaseRecord | undefined> =>
+    readRecord(
+      baseKey(updateId),
+      MAX_BASE_BYTES,
+      (bytes) => {
+        const record = decodeBaseRecord(bytes);
+        // The codec never sees the key, so only here can a record filed under another ID be caught.
+        if (record.updateId !== updateId) throw new Error(`it holds update ${record.updateId}`);
+        return record;
+      },
+      signal,
+    );
 
   /**
    * Returns the object at `key`, or rejects once `signal` aborts first. The store gets a signal that `signal` aborts
@@ -204,9 +212,9 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
   const findPatch = async (
     hex: string,
     { current, requested }: PatchRequest,
-    signal: AbortSignal,
     answered: AbortSignal,
   ): Promise<StoredObject | undefined> => {
+    const signal = AbortSignal.any([patchDeadline(), answered]);
     try {
       const [from, to] = await Promise.all([
         readBase(current, signal),
@@ -234,14 +242,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     const request = patchRequest(c);
     const answered = new AbortController();
     const lookup =
-      request === undefined
-        ? Promise.resolve(undefined)
-        : findPatch(
-            hex,
-            request,
-            AbortSignal.any([patchDeadline(), answered.signal]),
-            answered.signal,
-          );
+      request === undefined ? Promise.resolve(undefined) : findPatch(hex, request, answered.signal);
     /** Ends the lookup without waiting; a patch it already found is cancelled. */
     const abandon = () => {
       answered.abort();
@@ -303,7 +304,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
 }
 
 interface PatchRequest {
-  readonly current: string; // Lowercase update IDs, valid for `baseKey`.
+  readonly current: string; // Lowercase UUIDs.
   readonly requested: string;
 }
 
@@ -313,13 +314,7 @@ function patchRequest(c: Context): PatchRequest | undefined {
   // Clients send lowercase IDs; a repeated header arrives joined with ", " and fails the grammar.
   const current = c.req.header("expo-current-update-id")?.toLowerCase() ?? "";
   const requested = c.req.header("expo-requested-update-id")?.toLowerCase() ?? "";
-  try {
-    baseKey(current);
-    baseKey(requested);
-  } catch (e) {
-    if (e instanceof ProtocolError) return undefined;
-    throw e;
-  }
+  if (!UUID.test(current) || !UUID.test(requested)) return undefined;
   return { current, requested };
 }
 
@@ -328,32 +323,18 @@ function patchRequest(c: Context): PatchRequest | undefined {
  * Other parameters are ignored; a malformed q declines.
  */
 function acceptsBsdiff(value: string): boolean {
-  return splitOutsideQuotes(value, ",").some((item) => {
-    const [name = "", ...params] = splitOutsideQuotes(item, ";");
-    if (name.trim().toLowerCase() !== "bsdiff") return false;
-    return params.every((param) => {
-      const eq = param.indexOf("=");
-      if ((eq === -1 ? param : param.slice(0, eq)).trim().toLowerCase() !== "q") return true;
-      const q = param.slice(eq + 1).trim();
-      return eq !== -1 && QVALUE.test(q) && Number(q) > 0;
+  // Quoted strings are emptied first, so a quoted parameter cannot list an item.
+  return value
+    .replace(QUOTED, '""')
+    .split(",")
+    .some((item) => {
+      const [name = "", ...params] = item.split(";");
+      if (name.trim().toLowerCase() !== "bsdiff") return false;
+      return params.every((param) => {
+        const eq = param.indexOf("=");
+        if ((eq === -1 ? param : param.slice(0, eq)).trim().toLowerCase() !== "q") return true;
+        const q = param.slice(eq + 1).trim();
+        return eq !== -1 && QVALUE.test(q) && Number(q) > 0;
+      });
     });
-  });
-}
-
-/** Splits `value` at each `separator` outside a quoted string, so a quoted parameter cannot list an item. */
-function splitOutsideQuotes(value: string, separator: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let quoted = false;
-  for (let i = 0; i < value.length; i++) {
-    const char = value[i];
-    if (quoted && char === "\\") i++; // A quoted-pair.
-    else if (char === '"') quoted = !quoted;
-    else if (!quoted && char === separator) {
-      parts.push(value.slice(start, i));
-      start = i + 1;
-    }
-  }
-  parts.push(value.slice(start));
-  return parts;
 }

@@ -1,6 +1,7 @@
 export { ProtocolError, assetHash, contentKey, decodeBase64, sha256Base64Url } from "./hash.ts";
 export type { Asset, JsonObject, JsonValue, LaunchAsset, ManifestInput } from "./manifest.ts";
 export {
+  UUID,
   assetContentType,
   buildManifest,
   buildNoUpdateAvailable,
