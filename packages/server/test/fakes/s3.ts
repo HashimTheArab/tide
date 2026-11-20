@@ -297,14 +297,14 @@ export async function startFakeS3(): Promise<FakeS3> {
     }
     // A prefix's keys are contiguous in byte order.
     const keys = sortedKeys();
-    const page: string[] = [];
-    const matches = (i: number) => i < keys.length && keys[i]!.startsWith(prefix);
-    let i = Math.max(
+    const start = Math.max(
       bound(keys, prefix, true),
       after === undefined ? 0 : bound(keys, after, false),
     );
-    for (; matches(i) && page.length < Math.min(pageSize, maxKeys); i++) page.push(keys[i]!);
-    const truncated = matches(i);
+    const size = Math.min(pageSize, maxKeys);
+    const run = keys.slice(start, start + size + 1).filter((k) => k.startsWith(prefix));
+    const page = run.slice(0, size);
+    const truncated = run.length > size;
     if (!truncated) {
       listHooks.get(prefix)?.();
       listHooks.delete(prefix);
@@ -463,7 +463,7 @@ function bound(keys: readonly string[], key: string, inclusive: boolean): number
   let [lo, hi] = [0, keys.length];
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    const c = byteOrder(keys[mid]!, key);
+    const c = byteOrder(keys[mid] ?? "", key);
     if (c < 0 || (c === 0 && !inclusive)) lo = mid + 1;
     else hi = mid;
   }
