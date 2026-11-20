@@ -895,12 +895,8 @@ describe("publish to S3", () => {
         const app = project({ cert: expiring.certificate });
         s3.setNow(T);
         // Once the first pointer lands, one clock passes expiry while the other stays behind it.
-        const now = () => {
-          if (!s3.puts.includes(IOS)) return T;
-          if (clock === "local") return expiry + 1000;
-          s3.setNow(expiry + 1000);
-          return T;
-        };
+        if (clock === "bucket") s3.onPut(IOS, () => s3.setNow(expiry + 1000));
+        const now = () => (clock === "local" && s3.puts.includes(IOS) ? expiry + 1000 : T);
         const result = await publishIn(
           app.root,
           { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
@@ -917,6 +913,31 @@ describe("publish to S3", () => {
         expect(s3.puts).not.toContain(ANDROID);
       },
     );
+
+    test("a certificate that expires by the local clock while the bucket's time is read stops the next pointer", async () => {
+      const expiry = T + 3_600_000;
+      const expiring = await identity(new Date(expiry));
+      const app = project({ cert: expiring.certificate });
+      s3.setNow(T);
+      let landed: number | undefined;
+      s3.onPut(IOS, () => {
+        landed = s3.requests;
+      });
+      // The local clock passes expiry during the first request after the iOS pointer: the bucket time read.
+      const now = () => (landed !== undefined && s3.requests > landed ? expiry + 1000 : T);
+      const result = await publishIn(
+        app.root,
+        { ...env(s3Env(), expiring), TIDE_BUILD_CERTIFICATE_SHA256: expiring.fingerprint },
+        [],
+        now,
+      );
+      expect(result).toMatchObject({
+        code: 1,
+        err: ["tide: updates.codeSigningCertificate: certificate has expired"],
+      });
+      expect(s3.objects.has(IOS)).toBe(true);
+      expect(s3.puts).not.toContain(ANDROID);
+    });
   });
 
   describe("other writers", () => {

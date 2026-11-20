@@ -178,10 +178,10 @@ async function prepare(
   }
   await writer.checkCertificate(local);
   await writer.checkCertificate(bucketTime);
-  // Valid by both clocks, each read afresh, so neither clock alone can activate an update past expiry.
+  // Valid by both clocks, each read afresh; the local one last, so expiry during the bucket read still counts.
   const checkCertificate = async () => {
-    await writer.checkCertificate(now());
     await writer.checkCertificate(await bucket.time());
+    await writer.checkCertificate(now());
   };
 
   const updates: (readonly [Target, Composed])[] = [];

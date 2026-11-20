@@ -38,6 +38,8 @@ export interface FakeS3 {
   raceOnPut(key: string, bytes: Uint8Array): void;
   /** The next PUT to `key` commits, then its connection drops before any response. */
   dropAfterPut(key: string): void;
+  /** Calls `fn` when the next PUT to `key` reaches handling. */
+  onPut(key: string, fn: () => void): void;
   arrived(key: string): Promise<void>;
   flushed(key: string): Promise<void>;
   abandoned(key: string): Promise<void>;
@@ -58,6 +60,7 @@ export async function startFakeS3(): Promise<FakeS3> {
   const puts: string[] = [];
   const races = new Map<string, Uint8Array>();
   const drops = new Set<string>();
+  const putHooks = new Map<string, () => void>();
   // Keyed by the stored array, so an object a test sets directly gets a fresh tag.
   const etags = new WeakMap<Uint8Array, string>();
   let etagCount = 0;
@@ -128,6 +131,9 @@ export async function startFakeS3(): Promise<FakeS3> {
       if (rest.length === 0 && req.method === "GET") return list(url.searchParams, res);
       if (req.method === "PUT") {
         puts.push(key);
+        const hook = putHooks.get(key);
+        putHooks.delete(key);
+        hook?.();
         const raced = races.get(key);
         if (raced !== undefined) {
           races.delete(key);
@@ -328,6 +334,9 @@ export async function startFakeS3(): Promise<FakeS3> {
     },
     dropAfterPut: (key) => {
       drops.add(key);
+    },
+    onPut: (key, fn) => {
+      putHooks.set(key, fn);
     },
     arrived: (key) => event("arrived", key).promise,
     flushed: (key) => event("flushed", key).promise,
