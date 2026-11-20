@@ -127,6 +127,10 @@ reads: a 32-byte header (`BSDIFF40`, then the ctrl block length, diff block leng
 little-endian sign-magnitude), then three bzip2 streams: ctrl triples (add, copy, seek), diff bytes added to the base,
 and extra bytes copied.
 
+The CLI's `makeBsdiff(base, target)` writes them: bsdiff 4.3's matching under a work budget (past it, the rest of the
+target goes to extra), then level-9 bzip2 streams. It takes inputs of at most 64 MiB, depends only on the input
+bytes, and returns only a patch that `applyBsdiff` turns back into the target.
+
 Protocol `applyBsdiff(base, patch, maxOutput)` runs in the CLI, which applies and hash-checks every patch before
 upload; the server only serves stored bytes. It is stricter than reference bspatch, and accepts every patch bsdiff
 writes:
