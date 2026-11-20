@@ -38,7 +38,6 @@ reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or roll
 reply/no-update                          stored reply: the signed noUpdateAvailable
 bases/<updateId>                         launch hash of each patch base (OTA update or embedded build)
 patches/<fromHash>/<toHash>              BSDIFF40 patch
-gc/candidates.json                       objects the last gc scan found unreferenced, with the scan time
 ```
 
 The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
@@ -159,13 +158,13 @@ Every manifest's `launchAsset.url` points here, so the server sees patch negotia
   also uses; no or an unknown `ext` gives `application/octet-stream`. A 200 is `public, max-age=31536000,
   immutable`; every other reply is `no-store` (404 when absent, 503 when the store fails). Earlier servers also
   served launch bundles this way, so the legacy import stores every object a legacy `?h=` URL names under
-  `assets/`, launch bundles included, and records each key in the legacy map `gc` honours. These URLs get no
+  `assets/`, launch bundles included, and records each key in the legacy map. These URLs get no
   patches. A frozen map can cover other legacy URL shapes.
 - `GET /hc`.
 
 ## CLI
 
-**One writer at a time.** `publish`, `rollback`, `republish`, `register-build` and `gc` run only from one CI
+**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only from one CI
 workflow whose concurrency group (for example `concurrency: tide-publish`) runs them one at a time. There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
@@ -184,8 +183,7 @@ empty counts as unset). A configuration error exits before any request.
   `If-Match: <etag>`, or `If-None-Match: *` for a first publish; a 412 is a lost race, and every other answer is an
   error. ETags are opaque strings, compared exactly. A write that got no answer, a 5xx, or a 200 without a valid ETag
   has an unknown outcome: the writer stops, exits non-zero, and the next run starts from what the bucket holds,
-  since S3 and R2 may still commit it. A later `gc` must prove that no delete can remove an object that a committed
-  or still-pending pointer write references.
+  since S3 and R2 may still commit it. Nothing is ever deleted, so a late write can never lose content it names.
 - **Disk.** Writers on one host serialise on a SQLite lock in `.tide/mutex.sqlite` (an `fcntl` lock the OS frees
   when its holder dies). Each conditional write reads, compares and renames a staged file inside it. Readers take no
   lock. Network filesystems are not supported.
@@ -277,10 +275,12 @@ race or unknown outcome behaves as publish; a record whose PUT has an unknown ou
 to it yet.
 
 Other commands: `register-build` (record a store build's embedded update ID and bundle as a base), `status`, and
-`gc` (dry-run by default; never deletes anything a retained update, rollback, base or legacy map
-references). `gc` is two-pass mark and sweep: each run records the unreferenced objects it finds in
-`gc/candidates.json`, and deletes only objects that were already candidates in a scan at least 24 hours earlier and
-are still unreferenced. A publish that reuses an object in between makes it referenced again, so it survives.
+`storage` (a read-only report of objects no retained pointer references, with their total size).
+
+**Nothing is deleted.** The protocol requires a published asset URL to keep working, release records back the asset key
+identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an
+object store safely while writes can land late would need machinery Tide does not want; if storage ever matters,
+deletion gets its own design.
 
 ## Keys
 

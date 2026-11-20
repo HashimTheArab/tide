@@ -29,7 +29,7 @@ AI agents write most of the code.
 | --- | --- |
 | `packages/server` | Hono app. `src/core/` is runtime-free; `src/workers.ts` and `src/node.ts` are the only entry points |
 | `packages/protocol` | Manifest, multipart, signature and patch contract, shared by server and CLI |
-| `packages/cli` | `publish`, `register-build`, `rollback`, `republish`, `status`, `gc` (P4 onward) |
+| `packages/cli` | `publish`, `register-build`, `rollback`, `republish`, `status`, `storage` (P4 onward) |
 | `docs/` | Design, roadmap, testing standard, delivery loop and decision records; index in `docs/README.md` |
 | `scripts/gate.mjs` | The one gate CI and the delivery loop run |
 
