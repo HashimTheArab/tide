@@ -6,11 +6,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
 import type { StoredReply } from "@tide/protocol";
-import type { FakeS3 } from "@tide/server/test/fake-s3";
 import { MAX_REPLY_BYTES, diskPath, encodeStoredReply } from "@tide/protocol";
-import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
+import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";
+import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { diskBucket } from "../src/disk.ts";
 import { s3Bucket } from "../src/s3.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";

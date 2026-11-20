@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide/protocol";
-import { FAKE_S3 } from "@tide/server/test/fake-s3";
 
+import { FAKE_S3 } from "../../server/test/fakes/s3.ts";
 import { byteOrder } from "../src/bucket.ts";
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { republish, rollback } from "../src/publish-rollback.ts";

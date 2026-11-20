@@ -2,11 +2,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
-import type { FakeS3 } from "@tide/server/test/fake-s3";
 import { diskPath } from "@tide/protocol";
-import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
+import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";
+import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { BucketError, isKey } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";
 import { s3Bucket } from "../src/s3.ts";

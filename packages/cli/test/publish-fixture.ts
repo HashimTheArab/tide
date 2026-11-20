@@ -6,7 +6,6 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
-import type { FakeS3 } from "@tide/server/test/fake-s3";
 import {
   buildManifest,
   buildRollBackToEmbedded,
@@ -21,9 +20,10 @@ import {
   sha256Base64Url,
   verifyExpoSignature,
 } from "@tide/protocol";
-import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
+import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
+import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { launchUrl } from "../src/publish-record.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 

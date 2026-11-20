@@ -27,9 +27,10 @@ AI agents write most of the code.
 
 | Path | Holds |
 | --- | --- |
-| `packages/server` | Hono app. `src/core/` is runtime-free; `src/workers.ts` and `src/node.ts` are the only entry points |
+| `packages/server` | Hono app. `src/core/` is runtime-free; `src/workers.ts` and `src/node.ts` are the only entry points; `Dockerfile` builds the Node image |
 | `packages/protocol` | Manifest, multipart, signature and patch contract, shared by server and CLI |
 | `packages/cli` | `publish`, `register-build`, `rollback`, `republish`, `status`, `storage`, `probe` (P4 onward) |
+| `examples/operator` | A minimal operator Worker re-exporting `@tide/server/workers`; dry-run built and tested in the gate |
 | `docs/` | Design, roadmap, testing standard, delivery loop and decision records; index in `docs/README.md` |
 | `scripts/gate.mjs` | The one gate CI and the delivery loop run |
 

@@ -12,7 +12,7 @@ import { BEHAVIOURS, FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";
 export { FAKE_S3, WRONG_SECRET } from "../shared/fake-s3.ts";
 
 /** Keys per ListObjectsV2 page, so a handful of keys already needs several pages. */
-export const LIST_PAGE = 3;
+const LIST_PAGE = 3;
 
 /** Every request fails this way: a dropped socket, a redirect, or an error document. */
 type Failure = "drop" | "redirect" | { readonly status: number; readonly code: string };

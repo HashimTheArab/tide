@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import type { Signer } from "@tide/protocol";
-import type { FakeS3 } from "@tide/server/test/fake-s3";
 import {
   certificatePublicKey,
   cryptoKeySigner,
@@ -14,11 +13,12 @@ import {
   expoSignature,
   verifyExpoSignature,
 } from "@tide/protocol";
-import { FAKE_S3, startFakeS3 } from "@tide/server/test/fake-s3";
 
 import type { CertificateOptions } from "../../protocol/test/fixtures.ts";
+import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { FakeKms, KmsFault } from "./fake-kms.ts";
 import { EXTENSION, RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
+import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { diskBucket } from "../src/disk.ts";
 import { KeyError, openWriter } from "../src/keys.ts";
 import { FAKE_KMS, startFakeKms } from "./fake-kms.ts";

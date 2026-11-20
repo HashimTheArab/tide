@@ -1,0 +1,22 @@
+{
+  "name": "@tide/example-operator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wrangler": "WRANGLER_SEND_METRICS=false WRANGLER_SEND_ERROR_REPORTS=false wrangler",
+    "types": "pnpm run wrangler types --strict-vars=false --env production",
+    "typecheck": "pnpm run types --check && pnpm run wrangler types --strict-vars=false --env staging --check && tsc --noEmit",
+    "build": "pnpm run wrangler deploy --dry-run --env staging && pnpm run wrangler deploy --dry-run --env production",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tide/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}
