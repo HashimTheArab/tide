@@ -29,6 +29,7 @@ export const PROBE_EXIT = {
   signature: 6,
   bundleMissing: 7,
   bundleHash: 8,
+  runtime: 9,
 } as const;
 
 export const PROBE_USAGE =
@@ -60,6 +61,7 @@ class ProbeFailure extends Error {
 interface Probe {
   readonly manifestUrl: string;
   readonly headers: Readonly<Record<string, string>>;
+  readonly runtimeVersion: string;
   readonly key: CryptoKey;
   readonly keyId: string;
 }
@@ -163,6 +165,7 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
       accept: "multipart/mixed",
       ...(appId !== undefined && { "expo-app-id": appId }),
     },
+    runtimeVersion: runtime,
     key,
     keyId,
   };
@@ -184,6 +187,11 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   if (boundary === undefined) {
     await res.body?.cancel();
     throw new ProbeFailure("unparseable", "the reply is not multipart/mixed with a boundary");
+  }
+  // A stock client reads a reply without it as a legacy manifest and rejects it.
+  if (res.headers.get("expo-protocol-version") !== "1") {
+    await res.body?.cancel();
+    throw new ProbeFailure("unparseable", "the reply's expo-protocol-version is not 1");
   }
   const body = await readReply(res);
   let parts: Part[];
@@ -226,6 +234,10 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   }
   if (typeof id !== "string" || !UUID.test(id)) {
     throw new ProbeFailure("unparseable", "the manifest's id is not a lowercase UUID");
+  }
+  // A client never launches an update built for another runtime, so a misrouted pointer must fail here.
+  if (member(json, "runtimeVersion") !== probe.runtimeVersion) {
+    throw new ProbeFailure("runtime", "the manifest is for another runtime version than requested");
   }
   const target = typeof url === "string" ? URL.parse(url) : null;
   if (target === null || !(target.protocol === "https:" || target.protocol === "http:")) {

@@ -63,6 +63,30 @@ async function listen(server: Server | ReturnType<typeof createTcpServer>): Prom
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+/** A proxy to `base` that lets `edit` change each request's headers and each reply's before passing them on. */
+function proxy(
+  base: string,
+  edit: { readonly request?: (h: Headers) => void; readonly reply?: (h: Headers) => void },
+): Promise<string> {
+  return listen(
+    createServer((req, res) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (typeof value === "string" && name !== "host") headers.set(name, value);
+      }
+      edit.request?.(headers);
+      void (async () => {
+        const reply = await fetch(`${base}${req.url}`, { headers });
+        const body = new Uint8Array(await reply.arrayBuffer());
+        const out = new Headers(reply.headers);
+        out.delete("content-length");
+        edit.reply?.(out);
+        res.writeHead(reply.status, Object.fromEntries(out)).end(body);
+      })();
+    }),
+  );
+}
+
 /** A server that accepts connections and never answers. */
 const silent = () => listen(createTcpServer(() => undefined));
 
@@ -274,6 +298,26 @@ describe.each([
     );
     expect(await tide(args(base, "garbage"))).toEqual(
       failure(PROBE_EXIT.unparseable, "the reply is not a valid multipart body"),
+    );
+  });
+
+  test("a reply stripped of expo-protocol-version is unparseable", async () => {
+    const base = await proxy(store.published().base, {
+      reply: (h) => h.delete("expo-protocol-version"),
+    });
+    expect(await tide(args(base))).toEqual(
+      failure(PROBE_EXIT.unparseable, "the reply's expo-protocol-version is not 1"),
+    );
+  });
+
+  test("a manifest for another runtime than requested fails before its launch asset", async () => {
+    const base = await proxy(store.published().base, {
+      // A cache that ignores the runtime header serves another runtime's pointer.
+      request: (h) => h.set("expo-runtime-version", "1.0.0"),
+    });
+    const requested = args(base).map((a) => (a === "1.0.0" ? "2.0.0" : a));
+    expect(await tide(requested)).toEqual(
+      failure(PROBE_EXIT.runtime, "the manifest is for another runtime version than requested"),
     );
   });
 

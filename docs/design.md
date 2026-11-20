@@ -520,7 +520,8 @@ The probe sends `GET /manifest` as a stock client: `expo-protocol-version: 1`, `
 pinned keyid, `accept: multipart/mixed`, and no current update ID, so a pointer is served whenever one exists. It
 parses the multipart reply and verifies the `expo-signature` of the one manifest or directive part over its exact
 bytes. A directive (`rollBackToEmbedded`, or `noUpdateAvailable` from `reply/no-update`) passes on that alone. A
-manifest's `launchAsset.url` is then fetched wherever it points and its SHA-256 compared with `launchAsset.hash`;
+manifest's signed `runtimeVersion` must be the one requested, since a client never launches another runtime's
+update. Its `launchAsset.url` is then fetched wherever it points and its SHA-256 compared with `launchAsset.hash`;
 other assets are not fetched. `/manifest` has 10 s and the launch asset 60 s, each covering the body.
 
 | Exit | Meaning |
@@ -529,10 +530,11 @@ other assets are not fetched. `/manifest` has 10 s and the launch asset 60 s, ea
 | 2 | Usage or configuration; nothing was sent |
 | 3 | Unreachable: a request failed or passed its deadline |
 | 4 | `/manifest` or the launch asset answered a status other than 200 (404 for the asset is 7) |
-| 5 | Unparseable reply: not `multipart/mixed`, a bad body, no single signed part, or malformed JSON |
+| 5 | Unparseable reply: not `multipart/mixed`, no `expo-protocol-version: 1`, a bad body, no single signed part, or malformed JSON |
 | 6 | Signature: missing, malformed, another keyid, or not verifying under the pinned certificate |
 | 7 | The launch asset answered 404 |
 | 8 | The launch asset's SHA-256 differs from the manifest's hash |
+| 9 | The signed manifest is for another runtime version than `--runtime-version` |
 
 Exit 1 is left to an uncaught error, so it always means a bug. Messages are fixed text naming the failure and at
 most a status; no header value, key or response body is printed.
