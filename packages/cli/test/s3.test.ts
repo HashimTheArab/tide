@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import type { FakeS3 } from "@tide/server/test/fake-s3";
-import { FAKE_S3, WRONG_SECRET, startFakeS3 } from "@tide/server/test/fake-s3";
-
+import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";
+import { FAKE_S3, WRONG_SECRET, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { BucketError } from "../src/bucket.ts";
 import { s3Bucket } from "../src/s3.ts";
 import { rejection, utf8 } from "./helpers.ts";

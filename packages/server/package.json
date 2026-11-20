@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./core": "./src/core/app.ts",
-    "./test/fake-s3": "./test/fakes/s3.ts"
+    "./workers": "./src/workers.ts"
   },
   "scripts": {
-    "dev:workers": "wrangler dev",
+    "wrangler": "WRANGLER_SEND_METRICS=false WRANGLER_SEND_ERROR_REPORTS=false wrangler",
+    "dev:workers": "pnpm run wrangler dev",
     "dev:node": "node src/node.ts",
-    "types": "wrangler types --strict-vars=false",
-    "typecheck": "wrangler types --strict-vars=false --check && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.workers.json",
+    "types": "pnpm run wrangler types --strict-vars=false",
+    "typecheck": "pnpm run types --check && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.workers.json",
     "test": "vitest run"
   },
   "dependencies": {
@@ -24,6 +24,7 @@
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
-    "wrangler": "catalog:"
+    "wrangler": "catalog:",
+    "yaml": "2.9.1"
   }
 }

@@ -16,9 +16,9 @@ import {
   sha256Base64Url,
   verifyExpoSignature,
 } from "@tide/protocol";
-import { FAKE_S3 } from "@tide/server/test/fake-s3";
 
 import type { Objects } from "./publish-fixture.ts";
+import { FAKE_S3 } from "../../server/test/fakes/s3.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
 import { diskBucket } from "../src/disk.ts";
 import {

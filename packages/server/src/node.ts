@@ -2,8 +2,8 @@ import { statSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import type { ServerType } from "@hono/node-server";
 import type { FileHandle } from "node:fs/promises";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
@@ -63,10 +63,11 @@ export function startServer(options: {
   port: number;
   store: Store;
   appId?: string | undefined;
-}): Promise<ServerType> {
+}): Promise<Server> {
   const app = createApp(options.store, { appId: options.appId });
   return new Promise((resolve) => {
-    const server = serve({ fetch: app.fetch, port: options.port }, () => resolve(server));
+    // Without a createServer option, serve makes an HTTP/1.1 server.
+    const server = serve({ fetch: app.fetch, port: options.port }, () => resolve(server as Server));
   });
 }
 
@@ -84,4 +85,17 @@ if (import.meta.main) {
     appId: process.env.TIDE_APP_ID,
   });
   console.log(`tide listening on port ${(server.address() as AddressInfo).port}`);
+  // As PID 1 in a container, Node would ignore SIGTERM; close lets in-flight replies finish before exiting.
+  let closing = false;
+  // close only drops connections idle at the time; one whose reply ends later would wait out its keep-alive.
+  server.on("request", (_req, res) => {
+    res.once("finish", () => closing && server.closeIdleConnections());
+  });
+  const shutdown = () => {
+    console.log("tide closing");
+    closing = true;
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }

@@ -1,0 +1,24 @@
+// An operator's Worker: Tide's entry, configured only by bindings and vars. Deploy with --env; Wrangler does not
+// inherit bindings or vars into a named environment, so each one declares them all.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tide-example",
+  "main": "worker.ts",
+  "compatibility_date": "2026-11-01",
+  "env": {
+    "staging": {
+      "name": "tide-example-staging",
+      "vars": { "TIDE_APP_ID": "example-app-staging" },
+      "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tide-example-staging" }],
+      "analytics_engine_datasets": [{ "binding": "ANALYTICS", "dataset": "tide_example_staging" }],
+    },
+    "production": {
+      "name": "tide-example-production",
+      "vars": { "TIDE_APP_ID": "example-app-production" },
+      "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tide-example-production" }],
+      "analytics_engine_datasets": [
+        { "binding": "ANALYTICS", "dataset": "tide_example_production" },
+      ],
+    },
+  },
+}

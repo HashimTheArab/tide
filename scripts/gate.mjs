@@ -24,6 +24,7 @@ const CHECKS = {
   format: "pnpm format",
   knip: "pnpm knip",
   test: "pnpm test",
+  build: "pnpm build",
   docs: "pnpm docs:check",
   audit: "pnpm audit --prod --audit-level high",
   // Full history with default rules; no config or allow comment can narrow it.

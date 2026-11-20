@@ -1,0 +1,2 @@
+# Builders that ignore packages/server/Dockerfile.dockerignore (the legacy builder, Kaniko) get no files.
+*

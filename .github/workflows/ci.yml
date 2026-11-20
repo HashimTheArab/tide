@@ -48,10 +48,23 @@ jobs:
           jq '{allChecksPassed, tests, checks: (.checks | map_values(.exitCode))}' "$RUNNER_TEMP/gate.json"
           jq -e '.allChecksPassed == true' "$RUNNER_TEMP/gate.json" > /dev/null
 
+  # Builds the Node image and runs it over a bucket the CLI publishes; needs docker, so it is not in the gate.
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Image smoke test
+        run: pnpm test:container
+
   # The one check branch protection requires: it passes only when every other job passed.
   check:
     if: ${{ always() }}
-    needs: [gate]
+    needs: [gate, container]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

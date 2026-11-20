@@ -9,7 +9,15 @@ const ENTRY = fileURLToPath(new URL("../../src/node.ts", import.meta.url));
 export function runEntry(env: Record<string, string>): {
   /** Resolves the listening port, or rejects with stderr if the process exits first. */
   listening: Promise<number>;
-  exited: Promise<{ code: number | null; stdout: string; stderr: string }>;
+  /** Resolves the first match of `pattern` in stdout, or rejects if the process exits first. */
+  printed: (pattern: RegExp) => Promise<RegExpExecArray>;
+  kill: (signal: NodeJS.Signals) => void;
+  exited: Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    stdout: string;
+    stderr: string;
+  }>;
 } {
   const child = spawn(process.execPath, [ENTRY], {
     env: { ...env, PORT: "0" },
@@ -20,20 +28,31 @@ export function runEntry(env: Record<string, string>): {
   });
   let stdout = "";
   let stderr = "";
+  const waiting = new Set<() => void>();
   child.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
-  const exited = once(child, "exit").then(([code]) => ({
+  child.stdout.setEncoding("utf8").on("data", (s: string) => {
+    stdout += s;
+    for (const check of waiting) check();
+  });
+  const exited = once(child, "exit").then(([code, signal]) => ({
     code: code as number | null,
+    signal: signal as NodeJS.Signals | null,
     stdout,
     stderr,
   }));
-  const listening = new Promise<number>((resolve, reject) => {
-    child.stdout.setEncoding("utf8").on("data", (s: string) => {
-      stdout += s;
-      const port = /tide listening on port (\d+)/.exec(stdout)?.[1];
-      if (port !== undefined) resolve(Number(port));
+  const printed = (pattern: RegExp) =>
+    new Promise<RegExpExecArray>((resolve, reject) => {
+      const check = () => {
+        const match = pattern.exec(stdout);
+        if (match === null) return;
+        waiting.delete(check);
+        resolve(match);
+      };
+      waiting.add(check);
+      check();
+      void exited.then(({ stderr: err }) => reject(new Error(`entry exited: ${err}`)));
     });
-    void exited.then(({ stderr: err }) => reject(new Error(`entry exited: ${err}`)));
-  });
+  const listening = printed(/tide listening on port (\d+)\n/).then(([, port]) => Number(port));
   void listening.catch(() => undefined); // A test that expects an exit never awaits it.
-  return { listening, exited };
+  return { listening, printed, kill: (signal) => child.kill(signal), exited };
 }
