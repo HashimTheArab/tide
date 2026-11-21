@@ -118,8 +118,8 @@ export const STEPS: Record<Scenario, Step> = {
     from: "ota",
     async run(t, from) {
       const to = await publish(t, "u3");
-      tamperPatch(t.stack.storeDir, ran(from).hex, to.hex);
-      await checkCorruptPatch(t, ran(from), to, await launch(t));
+      const intact = tamperPatch(t.stack.storeDir, ran(from).hex, to.hex);
+      await checkCorruptPatch(t, ran(from), to, await launch(t), intact);
       return {
         running: to,
         saw: `ran ${to.updateId} from the full bundle after the tampered patch`,
@@ -225,6 +225,8 @@ export async function checkFull(
 ): Promise<void> {
   const into = storedPatches(s).filter((key) => key.endsWith(`/${u1.hex}`));
   if (into.length > 0) throw new Error(`a patch to the first update is stored: ${into.join(", ")}`);
+  const base = baseKey(e.updateId);
+  if (existsSync(storePath(s, base))) throw new Error(`the embedded update is registered: ${base}`);
   await compare(
     s,
     traces,
@@ -258,12 +260,16 @@ export async function checkPatch(s: Served, from: Update, to: Update, trace: Tra
   );
 }
 
-/** The client gets the tampered patch as a 226, then fetches the full bundle without A-IM and runs the new update. */
+/**
+ * The client gets the tampered patch as a 226, then fetches the full bundle without A-IM and runs the new update.
+ * `intact` is the stored patch's SHA-256 before the tamper.
+ */
 export async function checkCorruptPatch(
   s: Served,
   from: Update,
   to: Update,
   trace: Trace,
+  intact: string,
 ): Promise<void> {
   // Without a fallback the first difference is the next /manifest, so name the missing fetch here.
   const path = `/bundles/${to.hex}`;
@@ -271,6 +277,9 @@ export async function checkCorruptPatch(
     const seen = trace.recorded.map((r) => `${r.path} ${r.status}`).join(", ");
     throw new Error(`no fallback: the client never got ${path} answered 200 (saw ${seen})`);
   }
+  const key = patchKey(from.hex, to.hex);
+  const tampered = sha256File(storePath(s, key));
+  if (tampered === intact) throw new Error(`${key} is unchanged since before the tamper`);
   await compare(
     s,
     [trace],
@@ -279,13 +288,16 @@ export async function checkCorruptPatch(
         reports: [running(from), fetched(from, true), running(to), fetched(to, false)],
         exchanges: [
           manifest(from, update(to)),
-          patched(from, to, patchKey(from.hex, to.hex)),
+          patched(from, to, `tampered ${key}`),
           full(from, to, undefined),
           manifest(to, NO_UPDATE),
         ],
       },
     ],
-    patchLabels(s),
+    new Map([
+      [intact, key],
+      [tampered, `tampered ${key}`],
+    ]),
   );
 }
 

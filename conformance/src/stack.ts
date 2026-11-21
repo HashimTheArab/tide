@@ -186,9 +186,9 @@ export function tail(file: string): string {
 
 /**
  * Inverts every byte after the BSDIFF40 header of the stored patch from bundle `fromHex` to bundle `toHex`, so the
- * client still recognises the patch but cannot apply it.
+ * client still recognises the patch but cannot apply it; returns the patch's SHA-256 before the change.
  */
-export function tamperPatch(storeDir: string, fromHex: string, toHex: string): void {
+export function tamperPatch(storeDir: string, fromHex: string, toHex: string): string {
   const key = patchKey(fromHex, toHex);
   const path = join(storeDir, diskPath(key));
   let bytes: Buffer;
@@ -200,8 +200,10 @@ export function tamperPatch(storeDir: string, fromHex: string, toHex: string): v
   if (bytes.length <= 32 || bytes.toString("latin1", 0, 8) !== "BSDIFF40") {
     throw new Error(`${key} is not a BSDIFF40 patch`);
   }
+  const intact = createHash("sha256").update(bytes).digest("hex");
   for (let i = 32; i < bytes.length; i++) bytes[i] = (bytes[i] ?? 0) ^ 0xff;
   writeFileSync(path, bytes);
+  return intact;
 }
 
 async function writeIdentity(dir: string): Promise<Identity> {

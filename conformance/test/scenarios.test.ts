@@ -252,6 +252,18 @@ describe("the full scenario", () => {
     });
   });
 
+  test("fails when the embedded update is registered, though no patch was stored", async () => {
+    await withStack(async (stack) => {
+      await publish(stack, "seed", bundle(), "seed");
+      const e = await registerBuild(stack, bundle());
+      // Unrelated bytes: the patch would not save half the transfer, so none is stored.
+      const u1 = await publish(stack, "u1", bundle());
+      await expect(checkFull(served(stack), e, u1, await launches(stack, e, u1))).rejects.toThrow(
+        `the embedded update is registered: bases/${EMBEDDED_ID}`,
+      );
+    });
+  });
+
   test("fails on a stored patch to the first update from another base, though the client got a 200", async () => {
     await withStack(async (stack) => {
       const base = bundle();
@@ -323,24 +335,42 @@ describe("the corrupt-patch scenario", () => {
   test("passes on the tampered 226, then a full bundle without A-IM naming the same updates", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
-      tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
       const seen = await trace(stack, reports(u2, u3), async (c) => {
         await c.manifest(u2.updateId);
         await c.bundle(u3, u2.updateId);
         await c.bundle(u3, u2.updateId, false);
         await c.manifest(u3.updateId);
       });
-      await checkCorruptPatch(served(stack), u2, u3, seen);
+      await checkCorruptPatch(served(stack), u2, u3, seen, intact);
     });
   });
 
   test("fails when the client makes no full-bundle request after the 226", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
-      tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
       const seen = await patchedLaunch(stack, u2, u3);
-      await expect(checkCorruptPatch(served(stack), u2, u3, seen)).rejects.toThrow(
+      await expect(checkCorruptPatch(served(stack), u2, u3, seen, intact)).rejects.toThrow(
         `no fallback: the client never got /bundles/${u3.hex} answered 200`,
+      );
+    });
+  });
+
+  test("fails when the stored patch was never tampered, though a full bundle followed", async () => {
+    await withStack(async (stack) => {
+      const { u2, u3 } = await published(stack);
+      const intact = sha256Hex(
+        readFileSync(join(stack.storeDir, diskPath(patchKey(u2.hex, u3.hex)))),
+      );
+      const seen = await trace(stack, reports(u2, u3), async (c) => {
+        await c.manifest(u2.updateId);
+        await c.bundle(u3, u2.updateId);
+        await c.bundle(u3, u2.updateId, false);
+        await c.manifest(u3.updateId);
+      });
+      await expect(checkCorruptPatch(served(stack), u2, u3, seen, intact)).rejects.toThrow(
+        `${patchKey(u2.hex, u3.hex)} is unchanged since before the tamper`,
       );
     });
   });
@@ -348,19 +378,16 @@ describe("the corrupt-patch scenario", () => {
   test("fails when the 226 carried the untampered patch, though a full bundle followed", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
-      const intact = sha256Hex(
-        readFileSync(join(stack.storeDir, diskPath(patchKey(u2.hex, u3.hex)))),
-      );
       const c = client(stack);
       const before = stack.responses.length;
       await c.manifest(u2.updateId);
       await c.bundle(u3, u2.updateId);
-      tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
       await c.bundle(u3, u2.updateId, false);
       await c.manifest(u3.updateId);
       const seen = { reports: reports(u2, u3), recorded: stack.responses.slice(before) };
-      await expect(checkCorruptPatch(served(stack), u2, u3, seen)).rejects.toThrow(
-        `"body":"${intact}"`,
+      await expect(checkCorruptPatch(served(stack), u2, u3, seen, intact)).rejects.toThrow(
+        `"body":"${patchKey(u2.hex, u3.hex)}"`,
       );
     });
   });
