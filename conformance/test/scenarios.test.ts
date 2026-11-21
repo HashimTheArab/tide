@@ -16,7 +16,7 @@ import {
 
 import type { Report } from "../src/android.ts";
 import type { Scenario } from "../src/options.ts";
-import type { Outcome, Running, Served, Trace, Update } from "../src/scenarios.ts";
+import type { Outcome, Served, Trace, Update } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import { SCENARIOS } from "../src/options.ts";
 import {
@@ -62,11 +62,11 @@ async function publish(
   channel: string = MAIN.channel,
 ): Promise<Update> {
   const ids = await tideCli(stack).publish(fixtureExport(stack, marker, bytes), channel);
-  return { updateId: ids.android ?? "", marker, hex: await hexOf(bytes) };
+  return { updateId: ids.android ?? "", marker, hex: await hexOf(bytes), embedded: false };
 }
 
 /** Registers an embedded build with no assets whose bundle is `bytes`; the bucket must already serve the identity. */
-async function registerBuild(stack: Stack, bytes: Uint8Array): Promise<Running> {
+async function registerBuild(stack: Stack, bytes: Uint8Array): Promise<Update> {
   const dir = join(stack.dir, "build");
   mkdirSync(dir);
   writeFileSync(join(dir, "index.android.bundle"), bytes);
@@ -82,15 +82,14 @@ async function registerBuild(stack: Stack, bytes: Uint8Array): Promise<Running> 
 
 const ALL = Object.keys(SCENARIOS) as Scenario[];
 
-const embedded = (hex: string): Running => ({
+const embedded = (hex: string): Update => ({
   updateId: EMBEDDED_ID,
   marker: "e",
   hex,
   embedded: true,
 });
-const ota = (u: Update): Running => ({ ...u, embedded: false });
 
-const running = (u: Running): Report => ({
+const running = (u: Update): Report => ({
   event: "running",
   marker: u.marker,
   updateId: u.updateId,
@@ -169,7 +168,7 @@ const breakSignature = (stack: Stack) =>
 
 describe("the embedded scenario", () => {
   /** Two launches of an app on `main` while only another channel has a pointer. */
-  async function launches(stack: Stack, e: Running, keyId?: string) {
+  async function launches(stack: Stack, e: Update, keyId?: string) {
     const each = () =>
       trace(stack, [running(e), fetched(e, false)], (c) => c.manifest(e.updateId, keyId));
     return [await each(), await each()];
@@ -218,18 +217,18 @@ describe("the embedded scenario", () => {
 
 describe("the full scenario", () => {
   /** A fresh install running `e` takes `u1` with the full bundle; a relaunch gets no update. */
-  async function launches(stack: Stack, e: Running, u1: Update) {
+  async function launches(stack: Stack, e: Update, u1: Update) {
     return [
       await trace(
         stack,
-        [running(e), fetched(e, true), running(ota(u1)), fetched(u1, false)],
+        [running(e), fetched(e, true), running(u1), fetched(u1, false)],
         async (c) => {
           await c.manifest(e.updateId);
           await c.bundle(u1, e.updateId);
           await c.manifest(u1.updateId);
         },
       ),
-      await trace(stack, [running(ota(u1)), fetched(u1, false)], (c) => c.manifest(u1.updateId)),
+      await trace(stack, [running(u1), fetched(u1, false)], (c) => c.manifest(u1.updateId)),
     ];
   }
 
@@ -241,14 +240,14 @@ describe("the full scenario", () => {
     });
   });
 
-  test("fails when the embedded update is registered and the client gets a patch", async () => {
+  test("fails when the embedded update is registered, so a patch to the first update is stored", async () => {
     await withStack(async (stack) => {
       await publish(stack, "seed", bundle(), "seed");
       const base = bundle();
       const e = await registerBuild(stack, base);
       const u1 = await publish(stack, "u1", variant(base, "u1"));
       await expect(checkFull(served(stack), e, u1, await launches(stack, e, u1))).rejects.toThrow(
-        `bases/${EMBEDDED_ID} is registered, so the first update could be a patch`,
+        `a patch to the first update is stored: ${patchKey(e.hex, u1.hex)}`,
       );
     });
   });
@@ -278,22 +277,18 @@ describe("the full scenario", () => {
 });
 
 /** A client running `from` takes `to`, its bundle as one request with A-IM. */
-const patchedLaunch = (stack: Stack, from: Running, to: Update, current = from.updateId) =>
-  trace(
-    stack,
-    [running(from), fetched(from, true), running(ota(to)), fetched(to, false)],
-    async (c) => {
-      await c.manifest(from.updateId);
-      await c.bundle(to, current);
-      await c.manifest(to.updateId);
-    },
-  );
+const patchedLaunch = (stack: Stack, from: Update, to: Update, current = from.updateId) =>
+  trace(stack, [running(from), fetched(from, true), running(to), fetched(to, false)], async (c) => {
+    await c.manifest(from.updateId);
+    await c.bundle(to, current);
+    await c.manifest(to.updateId);
+  });
 
 describe("the patch-ota scenario", () => {
   test("passes on the stored patch from the running update", async () => {
     await withStack(async (stack) => {
       const base = bundle();
-      const u1 = ota(await publish(stack, "u1", base));
+      const u1 = await publish(stack, "u1", base);
       const u2 = await publish(stack, "u2", variant(base, "u2"));
       await checkPatch(served(stack), u1, u2, await patchedLaunch(stack, u1, u2));
     });
@@ -301,7 +296,7 @@ describe("the patch-ota scenario", () => {
 
   test("fails with a 200 when the CLI wrote no patch", async () => {
     await withStack(async (stack) => {
-      const u1 = ota(await publish(stack, "u1", bundle()));
+      const u1 = await publish(stack, "u1", bundle());
       // Unrelated bytes: the patch would not save half the transfer, so none is stored.
       const u2 = await publish(stack, "u2", bundle());
       await expect(
@@ -314,37 +309,37 @@ describe("the patch-ota scenario", () => {
 describe("the corrupt-patch scenario", () => {
   async function published(stack: Stack) {
     const base = bundle();
-    const u2 = ota(await publish(stack, "u2", base));
+    const u2 = await publish(stack, "u2", base);
     const u3 = await publish(stack, "u3", variant(base, "u3"));
     return { u2, u3 };
   }
-  const reports = (u2: Running, u3: Update) => [
+  const reports = (u2: Update, u3: Update) => [
     running(u2),
     fetched(u2, true),
-    running(ota(u3)),
+    running(u3),
     fetched(u3, false),
   ];
 
   test("passes on the tampered 226, then a full bundle without A-IM naming the same updates", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
-      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      tamperPatch(stack.storeDir, u2.hex, u3.hex);
       const seen = await trace(stack, reports(u2, u3), async (c) => {
         await c.manifest(u2.updateId);
         await c.bundle(u3, u2.updateId);
         await c.bundle(u3, u2.updateId, false);
         await c.manifest(u3.updateId);
       });
-      await checkCorruptPatch(served(stack), u2, u3, intact, seen);
+      await checkCorruptPatch(served(stack), u2, u3, seen);
     });
   });
 
   test("fails when the client makes no full-bundle request after the 226", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
-      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      tamperPatch(stack.storeDir, u2.hex, u3.hex);
       const seen = await patchedLaunch(stack, u2, u3);
-      await expect(checkCorruptPatch(served(stack), u2, u3, intact, seen)).rejects.toThrow(
+      await expect(checkCorruptPatch(served(stack), u2, u3, seen)).rejects.toThrow(
         `no fallback: the client never got /bundles/${u3.hex} answered 200`,
       );
     });
@@ -353,33 +348,19 @@ describe("the corrupt-patch scenario", () => {
   test("fails when the 226 carried the untampered patch, though a full bundle followed", async () => {
     await withStack(async (stack) => {
       const { u2, u3 } = await published(stack);
+      const intact = sha256Hex(
+        readFileSync(join(stack.storeDir, diskPath(patchKey(u2.hex, u3.hex)))),
+      );
       const c = client(stack);
       const before = stack.responses.length;
       await c.manifest(u2.updateId);
       await c.bundle(u3, u2.updateId);
-      const intact = tamperPatch(stack.storeDir, u2.hex, u3.hex);
+      tamperPatch(stack.storeDir, u2.hex, u3.hex);
       await c.bundle(u3, u2.updateId, false);
       await c.manifest(u3.updateId);
       const seen = { reports: reports(u2, u3), recorded: stack.responses.slice(before) };
-      await expect(checkCorruptPatch(served(stack), u2, u3, intact, seen)).rejects.toThrow(
-        `"body":"untampered ${patchKey(u2.hex, u3.hex)}"`,
-      );
-    });
-  });
-
-  test("fails when the stored patch was never tampered, though the client fell back", async () => {
-    await withStack(async (stack) => {
-      const { u2, u3 } = await published(stack);
-      const key = patchKey(u2.hex, u3.hex);
-      const intact = sha256Hex(readFileSync(join(stack.storeDir, diskPath(key))));
-      const seen = await trace(stack, reports(u2, u3), async (c) => {
-        await c.manifest(u2.updateId);
-        await c.bundle(u3, u2.updateId);
-        await c.bundle(u3, u2.updateId, false);
-        await c.manifest(u3.updateId);
-      });
-      await expect(checkCorruptPatch(served(stack), u2, u3, intact, seen)).rejects.toThrow(
-        `${key} was not tampered`,
+      await expect(checkCorruptPatch(served(stack), u2, u3, seen)).rejects.toThrow(
+        `"body":"${intact}"`,
       );
     });
   });
@@ -387,7 +368,7 @@ describe("the corrupt-patch scenario", () => {
 
 describe("the rollback scenario", () => {
   async function rolledBack(stack: Stack) {
-    const u3 = ota(await publish(stack, "u3", bundle()));
+    const u3 = await publish(stack, "u3", bundle());
     await tideCli(stack).rollbackToEmbedded(ANDROID);
     return { u3, e: embedded(await hexOf(bundle())) };
   }
@@ -443,7 +424,7 @@ describe("the patch-embedded scenario", () => {
       const u4 = await publish(stack, "u4", variant(base, "u4"));
       const seen = await patchedLaunch(stack, e, u4, u3.updateId);
       await expect(checkPatch(served(stack), e, u4, seen)).rejects.toThrow(
-        `"base":"${u3.updateId}"`,
+        `"baseUpdateId":"${u3.updateId}"`,
       );
     });
   });

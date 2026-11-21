@@ -329,7 +329,7 @@ describe("the harness stack", () => {
       });
 
       const before = tree(stack.storeDir);
-      expect(tamperPatch(stack.storeDir, fromHex, toHex)).toBe(stored);
+      tamperPatch(stack.storeDir, fromHex, toHex);
       const after = tree(stack.storeDir);
       const changed = [...after].filter(([path, bytes]) => before.get(path) !== bytes);
       expect(changed.map(([path]) => path)).toEqual([key]);

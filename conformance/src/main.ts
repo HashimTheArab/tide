@@ -6,7 +6,7 @@ import type { Outcome, Target } from "./scenarios.ts";
 import { androidDevice } from "./android.ts";
 import { buildAndroid, exportUpdate, materialise } from "./app.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
-import { STEPS, plan, runScenarios } from "./scenarios.ts";
+import { STEPS, message, plan, runScenarios } from "./scenarios.ts";
 import { withStack } from "./stack.ts";
 import { tideCli } from "./tide-cli.ts";
 
@@ -15,7 +15,6 @@ const SEED_RUNTIME = "conformance-seed";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
 const say = (line: string) => process.stderr.write(`conformance: ${line}\n`);
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Exit 0 for help or a run that passed, 2 for a usage error before anything starts, 1 when the run fails. */
 async function main(args: readonly string[]): Promise<number> {

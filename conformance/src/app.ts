@@ -65,7 +65,7 @@ export function materialise(stack: Stack, version: ExpoVersion): App {
       updates: {
         url: `${stack.serverUrl}/manifest`,
         requestHeaders: { "expo-channel-name": app.channel },
-        // The app fetches by itself, so a launch never fetches on its own and each step is deterministic.
+        // Only the app's own fetch requests an update, so each launch is one deterministic step.
         checkAutomatically: "NEVER",
         enableBsdiffPatchSupport: true, // Off by default on 55.
         codeSigningCertificate: `./${CERTIFICATE}`,

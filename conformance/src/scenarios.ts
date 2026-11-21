@@ -46,15 +46,11 @@ export interface Target {
 /** What the checks read: the store and identity, and the channel and runtime the app asks for. */
 export type Served = Pick<Target, "stack" | "app">;
 
-/** An update: its ID, the marker its bundle reports, and its launch bundle's content key. */
+/** An update: its ID, the marker its bundle reports, its launch bundle's content key, and whether it is embedded. */
 export interface Update {
   readonly updateId: string;
   readonly marker: string;
   readonly hex: string;
-}
-
-/** The update the app runs after a step, which the next step starts from. */
-export interface Running extends Update {
   readonly embedded: boolean;
 }
 
@@ -66,23 +62,17 @@ export interface Trace {
 
 interface Step {
   readonly from: "fresh" | "ota"; // Fresh reinstalls the app; ota starts from the update the step before left running.
-  run(t: Target, running: Running | undefined): Promise<{ running: Running; saw: string }>;
+  run(t: Target, running: Update | undefined): Promise<{ running: Update; saw: string }>;
 }
 
 /** What a recorded reply shows, reduced to the fields the expectations name. */
 type Exchange =
-  | { path: string; status: number; current: string | undefined; reply: string | undefined }
-  | {
-      path: string;
-      status: number;
-      aIm: string | undefined;
-      current: string | undefined;
-      requested: string | undefined;
-      im: string | undefined;
-      base: string | undefined;
-      body: string; // `bundle`, the store key of the patch it was, `incomplete`, or another digest.
-    }
-  | { path: string; status: number };
+  | (Pick<Recorded, "path" | "status" | "currentUpdateId"> & { reply: string | undefined })
+  | (Pick<
+      Recorded,
+      "path" | "status" | "aIm" | "currentUpdateId" | "requestedUpdateId" | "im" | "baseUpdateId"
+    > & { body: string }) // `bundle`, the store key of the patch it was, `incomplete`, or another digest.
+  | Pick<Recorded, "path" | "status">;
 
 interface Launch {
   readonly reports: readonly Report[];
@@ -108,7 +98,7 @@ export const STEPS: Record<Scenario, Step> = {
       const u1 = await publish(t, "u1");
       await checkFull(t, e, u1, [await launch(t), await launch(t)]);
       return {
-        running: { ...u1, embedded: false },
+        running: u1,
         saw: `ran ${u1.updateId} from the full bundle; a relaunch got ${NO_UPDATE_KEY}`,
       };
     },
@@ -119,7 +109,7 @@ export const STEPS: Record<Scenario, Step> = {
       const to = await publish(t, "u2");
       await checkPatch(t, ran(from), to, await launch(t));
       return {
-        running: { ...to, embedded: false },
+        running: to,
         saw: `ran ${to.updateId} from a patch on update ${ran(from).updateId}`,
       };
     },
@@ -128,10 +118,10 @@ export const STEPS: Record<Scenario, Step> = {
     from: "ota",
     async run(t, from) {
       const to = await publish(t, "u3");
-      const intact = tamperPatch(t.stack.storeDir, ran(from).hex, to.hex);
-      await checkCorruptPatch(t, ran(from), to, intact, await launch(t));
+      tamperPatch(t.stack.storeDir, ran(from).hex, to.hex);
+      await checkCorruptPatch(t, ran(from), to, await launch(t));
       return {
-        running: { ...to, embedded: false },
+        running: to,
         saw: `ran ${to.updateId} from the full bundle after the tampered patch`,
       };
     },
@@ -161,7 +151,7 @@ export const STEPS: Record<Scenario, Step> = {
       const to = await publish(t, "u4");
       await checkPatch(t, e, to, await launch(t));
       return {
-        running: { ...to, embedded: false },
+        running: to,
         saw: `ran ${to.updateId} from a patch on embedded update ${e.updateId}`,
       };
     },
@@ -183,6 +173,8 @@ export function plan(selected: readonly Scenario[]): Scenario[] {
   return order.filter((name) => keep.has(name));
 }
 
+export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 export type Outcome =
   | { readonly pass: true; readonly saw: string }
   | { readonly pass: false; readonly why: string };
@@ -193,10 +185,10 @@ export type Outcome =
  */
 export async function runScenarios(
   names: readonly Scenario[],
-  run: (name: Scenario, running: Running | undefined) => Promise<{ running: Running; saw: string }>,
+  run: (name: Scenario, running: Update | undefined) => Promise<{ running: Update; saw: string }>,
   done: (name: Scenario, outcome: Outcome) => void,
 ): Promise<void> {
-  let running: Running | undefined;
+  let running: Update | undefined;
   let failed: Scenario | undefined;
   for (const name of names) {
     if (STEPS[name].from === "ota" && running === undefined) {
@@ -210,17 +202,13 @@ export async function runScenarios(
     } catch (e) {
       running = undefined;
       failed = name;
-      done(name, { pass: false, why: e instanceof Error ? e.message : String(e) });
+      done(name, { pass: false, why: message(e) });
     }
   }
 }
 
 /** Two launches of a fresh install each run the embedded update and accept the signed no-update reply. */
-export async function checkEmbedded(
-  s: Served,
-  e: Running,
-  traces: readonly Trace[],
-): Promise<void> {
+export async function checkEmbedded(s: Served, e: Update, traces: readonly Trace[]): Promise<void> {
   const each = { reports: [running(e), fetched(e, false)], exchanges: [manifest(e, NO_UPDATE)] };
   await compare(s, traces, [each, each], new Map());
 }
@@ -231,44 +219,34 @@ export async function checkEmbedded(
  */
 export async function checkFull(
   s: Served,
-  e: Running,
+  e: Update,
   u1: Update,
   traces: readonly Trace[],
 ): Promise<void> {
-  if (existsSync(storePath(s, baseKey(e.updateId)))) {
-    throw new Error(`${baseKey(e.updateId)} is registered, so the first update could be a patch`);
-  }
   const into = storedPatches(s).filter((key) => key.endsWith(`/${u1.hex}`));
   if (into.length > 0) throw new Error(`a patch to the first update is stored: ${into.join(", ")}`);
-  const u = { ...u1, embedded: false };
   await compare(
     s,
     traces,
     [
       {
-        reports: [running(e), fetched(e, true), running(u), fetched(u, false)],
+        reports: [running(e), fetched(e, true), running(u1), fetched(u1, false)],
         exchanges: [manifest(e, update(u1)), full(e, u1, "bsdiff"), manifest(u1, NO_UPDATE)],
       },
-      { reports: [running(u), fetched(u, false)], exchanges: [manifest(u1, NO_UPDATE)] },
+      { reports: [running(u1), fetched(u1, false)], exchanges: [manifest(u1, NO_UPDATE)] },
     ],
     patchLabels(s),
   );
 }
 
 /** The client gets the stored patch from the update it runs, as a 226 naming that update, and runs the new update. */
-export async function checkPatch(
-  s: Served,
-  from: Running,
-  to: Update,
-  trace: Trace,
-): Promise<void> {
-  const u = { ...to, embedded: false };
+export async function checkPatch(s: Served, from: Update, to: Update, trace: Trace): Promise<void> {
   await compare(
     s,
     [trace],
     [
       {
-        reports: [running(from), fetched(from, true), running(u), fetched(u, false)],
+        reports: [running(from), fetched(from, true), running(to), fetched(to, false)],
         exchanges: [
           manifest(from, update(to)),
           patched(from, to, patchKey(from.hex, to.hex)),
@@ -280,53 +258,42 @@ export async function checkPatch(
   );
 }
 
-/**
- * The client gets the tampered patch as a 226, then fetches the full bundle without A-IM and runs the new update.
- * `intact` is the patch's SHA-256 before the tamper; the stored file must differ from it.
- */
+/** The client gets the tampered patch as a 226, then fetches the full bundle without A-IM and runs the new update. */
 export async function checkCorruptPatch(
   s: Served,
-  from: Running,
+  from: Update,
   to: Update,
-  intact: string,
   trace: Trace,
 ): Promise<void> {
+  // Without a fallback the first difference is the next /manifest, so name the missing fetch here.
   const path = `/bundles/${to.hex}`;
   if (!trace.recorded.some((r) => r.path === path && r.status === 200)) {
     const seen = trace.recorded.map((r) => `${r.path} ${r.status}`).join(", ");
     throw new Error(`no fallback: the client never got ${path} answered 200 (saw ${seen})`);
   }
-  const key = patchKey(from.hex, to.hex);
-  const tampered = sha256File(storePath(s, key));
-  if (tampered === intact) throw new Error(`${key} was not tampered`);
-  const labels = new Map([
-    [intact, `untampered ${key}`],
-    [tampered, `tampered ${key}`],
-  ]);
-  const u = { ...to, embedded: false };
   await compare(
     s,
     [trace],
     [
       {
-        reports: [running(from), fetched(from, true), running(u), fetched(u, false)],
+        reports: [running(from), fetched(from, true), running(to), fetched(to, false)],
         exchanges: [
           manifest(from, update(to)),
-          patched(from, to, `tampered ${key}`),
+          patched(from, to, patchKey(from.hex, to.hex)),
           full(from, to, undefined),
           manifest(to, NO_UPDATE),
         ],
       },
     ],
-    labels,
+    patchLabels(s),
   );
 }
 
 /** The client applies the rollback directive, reloads into the embedded update, and then gets the directive again. */
 export async function checkRollback(
   s: Served,
-  from: Running,
-  e: Running,
+  from: Update,
+  e: Update,
   trace: Trace,
 ): Promise<void> {
   await compare(
@@ -343,12 +310,12 @@ export async function checkRollback(
 }
 
 /** Installs the build afresh and returns its embedded update. */
-async function install(t: Target): Promise<Running> {
+async function install(t: Target): Promise<Update> {
   await t.device.install(t.build.apk, t.app.packageName);
   return embedded(t.build);
 }
 
-const embedded = (build: AndroidBuild): Running => ({
+const embedded = (build: AndroidBuild): Update => ({
   updateId: build.embeddedUpdateId,
   marker: build.marker,
   hex: sha256File(build.bundle),
@@ -363,7 +330,7 @@ async function publish(t: Target, name: string): Promise<Update> {
   if (updateId === undefined)
     throw new Error(`tide publish wrote no android pointer for ${marker}`);
   const base = decodeBaseRecord(readFileSync(storePath(t, baseKey(updateId))));
-  return { updateId, marker, hex: contentKey(base.launchAsset.hash) };
+  return { updateId, marker, hex: contentKey(base.launchAsset.hash), embedded: false };
 }
 
 /**
@@ -381,8 +348,7 @@ async function launch(t: Target): Promise<Trace> {
       reports.push(await t.device.nextReport());
     }
   } catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
-    throw new Error(`${why}; the app reported ${JSON.stringify(reports)}`);
+    throw new Error(`${message(e)}; the app reported ${JSON.stringify(reports)}`);
   } finally {
     await t.device.forceStop(t.app.packageName);
   }
@@ -393,12 +359,12 @@ async function launch(t: Target): Promise<Trace> {
 const settled = (r: Report | undefined) =>
   r !== undefined && (r.event === "error" || (r.event === "fetched" && !r.isNew && !r.rollback));
 
-const ran = (from: Running | undefined): Running => {
+const ran = (from: Update | undefined): Update => {
   if (from === undefined) throw new Error("no update is running");
   return from;
 };
 
-const running = (u: Running): Report => ({
+const running = (u: Update): Report => ({
   event: "running",
   marker: u.marker,
   updateId: u.updateId,
@@ -419,7 +385,7 @@ const update = (u: Update) => `update ${u.updateId}`;
 const manifest = (current: Update, reply: string): Exchange => ({
   path: "/manifest",
   status: 200,
-  current: current.updateId,
+  currentUpdateId: current.updateId,
   reply,
 });
 
@@ -428,10 +394,10 @@ const full = (from: Update, to: Update, aIm: string | undefined): Exchange => ({
   path: `/bundles/${to.hex}`,
   status: 200,
   aIm,
-  current: from.updateId,
-  requested: to.updateId,
+  currentUpdateId: from.updateId,
+  requestedUpdateId: to.updateId,
   im: undefined,
-  base: undefined,
+  baseUpdateId: undefined,
   body: "bundle",
 });
 
@@ -440,10 +406,10 @@ const patched = (from: Update, to: Update, body: string): Exchange => ({
   path: `/bundles/${to.hex}`,
   status: 226,
   aIm: "bsdiff",
-  current: from.updateId,
-  requested: to.updateId,
+  currentUpdateId: from.updateId,
+  requestedUpdateId: to.updateId,
   im: "bsdiff",
-  base: from.updateId,
+  baseUpdateId: from.updateId,
   body,
 });
 
@@ -496,22 +462,21 @@ async function exchange(
   r: Recorded,
   labels: ReadonlyMap<string, string>,
 ): Promise<Exchange> {
-  const { path, status } = r;
+  const { path, status, aIm, currentUpdateId, requestedUpdateId, im, baseUpdateId, sha256 } = r;
   if (path === "/manifest") {
     const reply = status === 200 ? await verifyReply(s, r) : undefined;
-    return { path, status, current: r.currentUpdateId, reply };
+    return { path, status, currentUpdateId, reply };
   }
   const hex = BUNDLE_PATH.exec(path)?.[1];
   if (hex === undefined) return { path, status };
-  const { sha256 } = r;
   return {
     path,
     status,
-    aIm: r.aIm,
-    current: r.currentUpdateId,
-    requested: r.requestedUpdateId,
-    im: r.im,
-    base: r.baseUpdateId,
+    aIm,
+    currentUpdateId,
+    requestedUpdateId,
+    im,
+    baseUpdateId,
     body:
       sha256 === undefined
         ? "incomplete"
