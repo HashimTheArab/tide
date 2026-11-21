@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 
+import type { AndroidDevice } from "./android.ts";
+import type { App, Build } from "./app.ts";
+import type { Device } from "./device.ts";
 import type { ExpoVersion, Run, Scenario } from "./options.ts";
 import type { Outcome, Target } from "./scenarios.ts";
+import type { Stack } from "./stack.ts";
 import { androidDevice } from "./android.ts";
 import { buildAndroid, exportUpdate, materialise } from "./app.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
@@ -34,29 +38,51 @@ async function main(args: readonly string[]): Promise<number> {
     say("no ios device driver exists yet");
     return 1;
   }
-  const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
-  if (sdk === undefined || sdk === "") {
-    say("set ANDROID_HOME to the Android SDK");
-    return 1;
-  }
   try {
-    return await android(run, sdk);
+    const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+    if (sdk === undefined || sdk === "") {
+      say("set ANDROID_HOME to the Android SDK");
+      return 1;
+    }
+    return await conform(run, android(run, sdk));
   } catch (e) {
     say(message(e));
     return 1;
   }
 }
 
+/** How a run reaches one platform's device and builds its app. */
+interface Driver<D extends Device> {
+  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, and a line naming it. */
+  open(stack: Stack): Promise<{ device: D; about: string }>;
+  build(stack: Stack, app: App, device: D, marker: string): Promise<Build>;
+}
+
+const android = (run: Run, sdk: string): Driver<AndroidDevice> => ({
+  async open(stack) {
+    const device = await androidDevice(stack, {
+      sdk,
+      serial: process.env.ANDROID_SERIAL === "" ? undefined : process.env.ANDROID_SERIAL,
+      avd: run.avd,
+    });
+    await device.reverse(Number(new URL(stack.serverUrl).port));
+    const about = `${device.serial} (${device.abi}${device.booted ? ", booted read-only" : ""})`;
+    return { device, about };
+  },
+  build: (stack, app, device, marker) => buildAndroid(stack, app, sdk, device.abi, marker),
+});
+
 /**
  * Builds each version's app and runs the scenarios on one device, printing one line per version and scenario;
  * returns 1 if any failed or did not run.
  */
-async function android(run: Run, sdk: string): Promise<number> {
+async function conform<D extends Device>(run: Run, driver: Driver<D>): Promise<number> {
   const names = plan(run.scenarios);
   const failed: string[] = [];
   const report = (version: ExpoVersion, name: Scenario, outcome: Outcome) => {
     const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
-    out(`android expo-updates ${version} ${name}: ${outcome.pass ? "pass" : "fail"}: ${first}`);
+    const result = outcome.pass ? "pass" : "fail";
+    out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
     if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
     if (!outcome.pass) failed.push(`${version} ${name}`);
   };
@@ -68,15 +94,11 @@ async function android(run: Run, sdk: string): Promise<number> {
   };
   await withStack(async (stack) => {
     const cli = tideCli(stack);
-    let device;
+    let device: D;
     try {
-      device = await androidDevice(stack, {
-        sdk,
-        serial: process.env.ANDROID_SERIAL === "" ? undefined : process.env.ANDROID_SERIAL,
-        avd: run.avd,
-      });
-      say(`using ${device.serial} (${device.abi}${device.booted ? ", booted read-only" : ""})`);
-      await device.reverse(Number(new URL(stack.serverUrl).port));
+      let about;
+      ({ device, about } = await driver.open(stack));
+      say(`using ${about}`);
     } catch (e) {
       return notRun(run.versions, e);
     }
@@ -84,10 +106,10 @@ async function android(run: Run, sdk: string): Promise<number> {
     for (const [i, version] of run.versions.entries()) {
       let target: Target;
       try {
-        const app = materialise(stack, version);
-        say(`building the expo-updates ${version} release APK`);
+        const app = materialise(stack, version, run.platform);
+        say(`building the expo-updates ${version} release ${run.platform} app`);
         const marker = `embedded-${version}-${randomUUID().slice(0, 8)}`;
-        const build = await buildAndroid(stack, app, sdk, device.abi, marker);
+        const build = await driver.build(stack, app, device, marker);
         target = { stack, device, cli, app, build };
       } catch (e) {
         notRun([version], e);

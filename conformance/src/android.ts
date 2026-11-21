@@ -1,32 +1,27 @@
 // The Android device side of a run: one emulator, reached through adb, that the stack's close leaves as it found it.
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 
+import type { Device } from "./device.ts";
 import type { Stack } from "./stack.ts";
+import {
+  BOOT_MS,
+  COMMAND_MS,
+  INSTALL_MS,
+  SHUTDOWN_MS,
+  readReports,
+  settles,
+  tool,
+} from "./device.ts";
 import { hostEnv, tail } from "./stack.ts";
 
-// What the app prefixes each report with (apps/shared/App.js); React Native logs it under this tag.
-const REPORT_PREFIX = "tide-conformance ";
+// The tag React Native logs the app's console under.
 const JS_TAG = "ReactNativeJS";
-const COMMAND_MS = 60_000;
-const INSTALL_MS = 180_000;
-const BOOT_MS = 600_000;
-const SHUTDOWN_MS = 60_000;
-// How long a launched app has to report; a cold release start on an emulator takes a few seconds.
-const REPORT_MS = 60_000;
 // adb finds emulators by themselves only on the even console ports 5554 to 5584.
 const FIRST_PORT = 5554;
 const LAST_PORT = 5584;
-
-/** One line the app logged: what happened, the build or update marker, and the event's fields. */
-export interface Report {
-  readonly event: string;
-  readonly marker: string;
-  readonly [field: string]: unknown;
-}
 
 export interface AndroidOptions {
   readonly sdk: string; // ANDROID_HOME
@@ -34,20 +29,12 @@ export interface AndroidOptions {
   readonly avd: string | undefined; // The AVD to boot when no emulator is running; the first listed otherwise.
 }
 
-export interface AndroidDevice {
+export interface AndroidDevice extends Device {
   readonly serial: string;
   readonly abi: string;
   readonly booted: boolean; // Whether the harness started it, and so shuts it down.
   /** Lets the device reach the host's `port` at 127.0.0.1:`port` until the stack closes. */
   reverse(port: number): Promise<void>;
-  /** Installs `apk` as a fresh app, removing any earlier install of `packageName` and its data. */
-  install(apk: string, packageName: string): Promise<void>;
-  launch(packageName: string): Promise<void>;
-  forceStop(packageName: string): Promise<void>;
-  /** Resolves the next report logged since the last `drain`; rejects when none comes within `ms`. */
-  nextReport(ms?: number): Promise<Report>;
-  /** Discards the reports read so far. */
-  drain(): void;
 }
 
 /**
@@ -80,7 +67,7 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
   const adb = (args: readonly string[], ms = COMMAND_MS) =>
     tool(adbPath, ["-s", serial, ...args], ms);
   const abi = (await adb(["shell", "getprop", "ro.product.cpu.abi"])).trim();
-  const reports = await readReports(stack, adbPath, serial, adb);
+  const reports = await followLog(stack, adbPath, serial, adb);
   return {
     serial,
     abi,
@@ -100,11 +87,10 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
       const out = await adb(["shell", "am", "start", "-W", "-n", `${packageName}/.MainActivity`]);
       if (/^Error/m.test(out)) throw new Error(`launching ${packageName} failed: ${out.trim()}`);
     },
-    async forceStop(packageName) {
+    async stop(packageName) {
       await adb(["shell", "am", "force-stop", packageName]);
     },
-    nextReport: (ms = REPORT_MS) => reports.next(ms),
-    drain: () => reports.drain(),
+    ...reports,
   };
 }
 
@@ -116,20 +102,6 @@ export function parseDevices(out: string): Map<string, string> {
     if (serial !== undefined && serial !== "" && state !== undefined) devices.set(serial, state);
   }
   return devices;
-}
-
-/** Returns the report a logcat line carries, or undefined for any other line. */
-export function parseReport(line: string): Report | undefined {
-  const at = line.indexOf(REPORT_PREFIX);
-  if (at === -1) return undefined;
-  try {
-    const value: unknown = JSON.parse(line.slice(at + REPORT_PREFIX.length));
-    if (typeof value !== "object" || value === null) return undefined;
-    const { event, marker } = value as Record<string, unknown>;
-    return typeof event === "string" && typeof marker === "string" ? (value as Report) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 const isEmulator = (serial: string) => serial.startsWith("emulator-");
@@ -217,7 +189,7 @@ function bindable(port: number): Promise<boolean> {
 }
 
 /** Follows the device's JavaScript log from now on and queues the app's reports. */
-async function readReports(
+async function followLog(
   stack: Stack,
   adbPath: string,
   serial: string,
@@ -230,89 +202,5 @@ async function readReports(
     hostEnv(),
   );
   logcat.stderr.resume();
-  const queue: Report[] = [];
-  let wake: (() => void) | undefined;
-  let ended = false;
-  const lines = createInterface({ input: logcat.stdout });
-  lines.on("line", (line) => {
-    const report = parseReport(line);
-    if (report === undefined) return;
-    queue.push(report);
-    wake?.();
-  });
-  lines.once("close", () => {
-    ended = true;
-    wake?.();
-  });
-  return {
-    drain() {
-      queue.length = 0;
-    },
-    async next(ms: number): Promise<Report> {
-      const deadline = AbortSignal.timeout(ms);
-      for (;;) {
-        const report = queue.shift();
-        if (report !== undefined) return report;
-        if (ended) throw new Error("adb logcat ended");
-        const woken = new Promise<boolean>((resolve) => {
-          wake = () => resolve(true);
-          deadline.addEventListener("abort", () => resolve(false), { once: true });
-        });
-        const before = deadline.aborted ? false : await woken;
-        wake = undefined;
-        if (!before) throw new Error(`the app logged no report within ${ms} ms`);
-      }
-    },
-  };
-}
-
-/**
- * Runs a tool command and returns its stdout; a non-zero exit, the deadline or `signal` throws, once the command has
- * exited.
- */
-function tool(
-  file: string,
-  args: readonly string[],
-  ms = COMMAND_MS,
-  signal?: AbortSignal,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      file,
-      args,
-      {
-        encoding: "utf8",
-        env: hostEnv(),
-        timeout: ms,
-        signal,
-        killSignal: "SIGKILL",
-        maxBuffer: 1 << 26,
-      },
-      (error, stdout, stderr) => {
-        if (error === null) return resolve(stdout);
-        const why = signal?.aborted
-          ? "was cancelled"
-          : error.killed
-            ? `took over ${ms} ms`
-            : stderr.trim() || stdout.trim() || error.message;
-        const failed = () =>
-          reject(new Error(`${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`));
-        // A cancel reports before the killed command exits.
-        if (child.exitCode === null && child.signalCode === null) child.once("exit", failed);
-        else failed();
-      },
-    );
-  });
-}
-
-/** Resolves true once `promise` settles, or false after `ms`. */
-function settles(promise: Promise<unknown>, ms: number): Promise<boolean> {
-  const deadline = AbortSignal.timeout(ms);
-  return new Promise((resolve) => {
-    promise.then(
-      () => resolve(true),
-      () => resolve(true),
-    );
-    deadline.addEventListener("abort", () => resolve(false), { once: true });
-  });
+  return readReports(logcat.stdout, "adb logcat");
 }

@@ -16,6 +16,7 @@ import { onTestFinished } from "vitest";
 
 import { contentKey, sha256Base64Url } from "@tide/protocol";
 
+import type { Platform } from "../src/options.ts";
 import type { Stack } from "../src/stack.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
 
@@ -24,6 +25,10 @@ export const FIXTURE_EXPORT = fileURLToPath(
   new URL("../../packages/cli/test/fixtures/export", import.meta.url),
 );
 export const ANDROID_BUNDLE = "dist/_expo/static/js/android/index-android.hbc";
+const BUNDLES: Record<Platform, string> = {
+  android: ANDROID_BUNDLE,
+  ios: "dist/_expo/static/js/ios/index-ios.hbc",
+};
 export const MAIN = { channel: "main", runtimeVersion: "1.0.0" } as const;
 export const ANDROID = { ...MAIN, platform: "android" } as const;
 
@@ -33,18 +38,23 @@ export const signingMetadata = (stack: Stack) => ({
 });
 
 /**
- * Writes at `<stack>/<name>` what `tide export` writes for the CLI tests' fixture export under the run's identity,
- * without running Expo; `bundle` replaces the Android launch bundle.
+ * Writes at `<stack>/<name>` what `tide export` writes for the CLI tests' fixture export of `platform` under the run's
+ * identity, without running Expo; `bundle` replaces the platform's launch bundle.
  */
-export function fixtureExport(stack: Stack, name: string, bundle?: Uint8Array): string {
+export function fixtureExport(
+  stack: Stack,
+  name: string,
+  bundle?: Uint8Array,
+  platform: Platform = "android",
+): string {
   const out = join(stack.dir, name);
   cpSync(FIXTURE_EXPORT, join(out, "dist"), { recursive: true });
-  if (bundle !== undefined) writeFileSync(join(out, ANDROID_BUNDLE), bundle);
+  if (bundle !== undefined) writeFileSync(join(out, BUNDLES[platform]), bundle);
   const value = {
     certificate: readFileSync(stack.identity.certificateFile, "utf8"),
     codeSigningMetadata: signingMetadata(stack),
     expoClient: { name: "Conformance", slug: "conformance", version: "1.0.0" },
-    platforms: { android: { runtimeVersion: MAIN.runtimeVersion } },
+    platforms: { [platform]: { runtimeVersion: MAIN.runtimeVersion } },
   };
   writeFileSync(join(out, EXPORT_FILE), encodeProjectExport(value));
   return out;

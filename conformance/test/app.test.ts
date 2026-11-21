@@ -3,24 +3,27 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
+import type { Platform } from "../src/options.ts";
 import { materialise, writeMarker } from "../src/app.ts";
 import { EXPO_VERSIONS } from "../src/options.ts";
 import { withStack } from "../src/stack.ts";
 
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
 const VERSIONS = Object.keys(EXPO_VERSIONS) as (keyof typeof EXPO_VERSIONS)[];
+const PLATFORMS: Platform[] = ["android", "ios"];
 const bytes = (path: string) => readFileSync(path).toString("base64");
 
 describe("the conformance app", () => {
-  test.each(VERSIONS)(
-    "materialise copies the %s app and configures it for the stack's Tide and identity",
-    async (version) => {
+  test.each(VERSIONS.flatMap((v) => PLATFORMS.map((p) => [v, p] as const)))(
+    "materialise copies the %s app for %s and configures it for the stack's Tide and identity",
+    async (version, platform) => {
       await withStack((stack) => {
-        const app = materialise(stack, version);
+        const app = materialise(stack, version, platform);
         expect(app).toEqual({
           version,
+          platform,
           dir: join(stack.dir, `app-${version}`),
-          packageName: `dev.tide.conformance.sdk${version}`,
+          appId: `dev.tide.conformance.sdk${version}`,
           channel: `expo-${version}`,
           runtimeVersion: `1.0.0-sdk${version}`,
         });
@@ -29,7 +32,8 @@ describe("the conformance app", () => {
         };
         expect(expo).toMatchObject({
           runtimeVersion: `1.0.0-sdk${version}`,
-          android: { package: app.packageName },
+          android: { package: app.appId },
+          ios: { bundleIdentifier: app.appId },
           plugins: ["./cleartext.js"],
         });
         expect(expo.updates).toEqual({

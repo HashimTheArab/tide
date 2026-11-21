@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, onTestFinished, test } from "vitest";
 
-import { androidDevice, parseDevices, parseReport } from "../src/android.ts";
+import { androidDevice, parseDevices } from "../src/android.ts";
+import { parseReport } from "../src/device.ts";
 import { withStack } from "../src/stack.ts";
 import { fakeSdk } from "./harness.ts";
 
@@ -173,7 +174,7 @@ describe("the Android device driver", () => {
   });
 });
 
-describe("adb output", () => {
+describe("device output", () => {
   test("parseDevices reads each serial and state", () => {
     const out = "List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\n\n";
     expect([...parseDevices(out)]).toEqual([
@@ -185,6 +186,10 @@ describe("adb output", () => {
   test.each([
     ['tide-conformance {"event":"check","marker":"m","result":"none"}', true],
     ['I ReactNativeJS: tide-conformance {"event":"check","marker":"m"}', true],
+    [
+      'I  App[1:2] [com.facebook.react.log:javascript] tide-conformance {"event":"check","marker":"m"}',
+      true,
+    ],
     ["tide-conformance not json", false],
     ['tide-conformance {"event":"check"}', false],
     ['tide-conformance ["event"]', false],

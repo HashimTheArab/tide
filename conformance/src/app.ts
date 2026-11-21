@@ -11,7 +11,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ExpoVersion } from "./options.ts";
+import type { ExpoVersion, Platform } from "./options.ts";
 import type { Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
 import { hostEnv, tail } from "./stack.ts";
@@ -19,27 +19,28 @@ import { hostEnv, tail } from "./stack.ts";
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
 const CERTIFICATE = "keys/certificate.pem";
 
-/** One version's app, materialised in a stack's temp dir. */
+/** One version's app for one platform, materialised in a stack's temp dir. */
 export interface App {
   readonly version: ExpoVersion;
+  readonly platform: Platform;
   readonly dir: string;
-  readonly packageName: string;
+  readonly appId: string; // The Android package and the iOS bundle identifier.
   readonly channel: string; // One per version, so versions share a stack without sharing a pointer.
   readonly runtimeVersion: string; // One per version: bases and patches are scoped by runtime, and each SDK is its own.
 }
 
 /** A release build and what `register-build` reads from it. */
-export interface AndroidBuild {
-  readonly apk: string;
+export interface Build {
+  readonly artifact: string; // The APK or .app the device installs.
   readonly marker: string;
   readonly embeddedUpdateId: string; // app.manifest's `id`
   readonly manifest: string; // app.manifest
-  readonly bundle: string; // index.android.bundle
-  readonly resDir: string; // The res dir the release bundle task generated, holding the embedded assets.
+  readonly bundle: string; // index.android.bundle or main.jsbundle
+  readonly assetsDir: string; // Holds the embedded assets with the bytes Metro wrote.
 }
 
 /** Copies the version's app into the stack's dir and writes its config for the stack's Tide and identity. */
-export function materialise(stack: Stack, version: ExpoVersion): App {
+export function materialise(stack: Stack, version: ExpoVersion, platform: Platform): App {
   const dir = join(stack.dir, `app-${version}`);
   cpSync(join(APPS, "shared"), dir, { recursive: true, errorOnExist: true, force: false });
   for (const file of ["package.json", "package-lock.json"]) {
@@ -49,8 +50,9 @@ export function materialise(stack: Stack, version: ExpoVersion): App {
   copyFileSync(stack.identity.certificateFile, join(dir, CERTIFICATE));
   const app = {
     version,
+    platform,
     dir,
-    packageName: `dev.tide.conformance.sdk${version}`,
+    appId: `dev.tide.conformance.sdk${version}`,
     channel: `expo-${version}`,
     runtimeVersion: `1.0.0-sdk${version}`,
   };
@@ -60,7 +62,8 @@ export function materialise(stack: Stack, version: ExpoVersion): App {
       slug: "tide-conformance",
       version: "1.0.0",
       runtimeVersion: app.runtimeVersion,
-      android: { package: app.packageName },
+      android: { package: app.appId },
+      ios: { bundleIdentifier: app.appId },
       plugins: ["./cleartext.js"],
       updates: {
         url: `${stack.serverUrl}/manifest`,
@@ -92,20 +95,8 @@ export async function buildAndroid(
   sdk: string,
   abi: string,
   marker: string,
-): Promise<AndroidBuild> {
-  writeMarker(app, marker);
-  const log = join(app.dir, "build.log");
-  const env = { ...hostEnv(), ANDROID_HOME: sdk, CI: "1" };
-  const step = (command: string, args: readonly string[], cwd = app.dir) =>
-    run(stack, command, args, env, cwd, log);
-  // Install scripts stay off: the app needs none, and they would run every dependency's code.
-  await step("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
-  await step(join(app.dir, "node_modules", ".bin", "expo"), [
-    "prebuild",
-    "--platform",
-    "android",
-    "--no-install",
-  ]);
+): Promise<Build> {
+  const step = await prebuild(stack, app, marker, { ANDROID_HOME: sdk });
   const android = join(app.dir, "android");
   await step(
     join(android, "gradlew"),
@@ -123,23 +114,46 @@ export async function buildAndroid(
   const apk = join(android, "app", "build", "outputs", "apk", "release", "app-release.apk");
   const out = join(app.dir, "embedded");
   await step("unzip", ["-q", apk, "assets/app.manifest", "assets/index.android.bundle", "-d", out]);
-  const manifest = join(out, "assets", "app.manifest");
-  const resDir = join(android, "app", "build", "generated", "res", "react", "release");
-  const { id, assets } = JSON.parse(readFileSync(manifest, "utf8")) as {
+  return embeddedBuild({
+    artifact: apk,
+    marker,
+    manifest: join(out, "assets", "app.manifest"),
+    bundle: join(out, "assets", "index.android.bundle"),
+    assetsDir: join(android, "app", "build", "generated", "res", "react", "release"),
+  });
+}
+
+/**
+ * Writes `marker`, installs the app's locked dependencies and prebuilds its native project for its platform; returns
+ * a runner for the build's further steps, which log to the same file, with `env` added to the host's.
+ */
+async function prebuild(stack: Stack, app: App, marker: string, env: Record<string, string>) {
+  writeMarker(app, marker);
+  const log = join(app.dir, "build.log");
+  const all = { ...hostEnv(), ...env, CI: "1" };
+  const step = (command: string, args: readonly string[], cwd = app.dir) =>
+    run(stack, command, args, all, cwd, log);
+  // Install scripts stay off: the app needs none, and they would run every dependency's code.
+  await step("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
+  await step(join(app.dir, "node_modules", ".bin", "expo"), [
+    "prebuild",
+    "--platform",
+    app.platform,
+    "--no-install",
+  ]);
+  return step;
+}
+
+/** Returns `build` with its embedded update ID, after checking that the update ships the app's one image. */
+function embeddedBuild(build: Omit<Build, "embeddedUpdateId">): Build {
+  const { id, assets } = JSON.parse(readFileSync(build.manifest, "utf8")) as {
     id: string;
     assets: unknown[];
   };
   if (assets.length !== 1) {
     throw new Error(`the embedded update does not ship one image asset: ${JSON.stringify(assets)}`);
   }
-  return {
-    apk,
-    marker,
-    embeddedUpdateId: id.toLowerCase(),
-    manifest,
-    bundle: join(out, "assets", "index.android.bundle"),
-    resDir,
-  };
+  return { ...build, embeddedUpdateId: id.toLowerCase() };
 }
 
 /**
@@ -155,7 +169,7 @@ export async function exportUpdate(
 ) {
   writeMarker(app, marker);
   const out = join(stack.dir, `export-${app.version}-${marker}`);
-  await cli.export(app.dir, out, ["android"], runtimeVersion);
+  await cli.export(app.dir, out, [app.platform], runtimeVersion);
   return out;
 }
 
