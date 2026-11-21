@@ -69,6 +69,21 @@ describe("the Android device driver", () => {
     },
   );
 
+  test("boots a fresh AVD whose first boot drops adb's connection once", async () => {
+    const fake = fakeSdk({}, ["Fresh"]);
+    await withStack(async (stack) => {
+      const device = await androidDevice(stack, {
+        sdk: fake.sdk,
+        serial: undefined,
+        avd: undefined,
+      });
+      expect(device.booted).toBe(true);
+      const waits = fake.calls().filter((c) => c.includes("wait-for-device"));
+      expect(waits).toHaveLength(2);
+    });
+    expect(fake.state().running).toEqual({});
+  });
+
   test("shuts down the emulator it booted when the run fails", async () => {
     const fake = fakeSdk({});
     let pid = 0;
