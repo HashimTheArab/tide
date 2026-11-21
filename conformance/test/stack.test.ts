@@ -24,8 +24,10 @@ import {
   codeSigningCertificate,
   contentKey,
   decodeBaseRecord,
+  NO_UPDATE_KEY,
   decodeStoredReply,
   diskPath,
+  encodeStoredReply,
   patchKey,
   replyKey,
   sha256Base64Url,
@@ -33,6 +35,7 @@ import {
 
 import type { Stack } from "../src/stack.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
+import { expectNoUpdate } from "../src/scenarios.ts";
 import { tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
 
@@ -226,6 +229,7 @@ describe("the harness stack", () => {
           im: undefined,
           baseUpdateId: undefined,
           boundary: pointer.boundary,
+          body: pointer.body,
         },
         {
           path: `/bundles/${contentKey(hash)}`,
@@ -234,6 +238,7 @@ describe("the harness stack", () => {
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
+          body: undefined,
         },
       ]);
     });
@@ -279,6 +284,7 @@ describe("the harness stack", () => {
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
+          body: undefined,
         },
         {
           path: missing,
@@ -287,6 +293,7 @@ describe("the harness stack", () => {
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
+          body: undefined,
         },
       ]);
     });
@@ -320,6 +327,7 @@ describe("the harness stack", () => {
         im: "bsdiff",
         baseUpdateId: u1.android,
         boundary: undefined,
+        body: undefined,
       });
 
       const before = tree(stack.storeDir);
@@ -497,5 +505,41 @@ describe("the harness stack shuts down", () => {
     held.proc.kill(signal);
     expect(await held.exited).toEqual([code, null]);
     await expectClosed(seen);
+  });
+});
+
+describe("the embedded scenario", () => {
+  test("accepts a no-update answer only when it carries a directive signed for the run", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      const check = async () => {
+        const before = stack.responses.length;
+        const res = await fetch(`${stack.serverUrl}/manifest`, {
+          headers: {
+            "expo-protocol-version": "1",
+            "expo-platform": "android",
+            "expo-runtime-version": MAIN.runtimeVersion,
+            "expo-channel-name": MAIN.channel,
+            "expo-expect-signature": `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
+          },
+        });
+        await res.arrayBuffer();
+        return stack.responses.slice(before);
+      };
+      await expectNoUpdate(stack, await check(), "first");
+
+      // The same boundary with no parts: a client finds no directive, so nothing to verify, and reports no update.
+      const path = join(stack.storeDir, diskPath(NO_UPDATE_KEY));
+      const { boundary } = decodeStoredReply(readFileSync(path));
+      const body = new Uint8Array(Buffer.from(`--${boundary}--\r\n`));
+      writeFileSync(path, encodeStoredReply({ kind: "noUpdateAvailable", boundary, body }));
+      const seen = await check();
+      expect(seen.map((r) => [r.path, r.status, r.boundary])).toEqual([
+        ["/manifest", 200, boundary],
+      ]);
+      await expect(expectNoUpdate(stack, seen, "second")).rejects.toThrow(
+        `got ${NO_UPDATE_KEY}, which is not a noUpdateAvailable directive signed for the run`,
+      );
+    });
   });
 });

@@ -37,6 +37,7 @@ interface Recorded {
   readonly im: string | undefined;
   readonly baseUpdateId: string | undefined;
   readonly boundary: string | undefined; // A multipart reply's boundary, which names the stored reply it came from.
+  readonly body: Uint8Array<ArrayBuffer> | undefined; // A multipart reply's body as forwarded so far, before the client gets it.
 }
 
 export interface Stack {
@@ -223,15 +224,20 @@ async function writeIdentity(dir: string): Promise<Identity> {
 function recorder(upstream: number, agent: Agent, storeDir: string, responses: Recorded[]): Server {
   return createServer((req, res) => {
     const path = req.url ?? "";
-    const record = (status: number, headers: IncomingHttpHeaders = {}) =>
-      responses.push({
+    const record = (status: number, headers: IncomingHttpHeaders = {}) => {
+      const boundary = MULTIPART.exec(headers["content-type"] ?? "")?.[1];
+      const entry = {
         path,
         expectSignature: req.headers["expo-expect-signature"] as string | undefined,
         status,
         im: headers.im as string | undefined,
         baseUpdateId: headers["expo-base-update-id"] as string | undefined,
-        boundary: MULTIPART.exec(headers["content-type"] ?? "")?.[1],
-      });
+        boundary,
+        body: boundary === undefined ? undefined : new Uint8Array(),
+      };
+      responses.push(entry);
+      return entry;
+    };
     const hex = /^\/assets\/([0-9a-f]{64})$/.exec(path)?.[1];
     if (hex !== undefined && (req.method === "GET" || req.method === "HEAD")) {
       readFile(join(storeDir, diskPath(`assets/${hex}`))).then(
@@ -256,7 +262,13 @@ function recorder(upstream: number, agent: Agent, storeDir: string, responses: R
       { host: LOOPBACK, port: upstream, method: req.method, path, headers: req.headers, agent },
       (reply) => {
         const status = reply.statusCode ?? 0;
-        record(status, reply.headers);
+        const entry = record(status, reply.headers);
+        if (entry.body !== undefined) {
+          // Added before the pipe, so each chunk is recorded before it is forwarded.
+          reply.on("data", (chunk: Buffer) => {
+            entry.body = new Uint8Array(Buffer.concat([entry.body ?? new Uint8Array(), chunk]));
+          });
+        }
         res.writeHead(status, reply.rawHeaders);
         reply.pipe(res);
       },
