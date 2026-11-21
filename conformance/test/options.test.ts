@@ -33,6 +33,13 @@ describe("parseRun", () => {
       platform: "android",
       versions: ["55", "58"],
       scenarios: ALL_SCENARIOS,
+      avd: undefined,
+    });
+  });
+
+  test("--avd names the AVD to boot", () => {
+    expect(parseRun(["--platform", "android", "--avd", "Pixel_9"])).toMatchObject({
+      avd: "Pixel_9",
     });
   });
 
@@ -50,7 +57,12 @@ describe("parseRun", () => {
         "--scenario",
         "rollback",
       ]),
-    ).toEqual({ platform: "ios", versions: ["58"], scenarios: ["full", "rollback"] });
+    ).toEqual({
+      platform: "ios",
+      versions: ["58"],
+      scenarios: ["full", "rollback"],
+      avd: undefined,
+    });
   });
 
   test.each([["--help"], ["-h"], ["--platform", "nope", "--help"]])(
@@ -106,5 +118,18 @@ describe("the conformance bin", () => {
       new RegExp(`^conformance: ${message}.*; see pnpm conformance --help\\n$`),
     );
     expect(result.tmpEntries).toEqual([]);
+  });
+
+  test.each([
+    [
+      ["--platform", "android"],
+      "no full, patch-ota, corrupt-patch, rollback, patch-embedded scenario exists yet",
+    ],
+    [["--platform", "android", "--scenario", "full"], "no full scenario exists yet"],
+    [["--platform", "ios", "--scenario", "embedded"], "no ios device driver exists yet"],
+  ])("%j exits 1 before creating anything: %s", async (args, message) => {
+    const result = await conformance(args);
+    expect(result).toMatchObject({ code: 1, stdout: "", tmpEntries: [] });
+    expect(result.stderr).toMatch(new RegExp(`^conformance: ${message}`));
   });
 });

@@ -8,7 +8,7 @@ export const EXPO_VERSIONS = {
   "55": "bsdiff opt-in via enableBsdiffPatchSupport; embedded-base patches from 55.0.31",
   "58": "bsdiff on by default; embedded-base patches from 58.0.1",
 } as const;
-type ExpoVersion = keyof typeof EXPO_VERSIONS;
+export type ExpoVersion = keyof typeof EXPO_VERSIONS;
 
 /** Every scenario, in the order a run takes them. */
 export const SCENARIOS = {
@@ -19,16 +19,19 @@ export const SCENARIOS = {
   rollback: "a rollback directive returns to the embedded update",
   "patch-embedded": "an update patches from the embedded bundle",
 } as const;
-type Scenario = keyof typeof SCENARIOS;
+export type Scenario = keyof typeof SCENARIOS;
 
 const list = (table: Readonly<Record<string, string>>) =>
   Object.entries(table)
     .map(([name, about]) => `  ${name.padEnd(16)}${about}`)
     .join("\n");
 
-export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]...
+export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]... [--avd <name>]
 
 Runs stock expo-updates release apps against a local Tide. Every version and scenario runs unless named.
+
+Android uses the running emulator (ANDROID_SERIAL picks one of several), or boots the AVD --avd names (the first
+listed by default) read-only and shuts it down at the end. ANDROID_HOME must name the Android SDK.
 
 Platforms: ${PLATFORMS.join(", ")}
 
@@ -44,6 +47,7 @@ export interface Run {
   readonly platform: Platform;
   readonly versions: readonly ExpoVersion[];
   readonly scenarios: readonly Scenario[];
+  readonly avd: string | undefined;
 }
 
 /** Returns the run `args` ask for, or `help`; anything else is a `UsageError`. */
@@ -57,6 +61,7 @@ export function parseRun(args: readonly string[]): Run | "help" {
         platform: { type: "string", multiple: true },
         expo: { type: "string", multiple: true },
         scenario: { type: "string", multiple: true },
+        avd: { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -74,6 +79,7 @@ export function parseRun(args: readonly string[]): Run | "help" {
     platform: platform as Platform,
     versions: pick(EXPO_VERSIONS, values.expo, "--expo"),
     scenarios: pick(SCENARIOS, values.scenario, "--scenario"),
+    avd: values.avd,
   };
 }
 
