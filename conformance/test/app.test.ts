@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
-import { materialise, metaData, writeMarker } from "../src/app.ts";
+import { materialise, writeMarker } from "../src/app.ts";
 import { EXPO_VERSIONS } from "../src/options.ts";
 import { withStack } from "../src/stack.ts";
 
@@ -74,27 +74,4 @@ describe("the conformance app", () => {
       }
     },
   );
-});
-
-describe("metaData", () => {
-  test("reads quoted, multi-line and typed values from aapt2 xmltree output", () => {
-    const pem = "-----BEGIN CERTIFICATE-----\nMIIB\nAQAB\n-----END CERTIFICATE-----\n";
-    const indented = pem.replaceAll("\n", "\n            ");
-    const out = [
-      "N: android=http://schemas.android.com/apk/res/android (line=2)",
-      "      E: meta-data (line=15)",
-      '        A: http://schemas.android.com/apk/res/android:name(0x01010003)="expo.modules.updates.CODE_SIGNING_CERTIFICATE" (Raw: "expo.modules.updates.CODE_SIGNING_CERTIFICATE")',
-      `        A: http://schemas.android.com/apk/res/android:value(0x01010024)="${indented}" (Raw: "${indented}")`,
-      "      E: meta-data (line=18)",
-      '        A: http://schemas.android.com/apk/res/android:name(0x01010003)="expo.modules.updates.ENABLE_BSDIFF_PATCH_SUPPORT" (Raw: "expo.modules.updates.ENABLE_BSDIFF_PATCH_SUPPORT")',
-      "        A: http://schemas.android.com/apk/res/android:value(0x01010024)=true",
-      "      E: activity (line=21)",
-      '        A: http://schemas.android.com/apk/res/android:name(0x01010003)=".MainActivity" (Raw: ".MainActivity")',
-      "",
-    ].join("\n");
-    expect([...metaData(out)]).toEqual([
-      ["expo.modules.updates.CODE_SIGNING_CERTIFICATE", pem],
-      ["expo.modules.updates.ENABLE_BSDIFF_PATCH_SUPPORT", "true"],
-    ]);
-  });
 });

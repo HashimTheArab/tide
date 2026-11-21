@@ -4,7 +4,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Agent, createServer, request } from "node:http";
 import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -32,6 +32,7 @@ interface Identity {
 /** One reply the local Tide sent, with the headers the scenarios assert on. */
 interface Recorded {
   readonly path: string;
+  readonly expectSignature: string | undefined; // The request's; a client sends it only with a certificate embedded.
   readonly status: number;
   readonly im: string | undefined;
   readonly baseUpdateId: string | undefined;
@@ -168,6 +169,15 @@ export function hostEnv(): Record<string, string> {
   );
 }
 
+/** Returns the last 40 lines of `file`, or a note that it does not exist. */
+export function tail(file: string): string {
+  try {
+    return readFileSync(file, "utf8").trimEnd().split("\n").slice(-40).join("\n");
+  } catch {
+    return `(no ${basename(file)})`;
+  }
+}
+
 /**
  * Inverts every byte after the BSDIFF40 header of the stored patch from bundle `fromHex` to bundle `toHex`, so the
  * client still recognises the patch but cannot apply it. Returns the file's path.
@@ -216,6 +226,7 @@ function recorder(upstream: number, agent: Agent, storeDir: string, responses: R
     const record = (status: number, headers: IncomingHttpHeaders = {}) =>
       responses.push({
         path,
+        expectSignature: req.headers["expo-expect-signature"] as string | undefined,
         status,
         im: headers.im as string | undefined,
         baseUpdateId: headers["expo-base-update-id"] as string | undefined,

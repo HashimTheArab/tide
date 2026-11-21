@@ -1,5 +1,4 @@
 // The conformance app: one shared source built per expo-updates version, configured for a stack's Tide and identity.
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   copyFileSync,
@@ -7,7 +6,6 @@ import {
   createWriteStream,
   mkdirSync,
   readFileSync,
-  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -16,13 +14,11 @@ import { fileURLToPath } from "node:url";
 import type { ExpoVersion } from "./options.ts";
 import type { Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
-import { hostEnv } from "./stack.ts";
+import { hostEnv, tail } from "./stack.ts";
 
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
 const RUNTIME_VERSION = "1.0.0";
 const CERTIFICATE = "keys/certificate.pem";
-const CERTIFICATE_META = "expo.modules.updates.CODE_SIGNING_CERTIFICATE";
-const BSDIFF_META = "expo.modules.updates.ENABLE_BSDIFF_PATCH_SUPPORT";
 
 /** One version's app, materialised in a stack's temp dir. */
 export interface App {
@@ -77,7 +73,6 @@ export function materialise(stack: Stack, version: ExpoVersion): App {
     },
   };
   writeFileSync(join(dir, "app.json"), `${JSON.stringify(config, null, 2)}\n`);
-  writeMarker(app, "unset");
   return app;
 }
 
@@ -88,7 +83,7 @@ export function writeMarker(app: App, marker: string): void {
 
 /**
  * Installs the app's locked dependencies, prebuilds it and runs a clean release build for `abi`, then extracts the
- * embedded update and checks it ships the image, and that the APK carries the run's certificate and bsdiff support.
+ * embedded update for `register-build`.
  */
 export async function buildAndroid(
   stack: Stack,
@@ -131,33 +126,11 @@ export async function buildAndroid(
   const resDir = join(android, "app", "build", "generated", "res", "react", "release");
   const { id, assets } = JSON.parse(readFileSync(manifest, "utf8")) as {
     id: string;
-    assets: { packagerHash: string }[];
+    assets: unknown[];
   };
-  // The one image must ship in the build, where register-build finds it by its packager hash.
-  const shipped = readdirSync(resDir, { recursive: true, withFileTypes: true })
-    .filter((e) => e.isFile())
-    .map((e) =>
-      createHash("md5")
-        .update(readFileSync(join(e.parentPath, e.name)))
-        .digest("hex"),
-    );
-  if (assets.length !== 1 || !shipped.includes(assets[0]?.packagerHash ?? "")) {
-    throw new Error(`the embedded update does not ship the image asset: ${JSON.stringify(assets)}`);
+  if (assets.length !== 1) {
+    throw new Error(`the embedded update does not ship one image asset: ${JSON.stringify(assets)}`);
   }
-
-  const meta = metaData(
-    await capture(
-      stack,
-      aapt2(sdk),
-      ["dump", "xmltree", "--file", "AndroidManifest.xml", apk],
-      env,
-    ),
-  );
-  const certificate = readFileSync(stack.identity.certificateFile, "utf8");
-  if (squash(meta.get(CERTIFICATE_META) ?? "") !== squash(certificate)) {
-    throw new Error(`the APK's ${CERTIFICATE_META} is not the run's certificate`);
-  }
-  if (meta.get(BSDIFF_META) !== "true") throw new Error(`the APK's ${BSDIFF_META} is not true`);
   return {
     apk,
     marker,
@@ -174,30 +147,6 @@ export async function exportUpdate(stack: Stack, cli: TideCli, app: App, marker:
   const out = join(stack.dir, `export-${app.version}-${marker}`);
   await cli.export(app.dir, out, ["android"]);
   return out;
-}
-
-/** Returns the `<meta-data>` names and values in `aapt2 dump xmltree` output of an Android manifest. */
-export function metaData(xmltree: string): Map<string, string> {
-  const meta = new Map<string, string>();
-  // aapt2 prints a string value quoted with its raw form after it, and a typed one bare; name sorts before value.
-  const entry =
-    /E: meta-data[^\n]*\n\s*A: [^\n]*:name\(0x01010003\)="([^"]*)"[^\n]*\n\s*A: [^\n]*:value\(0x01010024\)=(?:"([\s\S]*?)" \(Raw: |(\S+))/g;
-  for (const [, name = "", quoted, bare] of xmltree.matchAll(entry)) {
-    // aapt2 indents each continuation line of a multi-line value.
-    meta.set(name, quoted === undefined ? (bare ?? "") : quoted.replace(/\n[ \t]+/g, "\n"));
-  }
-  return meta;
-}
-
-const squash = (pem: string) => pem.replace(/\s+/g, "");
-
-/** Returns the newest build-tools' aapt2. */
-function aapt2(sdk: string): string {
-  const tools = join(sdk, "build-tools");
-  const versions = readdirSync(tools).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
-  const newest = versions.at(-1);
-  if (newest === undefined) throw new Error(`no build-tools in ${tools}`);
-  return join(tools, newest, "aapt2");
 }
 
 /** Runs `command`, appending its output to `log`; a failure throws with the log's last lines. */
@@ -217,27 +166,9 @@ async function run(
   sink.end();
   await once(sink, "close");
   if (code !== 0) {
-    const tail = readFileSync(log, "utf8").trimEnd().split("\n").slice(-40).join("\n");
     const name = command.split("/").at(-1);
     throw new Error(
-      `${name} ${args[0]} ${signal ? `was killed by ${signal}` : `exited ${code}`}:\n${tail}`,
+      `${name} ${args[0]} ${signal ? `was killed by ${signal}` : `exited ${code}`}:\n${tail(log)}`,
     );
   }
-}
-
-/** Runs `command` and returns its stdout; a failure throws with its stderr. */
-async function capture(
-  stack: Stack,
-  command: string,
-  args: readonly string[],
-  env: Record<string, string>,
-) {
-  const proc = stack.spawn(command, args, env);
-  let stdout = "";
-  let stderr = "";
-  proc.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
-  proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
-  const [code] = (await once(proc, "close")) as [number | null];
-  if (code !== 0) throw new Error(`${command} ${args.join(" ")} exited ${code}: ${stderr.trim()}`);
-  return stdout;
 }

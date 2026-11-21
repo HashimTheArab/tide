@@ -1,12 +1,12 @@
 // The Android device side of a run: one emulator, reached through adb, that the stack's close leaves as it found it.
 import { execFile, spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync } from "node:fs";
+import { closeSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import type { Stack } from "./stack.ts";
-import { hostEnv } from "./stack.ts";
+import { hostEnv, tail } from "./stack.ts";
 
 // What the app prefixes each report with (apps/shared/App.js); React Native logs it under this tag.
 const REPORT_PREFIX = "tide-conformance ";
@@ -229,7 +229,6 @@ async function readReports(
   );
   logcat.stderr.resume();
   const queue: Report[] = [];
-  const seen: string[] = [];
   let wake: (() => void) | undefined;
   let ended = false;
   const lines = createInterface({ input: logcat.stdout });
@@ -245,17 +244,13 @@ async function readReports(
   });
   return {
     drain() {
-      seen.length = 0;
       queue.length = 0;
     },
     async next(ms: number): Promise<Report> {
       const deadline = AbortSignal.timeout(ms);
       for (;;) {
         const report = queue.shift();
-        if (report !== undefined) {
-          seen.push(JSON.stringify(report));
-          return report;
-        }
+        if (report !== undefined) return report;
         if (ended) throw new Error("adb logcat ended");
         const woken = new Promise<boolean>((resolve) => {
           wake = () => resolve(true);
@@ -263,12 +258,7 @@ async function readReports(
         });
         const before = deadline.aborted ? false : await woken;
         wake = undefined;
-        if (!before) {
-          const after = seen.length === 0 ? "none" : seen.join("\n");
-          throw new Error(
-            `the app logged no report within ${ms} ms; reports since the launch:\n${after}`,
-          );
-        }
+        if (!before) throw new Error(`the app logged no report within ${ms} ms`);
       }
     },
   };
@@ -302,12 +292,4 @@ function settles(promise: Promise<unknown>, ms: number): Promise<boolean> {
     );
     deadline.addEventListener("abort", () => resolve(false), { once: true });
   });
-}
-
-function tail(file: string): string {
-  try {
-    return readFileSync(file, "utf8").trimEnd().split("\n").slice(-40).join("\n");
-  } catch {
-    return "(no emulator log)";
-  }
 }

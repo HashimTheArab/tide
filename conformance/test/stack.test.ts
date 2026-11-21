@@ -221,6 +221,7 @@ describe("the harness stack", () => {
       expect(stack.responses.slice(before)).toEqual([
         {
           path: "/manifest",
+          expectSignature: `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
@@ -228,6 +229,7 @@ describe("the harness stack", () => {
         },
         {
           path: `/bundles/${contentKey(hash)}`,
+          expectSignature: undefined,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
@@ -270,8 +272,22 @@ describe("the harness stack", () => {
       expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true);
       expect((await fetch(`${stack.serverUrl}${missing}`)).status).toBe(404);
       expect(stack.responses.slice(before)).toEqual([
-        { path, status: 200, im: undefined, baseUpdateId: undefined, boundary: undefined },
-        { path: missing, status: 404, im: undefined, baseUpdateId: undefined, boundary: undefined },
+        {
+          path,
+          expectSignature: undefined,
+          status: 200,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: undefined,
+        },
+        {
+          path: missing,
+          expectSignature: undefined,
+          status: 404,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: undefined,
+        },
       ]);
     });
   });
@@ -299,6 +315,7 @@ describe("the harness stack", () => {
       });
       expect(stack.responses.at(-1)).toEqual({
         path: `/bundles/${toHex}`,
+        expectSignature: undefined,
         status: 226,
         im: "bsdiff",
         baseUpdateId: u1.android,

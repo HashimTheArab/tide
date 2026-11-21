@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { NO_UPDATE_KEY, decodeStoredReply, diskPath } from "@tide/protocol";
+import { NO_UPDATE_KEY, decodeStoredReply, diskPath, parseSfvDictionary } from "@tide/protocol";
 
 import type { AndroidDevice, Report } from "./android.ts";
 import type { AndroidBuild, App } from "./app.ts";
@@ -21,7 +21,10 @@ export interface Target {
 /** The scenarios that exist so far; each returns what it saw, or throws when the client does not behave as it must. */
 export const STEPS: Partial<Record<Scenario, (target: Target) => Promise<string>>> = { embedded };
 
-/** Two cold launches each run the embedded update, check, and get the stored no-update reply. */
+/**
+ * Two cold launches each run the embedded update, check, and accept the stored signed no-update reply. The client asks
+ * for a signature only when its APK embeds a certificate, and rejects the reply unless that is the run's certificate.
+ */
 async function embedded({ stack, device, app, build }: Target): Promise<string> {
   const noUpdate = decodeStoredReply(readFileSync(join(stack.storeDir, diskPath(NO_UPDATE_KEY))));
   for (const launch of ["first", "second"]) {
@@ -44,13 +47,18 @@ async function embedded({ stack, device, app, build }: Target): Promise<string> 
     const [only] = seen;
     const answered =
       only?.path === "/manifest" && only.status === 200 && only.boundary === noUpdate.boundary;
-    if (seen.length !== 1 || !answered) {
+    const keyId =
+      only?.expectSignature === undefined
+        ? undefined
+        : parseSfvDictionary(only.expectSignature, "expo-expect-signature").get("keyid");
+    const signed = keyId?.kind === "string" && keyId.text === stack.identity.keyId;
+    if (seen.length !== 1 || !answered || !signed) {
       throw new Error(
-        `the ${launch} launch's requests were not one /manifest answered with ${NO_UPDATE_KEY}: ${JSON.stringify(seen)}`,
+        `the ${launch} launch's requests were not one /manifest expecting the run's signature and answered with ${NO_UPDATE_KEY}: ${JSON.stringify(seen)}`,
       );
     }
   }
-  return `both launches ran embedded update ${build.embeddedUpdateId} (marker ${build.marker}) and got ${NO_UPDATE_KEY}`;
+  return `both launches ran embedded update ${build.embeddedUpdateId} (marker ${build.marker}) and accepted the signed ${NO_UPDATE_KEY}`;
 }
 
 function expectReport(launch: string, got: Report, want: Report) {
