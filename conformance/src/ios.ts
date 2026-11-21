@@ -48,63 +48,80 @@ export async function iosDevice(stack: Stack, options: IosOptions): Promise<IosD
     tool(options.xcrun, ["simctl", ...args], ms);
   const simulators = parseSimulators(await simctl(["list", "devices", "--json"]));
   const sim = pick(simulators, options.simulator);
-  let booted = false;
-  if (sim.state !== "Booted") {
-    if (sim.state !== "Shutdown") throw new Error(`simulator ${sim.name} is ${sim.state}`);
-    // True once simctl finished the boot, or a signal killed it while CoreSimulator may carry on; close waits for it.
-    let mayHaveBooted = Promise.resolve(false);
-    stack.onClose(async () => {
-      if (!(await mayHaveBooted)) return;
+  const closing = new AbortController(); // Aborted by close; only bootstatus takes it.
+  let tail: Promise<unknown> = Promise.resolve();
+  // Runs device mutations one at a time, so close never runs beside one; once close starts, refuses the rest.
+  const op = <T>(f: () => Promise<T>): Promise<T> => {
+    if (closing.signal.aborted) return Promise.reject(new Error("the stack is closed"));
+    const p = tail.then(f);
+    tail = p.catch(() => undefined);
+    return p;
+  };
+  const apps = new Set<string>();
+  let mayBeBooted = false; // This call booted it, or a killed boot that CoreSimulator may carry on.
+  // Registered before the log stream's step, so it runs after the stream has ended.
+  stack.onClose(async () => {
+    closing.abort();
+    await tail;
+    const errors: unknown[] = [];
+    for (const bundleId of apps) {
+      try {
+        await simctl(["uninstall", sim.udid, bundleId]);
+      } catch (e) {
+        errors.push(e);
+      }
+    }
+    if (mayBeBooted) {
       try {
         await simctl(["shutdown", sim.udid], SHUTDOWN_MS);
       } catch (e) {
         // A boot killed before CoreSimulator started it.
-        if (!(e instanceof Error && e.message.includes("current state: Shutdown"))) throw e;
+        if (!(e instanceof Error && e.message.includes("current state: Shutdown"))) errors.push(e);
       }
-    });
-    const boot = simctl(["boot", sim.udid], BOOT_MS);
-    mayHaveBooted = boot.then(
-      () => true,
-      (e: unknown) => e instanceof ToolError && e.killed,
-    );
-    await boot;
-    booted = true;
-    await simctl(["bootstatus", sim.udid], BOOT_MS);
-  }
-  const installs = new Map<string, Promise<unknown>>(); // Each app's latest install, which close waits for.
-  let closed = false;
-  // Registered before the log stream's step, so close ends the stream first, then lets running installs finish.
-  stack.onClose(async () => {
-    closed = true;
-    for (const [bundleId, installing] of installs) {
-      await installing.catch(() => undefined);
-      await simctl(["uninstall", sim.udid, bundleId]);
     }
+    if (errors.length > 0)
+      throw new AggregateError(errors, `simulator ${sim.name} did not clean up`);
   });
+  let booted = false;
+  if (sim.state !== "Booted") {
+    if (sim.state !== "Shutdown") throw new Error(`simulator ${sim.name} is ${sim.state}`);
+    await op(async () => {
+      try {
+        await simctl(["boot", sim.udid], BOOT_MS);
+      } catch (e) {
+        mayBeBooted = e instanceof ToolError && e.killed;
+        throw e;
+      }
+      mayBeBooted = true;
+    });
+    booted = true;
+    await op(() =>
+      tool(options.xcrun, ["simctl", "bootstatus", sim.udid], BOOT_MS, closing.signal),
+    );
+  }
   const reports = await followLog(stack, options.xcrun, sim.udid);
   return {
     udid: sim.udid,
     name: sim.name,
     booted,
-    install(app, bundleId) {
-      if (closed) return Promise.reject(new Error("the stack is closed"));
-      const installing = (async () => {
+    install: (app, bundleId) =>
+      op(async () => {
+        apps.add(bundleId);
         await simctl(["uninstall", sim.udid, bundleId]);
         await simctl(["install", sim.udid, app], INSTALL_MS);
-      })();
-      installs.set(bundleId, installing);
-      return installing;
-    },
-    async launch(bundleId) {
-      await simctl(["launch", sim.udid, bundleId]);
-    },
-    async stop(bundleId) {
-      try {
-        await simctl(["terminate", sim.udid, bundleId]);
-      } catch (e) {
-        if (!(e instanceof Error && e.message.includes("found nothing to terminate"))) throw e;
-      }
-    },
+      }),
+    launch: (bundleId) =>
+      op(async () => {
+        await simctl(["launch", sim.udid, bundleId]);
+      }),
+    stop: (bundleId) =>
+      op(async () => {
+        try {
+          await simctl(["terminate", sim.udid, bundleId]);
+        } catch (e) {
+          if (!(e instanceof Error && e.message.includes("found nothing to terminate"))) throw e;
+        }
+      }),
     ...reports,
   };
 }

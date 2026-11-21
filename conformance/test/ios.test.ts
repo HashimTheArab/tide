@@ -91,7 +91,7 @@ describe("the iOS device driver", () => {
     const fake = fakeXcrun([PHONE]);
     const booting = fake.hold("boot");
     await withStack(async (stack) => {
-      // Its bootstatus races the shutdown, or the closed stack refuses its log stream.
+      // Close refuses its readiness wait once the boot finishes.
       const device = iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined }).catch(
         (e: unknown) => e,
       );
@@ -101,9 +101,35 @@ describe("the iOS device driver", () => {
       await closing;
       expect(await device).toBeInstanceOf(Error);
     });
-    expect(fake.calls()).toContainEqual(["shutdown", "A1"]);
+    expect(lifecycle(fake.calls())).toEqual([
+      ["boot", "A1"],
+      ["shutdown", "A1"],
+    ]);
     expect(fake.state().simulators[0]?.state).toBe("Shutdown");
     expect(fake.calls().filter(([c]) => c === "spawn")).toEqual([]);
+  });
+
+  test("ends a readiness wait still running on close, then shuts the simulator down", async () => {
+    const fake = fakeXcrun([PHONE]);
+    const waiting = fake.hold("bootstatus");
+    let pid = 0;
+    await withStack(async (stack) => {
+      const device = iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined }).catch(
+        (e: unknown) => e,
+      );
+      ({ pid } = await waiting);
+      await stack.close();
+      expect(alive(pid)).toBe(false);
+      expect(await device).toMatchObject({
+        message: "xcrun simctl bootstatus A1 failed: was cancelled",
+      });
+    });
+    expect(lifecycle(fake.calls())).toEqual([
+      ["boot", "A1"],
+      ["bootstatus", "A1"],
+      ["shutdown", "A1"],
+    ]);
+    expect(fake.state().simulators[0]?.state).toBe("Shutdown");
   });
 
   test("shuts down after a killed boot, which CoreSimulator may finish", async () => {
@@ -153,6 +179,28 @@ describe("the iOS device driver", () => {
       await expect(device.install(app, APP)).rejects.toThrow("the stack is closed");
     });
     expect(fake.calls().at(-1)).toEqual(["uninstall", "A1", APP]);
+    expect(fake.state().installed).toEqual({ A1: [] });
+  });
+
+  test("removes every other app on close when one uninstall fails", async () => {
+    const fake = fakeXcrun([{ ...PHONE, state: "Booted" }]);
+    const app = join(fake.dir, "App.app");
+    writeFileSync(app, APP);
+    await expect(
+      withStack(async (stack) => {
+        const device = await iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined });
+        await expect(device.install(app, "NoUninstall")).rejects.toThrow(
+          "simctl uninstall A1 NoUninstall failed",
+        );
+        await device.install(app, APP);
+      }),
+    ).rejects.toThrow("the stack did not close cleanly");
+    expect(fake.calls().filter(([c]) => c === "uninstall")).toEqual([
+      ["uninstall", "A1", "NoUninstall"],
+      ["uninstall", "A1", APP],
+      ["uninstall", "A1", "NoUninstall"],
+      ["uninstall", "A1", APP],
+    ]);
     expect(fake.state().installed).toEqual({ A1: [] });
   });
 

@@ -1,7 +1,7 @@
 // Stands in for `xcrun simctl` over a state file in argv[2], the fake's dir. Every call is appended to calls.log;
 // `launch` appends the lines in app.log to log.txt, which `spawn <udid> log stream` follows after printing a header.
-// A log stream that SIGTERM ends writes stream.ended; the simulator named "NoLog" cannot stream, and "NoBoot" cannot
-// boot. A FIFO named hold-<command> holds that command, with its PID in <command>.pid, before it reads or changes
+// A log stream that SIGTERM ends writes stream.ended; the simulator named "NoLog" cannot stream, "NoBoot" cannot
+// boot, and the bundle ID "NoUninstall" cannot be uninstalled. A FIFO named hold-<command> holds that command, with its PID in <command>.pid, before it reads or changes
 // state, until the test closes the FIFO.
 import {
   appendFileSync,
@@ -84,6 +84,8 @@ if (tool !== "simctl") {
 } else if (command === "install") {
   installed.push(readFileSync(rest[0] ?? "", "utf8").trim());
   write(state);
+} else if (command === "uninstall" && rest[0] === "NoUninstall") {
+  fail("Failed to uninstall the requested application", 2);
 } else if (command === "uninstall") {
   state.installed[udid] = installed.filter((id) => id !== rest[0]);
   write(state);
