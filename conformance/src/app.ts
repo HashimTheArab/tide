@@ -17,7 +17,6 @@ import type { TideCli } from "./tide-cli.ts";
 import { hostEnv, tail } from "./stack.ts";
 
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
-const RUNTIME_VERSION = "1.0.0";
 const CERTIFICATE = "keys/certificate.pem";
 
 /** One version's app, materialised in a stack's temp dir. */
@@ -26,6 +25,7 @@ export interface App {
   readonly dir: string;
   readonly packageName: string;
   readonly channel: string; // One per version, so versions share a stack without sharing a pointer.
+  readonly runtimeVersion: string; // One per version: bases and patches are scoped by runtime, and each SDK is its own.
 }
 
 /** A release build and what `register-build` reads from it. */
@@ -52,19 +52,20 @@ export function materialise(stack: Stack, version: ExpoVersion): App {
     dir,
     packageName: `dev.tide.conformance.sdk${version}`,
     channel: `expo-${version}`,
+    runtimeVersion: `1.0.0-sdk${version}`,
   };
   const config = {
     expo: {
       name: `Tide conformance ${version}`,
       slug: "tide-conformance",
       version: "1.0.0",
-      runtimeVersion: RUNTIME_VERSION,
+      runtimeVersion: app.runtimeVersion,
       android: { package: app.packageName },
       plugins: ["./cleartext.js"],
       updates: {
         url: `${stack.serverUrl}/manifest`,
         requestHeaders: { "expo-channel-name": app.channel },
-        // The app checks itself, so a launch never fetches on its own and each step is deterministic.
+        // The app fetches by itself, so a launch never fetches on its own and each step is deterministic.
         checkAutomatically: "NEVER",
         enableBsdiffPatchSupport: true, // Off by default on 55.
         codeSigningCertificate: `./${CERTIFICATE}`,
@@ -141,11 +142,20 @@ export async function buildAndroid(
   };
 }
 
-/** Exports `app` with `marker` into a new directory under the stack and returns it, for `tide publish --from`. */
-export async function exportUpdate(stack: Stack, cli: TideCli, app: App, marker: string) {
+/**
+ * Exports `app` with `marker` into a new directory under the stack and returns it, for `tide publish --from`;
+ * `runtimeVersion` replaces the app's.
+ */
+export async function exportUpdate(
+  stack: Stack,
+  cli: TideCli,
+  app: App,
+  marker: string,
+  runtimeVersion?: string,
+) {
   writeMarker(app, marker);
   const out = join(stack.dir, `export-${app.version}-${marker}`);
-  await cli.export(app.dir, out, ["android"]);
+  await cli.export(app.dir, out, ["android"], runtimeVersion);
   return out;
 }
 

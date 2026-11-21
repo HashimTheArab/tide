@@ -1,5 +1,5 @@
-// The conformance app: reports the update it runs, then checks, fetches and reloads itself so each launch is one
-// deterministic step. The harness reads the reports from logcat; `marker.js` is written per build or update.
+// The conformance app: reports the update it runs, then fetches once and reloads into what it fetched, so each launch
+// is one deterministic step. The harness reads the reports from logcat; `marker.js` is written per build or update.
 import * as Updates from "expo-updates";
 import { useEffect, useState } from "react";
 import { Image, Text, View } from "react-native";
@@ -17,14 +17,11 @@ export default function App() {
       setLines((shown) => [...shown, line]);
     };
     report("running", { updateId: Updates.updateId, embedded: Updates.isEmbeddedLaunch });
+    // A check would request the manifest too; fetching alone makes one request per launch.
     (async () => {
-      const check = await Updates.checkForUpdateAsync();
-      if (!check.isAvailable && !check.isRollBackToEmbedded)
-        return report("check", { result: "none" });
-      report("check", { result: check.isRollBackToEmbedded ? "rollback" : "update" });
       const fetched = await Updates.fetchUpdateAsync();
       report("fetched", { isNew: fetched.isNew, rollback: fetched.isRollBackToEmbedded });
-      await Updates.reloadAsync();
+      if (fetched.isNew || fetched.isRollBackToEmbedded) await Updates.reloadAsync();
     })().catch((e) => report("error", { message: String(e?.message ?? e) }));
   }, []);
   return (
