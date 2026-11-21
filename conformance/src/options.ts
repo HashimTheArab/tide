@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 
-const PLATFORMS = ["android", "ios"] as const;
+export const PLATFORMS = ["android", "ios"] as const;
 export type Platform = (typeof PLATFORMS)[number];
 
 /** The expo-updates lines under test: the oldest with bsdiff support and the latest stable. */
@@ -26,12 +26,17 @@ const list = (table: Readonly<Record<string, string>>) =>
     .map(([name, about]) => `  ${name.padEnd(16)}${about}`)
     .join("\n");
 
-export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]... [--avd <name>]
+export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]...
+                        [--avd <name>] [--simulator <name|udid>]
 
 Runs stock expo-updates release apps against a local Tide. Every version and scenario runs unless named.
 
 Android uses the running emulator (ANDROID_SERIAL picks one of several), or boots the AVD --avd names (the first
 listed by default) read-only and shuts it down at the end. ANDROID_HOME must name the Android SDK.
+
+iOS uses the booted simulator, or the one --simulator names, and builds with Xcode and CocoaPods. A simulator it
+boots (the first listed by default) is shut down at the end; apps it installs are removed. It never creates or erases
+a simulator.
 
 Platforms: ${PLATFORMS.join(", ")}
 
@@ -48,6 +53,7 @@ export interface Run {
   readonly versions: readonly ExpoVersion[];
   readonly scenarios: readonly Scenario[];
   readonly avd: string | undefined;
+  readonly simulator: string | undefined;
 }
 
 /** Returns the run `args` ask for, or `help`; anything else is a `UsageError`. */
@@ -62,6 +68,7 @@ export function parseRun(args: readonly string[]): Run | "help" {
         expo: { type: "string", multiple: true },
         scenario: { type: "string", multiple: true },
         avd: { type: "string" },
+        simulator: { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -75,11 +82,18 @@ export function parseRun(args: readonly string[]): Run | "help" {
   if (!PLATFORMS.includes(platform as Platform)) {
     throw new UsageError(`--platform must be ${PLATFORMS.join(" or ")}`);
   }
+  if (platform !== "android" && values.avd !== undefined) {
+    throw new UsageError("--avd is for --platform android");
+  }
+  if (platform !== "ios" && values.simulator !== undefined) {
+    throw new UsageError("--simulator is for --platform ios");
+  }
   return {
     platform: platform as Platform,
     versions: pick(EXPO_VERSIONS, values.expo, "--expo"),
     scenarios: pick(SCENARIOS, values.scenario, "--scenario"),
     avd: values.avd,
+    simulator: values.simulator,
   };
 }
 

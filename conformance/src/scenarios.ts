@@ -20,8 +20,8 @@ import {
   verifyExpoSignature,
 } from "@tide/protocol";
 
-import type { AndroidDevice, Report } from "./android.ts";
-import type { AndroidBuild, App } from "./app.ts";
+import type { App, Build } from "./app.ts";
+import type { Device, Report } from "./device.ts";
 import type { Scenario } from "./options.ts";
 import type { Recorded, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
@@ -37,13 +37,13 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 /** One version's build on a device, as the scenarios drive it. */
 export interface Target {
   readonly stack: Stack;
-  readonly device: AndroidDevice;
+  readonly device: Device;
   readonly cli: TideCli;
   readonly app: App;
-  readonly build: AndroidBuild;
+  readonly build: Build;
 }
 
-/** What the checks read: the store and identity, and the channel and runtime the app asks for. */
+/** What the checks read: the store and identity, and the channel, runtime and platform the app asks for. */
 export type Served = Pick<Target, "stack" | "app">;
 
 /** An update: its ID, the marker its bundle reports, its launch bundle's content key, and whether it is embedded. */
@@ -130,7 +130,7 @@ export const STEPS: Record<Scenario, Step> = {
     from: "ota",
     async run(t, from) {
       const { channel, runtimeVersion } = t.app;
-      await t.cli.rollbackToEmbedded({ channel, runtimeVersion, platform: "android" });
+      await t.cli.rollbackToEmbedded({ channel, runtimeVersion, platform: t.app.platform });
       const e = embedded(t.build);
       await checkRollback(t, ran(from), e, await launch(t));
       return { running: e, saw: `rolled back from ${ran(from).updateId} to ${e.updateId}` };
@@ -140,13 +140,13 @@ export const STEPS: Record<Scenario, Step> = {
     from: "fresh",
     async run(t) {
       const e = await install(t);
-      const { manifest, bundle, resDir } = t.build;
+      const { manifest, bundle, assetsDir } = t.build;
       await t.cli.registerBuild({
-        platform: "android",
+        platform: t.app.platform,
         runtimeVersion: t.app.runtimeVersion,
         manifest,
         bundle,
-        assetsDir: resDir,
+        assetsDir,
       });
       const to = await publish(t, "u4");
       await checkPatch(t, e, to, await launch(t));
@@ -323,11 +323,11 @@ export async function checkRollback(
 
 /** Installs the build afresh and returns its embedded update. */
 async function install(t: Target): Promise<Update> {
-  await t.device.install(t.build.apk, t.app.packageName);
+  await t.device.install(t.build.artifact, t.app.appId);
   return embedded(t.build);
 }
 
-const embedded = (build: AndroidBuild): Update => ({
+const embedded = (build: Build): Update => ({
   updateId: build.embeddedUpdateId,
   marker: build.marker,
   hex: sha256File(build.bundle),
@@ -338,9 +338,10 @@ const embedded = (build: AndroidBuild): Update => ({
 async function publish(t: Target, name: string): Promise<Update> {
   const marker = `${name}-${t.app.version}-${randomUUID().slice(0, 8)}`;
   const from = await exportUpdate(t.stack, t.cli, t.app, marker);
-  const { android: updateId } = await t.cli.publish(from, t.app.channel);
-  if (updateId === undefined)
-    throw new Error(`tide publish wrote no android pointer for ${marker}`);
+  const updateId = (await t.cli.publish(from, t.app.channel))[t.app.platform];
+  if (updateId === undefined) {
+    throw new Error(`tide publish wrote no ${t.app.platform} pointer for ${marker}`);
+  }
   const base = decodeBaseRecord(readFileSync(storePath(t, baseKey(updateId))));
   return { updateId, marker, hex: contentKey(base.launchAsset.hash), embedded: false };
 }
@@ -354,7 +355,7 @@ async function launch(t: Target): Promise<Trace> {
   const before = t.stack.responses.length;
   const reports: Report[] = [];
   try {
-    await t.device.launch(t.app.packageName);
+    await t.device.launch(t.app.appId);
     while (!settled(reports.at(-1))) {
       if (reports.length === MAX_REPORTS) throw new Error(`no settled report in ${MAX_REPORTS}`);
       reports.push(await t.device.nextReport());
@@ -362,7 +363,7 @@ async function launch(t: Target): Promise<Trace> {
   } catch (e) {
     throw new Error(`${message(e)}; the app reported ${JSON.stringify(reports)}`);
   } finally {
-    await t.device.forceStop(t.app.packageName);
+    await t.device.stop(t.app.appId);
   }
   return { reports, recorded: t.stack.responses.slice(before) };
 }
@@ -513,7 +514,7 @@ async function verifyReply(s: Served, r: Recorded): Promise<string> {
   if (keyId?.kind !== "string" || keyId.text !== identity.keyId) {
     throw new Error(`a /manifest request did not expect the run's signature`);
   }
-  const pointer = replyKey(s.app.channel, s.app.runtimeVersion, "android");
+  const pointer = replyKey(s.app.channel, s.app.runtimeVersion, s.app.platform);
   const { boundary, body } = r;
   const key = [NO_UPDATE_KEY, pointer].find((k) => {
     const stored = storedReply(s, k);

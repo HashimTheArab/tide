@@ -14,8 +14,8 @@ import {
   patchKey,
 } from "@tide/protocol";
 
-import type { Report } from "../src/android.ts";
-import type { Scenario } from "../src/options.ts";
+import type { Report } from "../src/device.ts";
+import type { Platform, Scenario } from "../src/options.ts";
 import type { Outcome, Served, Trace, Update } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import { SCENARIOS } from "../src/options.ts";
@@ -35,14 +35,9 @@ import { ANDROID, MAIN, fixtureExport, hexOf, sha256Hex } from "./harness.ts";
 const EMBEDDED_ID = "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f";
 const UNSIGNED = `got ${NO_UPDATE_KEY}, which is not signed for the run`;
 
-const served = (stack: Stack): Served => ({
+const served = (stack: Stack, platform: Platform = "android"): Served => ({
   stack,
-  app: {
-    version: "55",
-    dir: stack.dir,
-    packageName: "dev.tide.conformance",
-    ...MAIN,
-  },
+  app: { version: "55", platform, dir: stack.dir, appId: "dev.tide.conformance", ...MAIN },
 });
 
 /** A 64 KiB random bundle, which gzip cannot shrink, so a patch between two variants passes the size rule. */
@@ -54,28 +49,34 @@ const variant = (base: Uint8Array, marker: string) => {
   return out;
 };
 
-/** Publishes a fixture export whose Android bundle is `bytes` to `channel`. */
+/** Publishes a fixture export of `platform` whose launch bundle is `bytes` to `channel`. */
 async function publish(
   stack: Stack,
   marker: string,
   bytes: Uint8Array,
   channel: string = MAIN.channel,
+  platform: Platform = "android",
 ): Promise<Update> {
-  const ids = await tideCli(stack).publish(fixtureExport(stack, marker, bytes), channel);
-  return { updateId: ids.android ?? "", marker, hex: await hexOf(bytes), embedded: false };
+  const from = fixtureExport(stack, marker, bytes, platform);
+  const ids = await tideCli(stack).publish(from, channel);
+  return { updateId: ids[platform] ?? "", marker, hex: await hexOf(bytes), embedded: false };
 }
 
 /** Registers an embedded build with no assets whose bundle is `bytes`; the bucket must already serve the identity. */
-async function registerBuild(stack: Stack, bytes: Uint8Array): Promise<Update> {
+async function registerBuild(
+  stack: Stack,
+  bytes: Uint8Array,
+  platform: Platform = "android",
+): Promise<Update> {
   const dir = join(stack.dir, "build");
   mkdirSync(dir);
-  writeFileSync(join(dir, "index.android.bundle"), bytes);
+  writeFileSync(join(dir, "embedded.bundle"), bytes);
   writeFileSync(join(dir, "app.manifest"), JSON.stringify({ id: EMBEDDED_ID, assets: [] }));
   await tideCli(stack).registerBuild({
-    platform: "android",
+    platform,
     runtimeVersion: MAIN.runtimeVersion,
     manifest: join(dir, "app.manifest"),
-    bundle: join(dir, "index.android.bundle"),
+    bundle: join(dir, "embedded.bundle"),
   });
   return embedded(await hexOf(bytes));
 }
@@ -107,9 +108,10 @@ async function trace(
   stack: Stack,
   reports: Report[],
   requests: (client: Client) => Promise<void>,
+  platform: Platform = "android",
 ): Promise<Trace> {
   const before = stack.responses.length;
-  await requests(client(stack));
+  await requests(client(stack, platform));
   return { reports, recorded: stack.responses.slice(before) };
 }
 
@@ -119,7 +121,7 @@ interface Client {
   bundle(to: Update, current: string, aIm?: boolean): Promise<void>;
 }
 
-function client(stack: Stack): Client {
+function client(stack: Stack, platform: Platform = "android"): Client {
   const read = async (path: string, headers: Record<string, string>) => {
     await (await fetch(`${stack.serverUrl}${path}`, { headers })).arrayBuffer();
   };
@@ -127,7 +129,7 @@ function client(stack: Stack): Client {
     manifest: (current: string, keyId = stack.identity.keyId) =>
       read("/manifest", {
         "expo-protocol-version": "1",
-        "expo-platform": ANDROID.platform,
+        "expo-platform": platform,
         "expo-runtime-version": MAIN.runtimeVersion,
         "expo-channel-name": MAIN.channel,
         "expo-expect-signature": `sig, keyid="${keyId}", alg="rsa-v1_5-sha256"`,
@@ -289,12 +291,23 @@ describe("the full scenario", () => {
 });
 
 /** A client running `from` takes `to`, its bundle as one request with A-IM. */
-const patchedLaunch = (stack: Stack, from: Update, to: Update, current = from.updateId) =>
-  trace(stack, [running(from), fetched(from, true), running(to), fetched(to, false)], async (c) => {
-    await c.manifest(from.updateId);
-    await c.bundle(to, current);
-    await c.manifest(to.updateId);
-  });
+const patchedLaunch = (
+  stack: Stack,
+  from: Update,
+  to: Update,
+  current = from.updateId,
+  platform: Platform = "android",
+) =>
+  trace(
+    stack,
+    [running(from), fetched(from, true), running(to), fetched(to, false)],
+    async (c) => {
+      await c.manifest(from.updateId);
+      await c.bundle(to, current);
+      await c.manifest(to.updateId);
+    },
+    platform,
+  );
 
 describe("the patch-ota scenario", () => {
   test("passes on the stored patch from the running update", async () => {
@@ -431,27 +444,43 @@ describe("the rollback scenario", () => {
   });
 });
 
-describe("the patch-embedded scenario", () => {
+describe.each(["android", "ios"] as const)("the patch-embedded scenario on %s", (platform) => {
   test("passes when the 226 names the registered build's update", async () => {
     await withStack(async (stack) => {
-      await publish(stack, "seed", bundle(), "seed");
+      await publish(stack, "seed", bundle(), "seed", platform);
       const base = bundle();
-      const e = await registerBuild(stack, base);
-      const u4 = await publish(stack, "u4", variant(base, "u4"));
-      await checkPatch(served(stack), e, u4, await patchedLaunch(stack, e, u4));
+      const e = await registerBuild(stack, base, platform);
+      const u4 = await publish(stack, "u4", variant(base, "u4"), MAIN.channel, platform);
+      const seen = await patchedLaunch(stack, e, u4, e.updateId, platform);
+      await checkPatch(served(stack, platform), e, u4, seen);
     });
   });
 
   test("fails when the 226 names another base", async () => {
     await withStack(async (stack) => {
-      await publish(stack, "seed", bundle(), "seed");
+      await publish(stack, "seed", bundle(), "seed", platform);
       const base = bundle();
-      const e = await registerBuild(stack, base);
-      const u3 = await publish(stack, "u3", variant(base, "u3"));
-      const u4 = await publish(stack, "u4", variant(base, "u4"));
-      const seen = await patchedLaunch(stack, e, u4, u3.updateId);
-      await expect(checkPatch(served(stack), e, u4, seen)).rejects.toThrow(
+      const e = await registerBuild(stack, base, platform);
+      const u3 = await publish(stack, "u3", variant(base, "u3"), MAIN.channel, platform);
+      const u4 = await publish(stack, "u4", variant(base, "u4"), MAIN.channel, platform);
+      const seen = await patchedLaunch(stack, e, u4, u3.updateId, platform);
+      await expect(checkPatch(served(stack, platform), e, u4, seen)).rejects.toThrow(
         `"baseUpdateId":"${u3.updateId}"`,
+      );
+    });
+  });
+
+  test("fails when the reply is the other platform's pointer", async () => {
+    await withStack(async (stack) => {
+      const other = platform === "ios" ? "android" : "ios";
+      await publish(stack, "seed", bundle(), "seed", platform);
+      const base = bundle();
+      const e = await registerBuild(stack, base, platform);
+      const u4 = await publish(stack, "u4", variant(base, "u4"), MAIN.channel, platform);
+      await publish(stack, "o4", bundle(), MAIN.channel, other);
+      const seen = await patchedLaunch(stack, e, u4, e.updateId, other);
+      await expect(checkPatch(served(stack, platform), e, u4, seen)).rejects.toThrow(
+        `a /manifest reply was not the bytes of reply/no-update or reply/main/1.0.0/${platform}`,
       );
     });
   });
