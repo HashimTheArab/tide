@@ -42,8 +42,8 @@ AI agents write most of the code.
   Lint rejects `node:*`, `cloudflare:*`, `bun`, `process` and `Buffer` there.
 - Each runtime has one entry point and one test project. A behaviour test that matters runs on both.
 - The workspace runs packages from `src`. `pnpm build` emits JS and declarations to each package's untracked `dist`,
-  and `publishConfig` points the packed `exports`, `bin` and `types` there; Node will not strip types under
-  `node_modules`.
+  and `publishConfig` points the packed `exports` and `bin` there (each `.d.ts` sits beside its `.js`); Node will not
+  strip types under `node_modules`.
 - `packages/server` typechecks core twice: against Node types (`tsconfig.node.json`) and Workers types
   (`tsconfig.workers.json`, generated `worker-configuration.d.ts`).
 

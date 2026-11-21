@@ -37,14 +37,8 @@
   },
   "publishConfig": {
     "exports": {
-      "./workers": {
-        "types": "./dist/workers.d.ts",
-        "default": "./dist/workers.js"
-      },
-      "./node": {
-        "types": "./dist/node.d.ts",
-        "default": "./dist/node.js"
-      }
+      "./workers": "./dist/workers.js",
+      "./node": "./dist/node.js"
     }
   },
   "scripts": {

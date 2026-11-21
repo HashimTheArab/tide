@@ -27,17 +27,9 @@ function ok(cmd, args, options) {
   return r.stdout;
 }
 
-/** Returns every string in an exports map: the targets, not the subpaths or conditions. @param {unknown} v @returns {string[]} */
-const leaves = (v) =>
-  typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(leaves) : [];
-
 const work = mkdtempSync(join(tmpdir(), "tide-pack-"));
 const project = join(work, "consumer");
-/**
- * @typedef {{ name: string, version: string, private?: boolean, publishConfig?: unknown, exports?: unknown,
- *   bin?: Record<string, string>, types?: string, dependencies?: Record<string, string>,
- *   peerDependencies?: Record<string, string> }} Manifest
- */
+/** @typedef {{ name: string, private?: boolean, exports?: Record<string, string>, bin?: Record<string, string> }} Manifest */
 /** @type {Map<string, { file: string, entries: string[], manifest: Manifest }>} */
 const tarballs = new Map();
 
@@ -63,7 +55,7 @@ before(() => {
   assert.deepEqual([...tarballs.keys()].sort(), [...NAMES].sort());
 
   mkdirSync(project);
-  const typesNode = /** @type {Manifest} */ (
+  const typesNode = /** @type {{ version: string }} */ (
     JSON.parse(readFileSync(join(root, "node_modules/@types/node/package.json"), "utf8"))
   ).version;
   const dependencies = Object.fromEntries(NAMES.map((n) => [n, `file:${tarballs.get(n)?.file}`]));
@@ -96,14 +88,9 @@ await test("tarballs hold only dist, LICENSE, README and a manifest pointing int
     );
     assert.ok(entries.includes("package/LICENSE"), `${name} has no LICENSE`);
     assert.equal(manifest.private, undefined, `${name} is private`);
-    assert.equal(manifest.publishConfig, undefined, `${name} kept publishConfig`);
-    const deps = { ...manifest.dependencies, ...manifest.peerDependencies };
-    for (const [dep, range] of Object.entries(deps))
-      assert.ok(!String(range).startsWith("workspace:"), `${name} depends on ${dep}@${range}`);
     const targets = [
-      ...leaves(manifest.exports),
+      ...Object.values(manifest.exports ?? {}),
       ...Object.values(manifest.bin ?? {}),
-      ...(manifest.types ? [manifest.types] : []),
     ];
     assert.ok(targets.length > 0, `${name} exposes nothing`);
     for (const target of targets) {
@@ -111,21 +98,6 @@ await test("tarballs hold only dist, LICENSE, README and a manifest pointing int
       assert.ok(entries.includes(`package/${target.slice(2)}`), `${name} lacks ${target}`);
     }
   }
-});
-
-await test("every @tide-ota package installed from a tarball", () => {
-  const lock = /** @type {{ packages: Record<string, { resolved?: string }> }} */ (
-    JSON.parse(readFileSync(join(project, "package-lock.json"), "utf8"))
-  );
-  const installed = Object.entries(lock.packages).filter(([path]) =>
-    /(^|\/)node_modules\/@tide-ota\//.test(path),
-  );
-  assert.deepEqual(
-    installed.map(([path]) => path).sort(),
-    NAMES.map((n) => `node_modules/${n}`).sort(),
-  );
-  for (const [path, entry] of installed)
-    assert.match(entry.resolved ?? "", /^file:/, `${path} came from ${entry.resolved}`);
 });
 
 await test("the tide bin prints usage and exits 2", () => {

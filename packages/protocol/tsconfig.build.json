@@ -1,5 +1,4 @@
 {
   "extends": ["./tsconfig.web.json", "../../tsconfig.emit.json"],
-  "include": ["src"],
-  "exclude": []
+  "include": ["src"]
 }
