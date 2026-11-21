@@ -6,10 +6,9 @@ import { fileURLToPath } from "node:url";
 
 import type { Platform } from "./options.ts";
 import type { Stack } from "./stack.ts";
+import { hostEnv } from "./stack.ts";
 
 const CLI = fileURLToPath(new URL("../../packages/cli/src/main.ts", import.meta.url));
-// Operator and cloud credentials in the caller's shell never reach the CLI.
-const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS)_/i;
 
 interface Pointer {
   readonly channel: string;
@@ -58,11 +57,7 @@ export function tideCli(stack: Stack): TideCli {
   ];
   return {
     async export(projectRoot, out, platforms) {
-      const env = Object.fromEntries(
-        Object.entries(process.env).filter(
-          (e): e is [string, string] => e[1] !== undefined && !CREDENTIAL.test(e[0]),
-        ),
-      );
+      const env = hostEnv();
       // The export stages Expo's output under TMPDIR, so a killed export leaves nothing outside the stack.
       env.TMPDIR = await mkdtemp(join(stack.dir, "tmp-"));
       const selected = platforms.flatMap((p) => ["--platform", p]);

@@ -5,7 +5,8 @@
   "ignorePatterns": [
     "**/worker-configuration.d.ts",
     "packages/protocol/test/fixtures/**",
-    "packages/cli/test/fixtures/**"
+    "packages/cli/test/fixtures/**",
+    "conformance/apps/*/package-lock.json"
   ],
   "sortImports": {
     "newlinesBetween": false,

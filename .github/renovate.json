@@ -22,6 +22,20 @@
     {
       "groupName": "GitHub Actions",
       "matchManagers": ["github-actions"]
+    },
+    {
+      "description": "Each conformance app stays on its Expo SDK, which pins React Native and React: patch updates only. A new SDK gets its own app directory.",
+      "matchFileNames": ["conformance/apps/**"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    },
+    {
+      "groupName": "conformance app SDK 55",
+      "matchFileNames": ["conformance/apps/sdk-55/**"]
+    },
+    {
+      "groupName": "conformance app SDK 58",
+      "matchFileNames": ["conformance/apps/sdk-58/**"]
     }
   ]
 }

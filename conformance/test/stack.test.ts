@@ -19,18 +19,28 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo, Socket } from "node:net";
 import { describe, expect, onTestFinished, test } from "vitest";
 
+import type { Part } from "@tide/protocol";
 import {
   baseKey,
   codeSigningCertificate,
   contentKey,
   decodeBaseRecord,
+  NO_UPDATE_KEY,
+  decodeStoredReply,
   diskPath,
+  encodeMultipart,
+  encodeStoredReply,
+  parseMultipart,
   patchKey,
+  replyKey,
   sha256Base64Url,
 } from "@tide/protocol";
 
+import type { AndroidDevice, Report } from "../src/android.ts";
+import type { Target } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
+import { STEPS } from "../src/scenarios.ts";
 import { tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
 
@@ -213,13 +223,27 @@ describe("the harness stack", () => {
       expect(await cli.probe(ANDROID)).toBe(
         `manifest ${ids.android}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
       );
+      const pointer = decodeStoredReply(
+        readFileSync(join(stack.storeDir, diskPath(replyKey("main", "1.0.0", "android")))),
+      );
       expect(stack.responses.slice(before)).toEqual([
-        { path: "/manifest", status: 200, im: undefined, baseUpdateId: undefined },
         {
-          path: `/bundles/${contentKey(hash)}`,
+          path: "/manifest",
+          expectSignature: `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
+          boundary: pointer.boundary,
+          body: pointer.body,
+        },
+        {
+          path: `/bundles/${contentKey(hash)}`,
+          expectSignature: undefined,
+          status: 200,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: undefined,
+          body: undefined,
         },
       ]);
     });
@@ -258,8 +282,24 @@ describe("the harness stack", () => {
       expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true);
       expect((await fetch(`${stack.serverUrl}${missing}`)).status).toBe(404);
       expect(stack.responses.slice(before)).toEqual([
-        { path, status: 200, im: undefined, baseUpdateId: undefined },
-        { path: missing, status: 404, im: undefined, baseUpdateId: undefined },
+        {
+          path,
+          expectSignature: undefined,
+          status: 200,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: undefined,
+          body: undefined,
+        },
+        {
+          path: missing,
+          expectSignature: undefined,
+          status: 404,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: undefined,
+          body: undefined,
+        },
       ]);
     });
   });
@@ -287,9 +327,12 @@ describe("the harness stack", () => {
       });
       expect(stack.responses.at(-1)).toEqual({
         path: `/bundles/${toHex}`,
+        expectSignature: undefined,
         status: 226,
         im: "bsdiff",
         baseUpdateId: u1.android,
+        boundary: undefined,
+        body: undefined,
       });
 
       const before = tree(stack.storeDir);
@@ -350,6 +393,21 @@ describe("the harness stack", () => {
         "directive rollBackToEmbedded: signature verified; a directive has no bundle to check\n",
       );
     });
+  });
+
+  test("spawn runs in the given directory, and close runs onClose steps while the servers still answer", async () => {
+    const seen: unknown[] = [];
+    await withStack(async (stack) => {
+      const sub = join(stack.dir, "sub");
+      mkdirSync(sub);
+      const pwd = stack.spawn("/bin/pwd", [], {}, sub);
+      const [out] = (await once(pwd.stdout, "data")) as [Buffer];
+      expect(out.toString().trim()).toBe(sub);
+      stack.onClose(async () => {
+        seen.push((await fetch(`${stack.serverUrl}/hc`)).status, existsSync(stack.dir));
+      });
+    });
+    expect(seen).toEqual([200, true]);
   });
 
   test("a failing CLI command throws with its message", async () => {
@@ -452,5 +510,109 @@ describe("the harness stack shuts down", () => {
     held.proc.kill(signal);
     expect(await held.exited).toEqual([code, null]);
     await expectClosed(seen);
+  });
+});
+
+describe("the embedded scenario", () => {
+  /** A target whose app, on each launch, makes the signed check a client makes and reports what the app logs. */
+  function target(stack: Stack): Target {
+    const build = {
+      apk: "app.apk",
+      marker: "m1",
+      embeddedUpdateId: "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f",
+      manifest: "app.manifest",
+      bundle: "index.android.bundle",
+      resDir: "res",
+    };
+    let reports: Report[] = [];
+    const device: AndroidDevice = {
+      serial: "emulator-5554",
+      abi: "x86_64",
+      booted: false,
+      reverse: () => Promise.resolve(),
+      install: () => Promise.resolve(),
+      async launch() {
+        const res = await fetch(`${stack.serverUrl}/manifest`, {
+          headers: {
+            "expo-protocol-version": "1",
+            "expo-platform": "android",
+            "expo-runtime-version": MAIN.runtimeVersion,
+            "expo-channel-name": MAIN.channel,
+            "expo-expect-signature": `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
+          },
+        });
+        await res.arrayBuffer();
+        reports = [
+          {
+            event: "running",
+            marker: build.marker,
+            updateId: build.embeddedUpdateId,
+            embedded: true,
+          },
+          { event: "check", marker: build.marker, result: "none" },
+        ];
+      },
+      forceStop: () => Promise.resolve(),
+      nextReport: () => {
+        const [next, ...rest] = reports;
+        reports = rest;
+        return next === undefined ? Promise.reject(new Error("no report")) : Promise.resolve(next);
+      },
+      drain: () => undefined,
+    };
+    const app = {
+      version: "55",
+      dir: stack.dir,
+      packageName: "dev.tide.conformance",
+      channel: MAIN.channel,
+    } as const;
+    return { stack, device, app, build };
+  }
+
+  /** Rewrites the stored no-update reply's body, keeping its boundary. */
+  function rewriteNoUpdate(
+    stack: Stack,
+    change: (parts: Part[], boundary: string) => Uint8Array<ArrayBuffer>,
+  ) {
+    const path = join(stack.storeDir, diskPath(NO_UPDATE_KEY));
+    const { boundary, body } = decodeStoredReply(readFileSync(path));
+    const next = change(parseMultipart(body, boundary), boundary);
+    writeFileSync(path, encodeStoredReply({ kind: "noUpdateAvailable", boundary, body: next }));
+  }
+
+  const unsigned = `got ${NO_UPDATE_KEY}, which is not a noUpdateAvailable directive signed for the run`;
+
+  test("passes when both launches get the stored signed no-update reply", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      await expect(STEPS.embedded?.(target(stack))).resolves.toContain(
+        `accepted the signed ${NO_UPDATE_KEY}`,
+      );
+    });
+  });
+
+  test("fails when the reply has the stored boundary but no directive to verify", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      rewriteNoUpdate(stack, (_, boundary) => new Uint8Array(Buffer.from(`--${boundary}--\r\n`)));
+      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
+    });
+  });
+
+  test("fails when the directive's signature does not verify under the run's certificate", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      rewriteNoUpdate(stack, ([part], boundary) => {
+        const signature = (part?.signature ?? "").replace(
+          /sig="(.)/,
+          (_, c: string) => `sig="${c === "A" ? "B" : "A"}`,
+        );
+        return encodeMultipart(
+          [{ name: "directive", body: part?.body ?? new Uint8Array(), signature }],
+          boundary,
+        ).body;
+      });
+      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
+    });
   });
 });

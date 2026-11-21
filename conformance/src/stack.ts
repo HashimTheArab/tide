@@ -4,7 +4,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Agent, createServer, request } from "node:http";
 import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -16,6 +16,9 @@ import { diskStore, startServer } from "@tide/server/node";
 import { RSA_SHA256, certificate, pem } from "../../packages/protocol/test/fixtures.ts";
 
 const LOOPBACK = "127.0.0.1";
+const MULTIPART = /^multipart\/mixed; boundary=(.*)$/s;
+// Operator and cloud credentials in the caller's shell never reach a child.
+const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS)_/i;
 type Step = () => Promise<void> | void;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -29,9 +32,12 @@ interface Identity {
 /** One reply the local Tide sent, with the headers the scenarios assert on. */
 interface Recorded {
   readonly path: string;
+  readonly expectSignature: string | undefined; // The request's; a client sends it only with a certificate embedded.
   readonly status: number;
   readonly im: string | undefined;
   readonly baseUpdateId: string | undefined;
+  readonly boundary: string | undefined; // A multipart reply's boundary, which names the stored reply it came from.
+  readonly body: Uint8Array<ArrayBuffer> | undefined; // A multipart reply's body as forwarded so far, before the client gets it.
 }
 
 export interface Stack {
@@ -44,7 +50,9 @@ export interface Stack {
    * Starts `command` with exactly `env` in a process group of its own. The group is killed once the child's stdout
    * and stderr close, or on `close`, which waits for those streams; its own children inherit them unless redirected.
    */
-  spawn(command: string, args: readonly string[], env: Record<string, string>): Child;
+  spawn(command: string, args: readonly string[], env: Record<string, string>, cwd?: string): Child;
+  /** Runs `step` on `close` after every child is killed and before the servers stop; later steps run first. */
+  onClose(step: Step): void;
   /** Stops every child and the servers, then removes the temp dir; later calls return the first call's promise. */
   close(): Promise<void>;
 }
@@ -82,10 +90,16 @@ async function startStack(): Promise<Stack> {
     const serverUrl = await serve(recorder(port(tide), agent, storeDir, responses), steps);
     const children = new Set<Promise<void>>();
     steps.push(() => Promise.all(children).then(() => undefined));
-    const start = (command: string, args: readonly string[], env: Record<string, string>) => {
+    const start = (
+      command: string,
+      args: readonly string[],
+      env: Record<string, string>,
+      cwd?: string,
+    ) => {
       if (controller.signal.aborted) throw new Error("the stack is closed");
       const child = spawn(command, args, {
         env,
+        cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -109,7 +123,11 @@ async function startStack(): Promise<Stack> {
       controller.signal.addEventListener("abort", kill, { once: true });
       return child;
     };
-    return { dir, storeDir, serverUrl, identity, responses, spawn: start, close };
+    const onClose = (step: Step) => {
+      if (controller.signal.aborted) throw new Error("the stack is closed");
+      steps.push(step);
+    };
+    return { dir, storeDir, serverUrl, identity, responses, spawn: start, onClose, close };
   } catch (e) {
     await close();
     throw e;
@@ -140,6 +158,24 @@ export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+  }
+}
+
+/** Returns the caller's environment without operator and cloud credentials. */
+export function hostEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (e): e is [string, string] => e[1] !== undefined && !CREDENTIAL.test(e[0]),
+    ),
+  );
+}
+
+/** Returns the last 40 lines of `file`, or a note that it does not exist. */
+export function tail(file: string): string {
+  try {
+    return readFileSync(file, "utf8").trimEnd().split("\n").slice(-40).join("\n");
+  } catch {
+    return `(no ${basename(file)})`;
   }
 }
 
@@ -188,13 +224,20 @@ async function writeIdentity(dir: string): Promise<Identity> {
 function recorder(upstream: number, agent: Agent, storeDir: string, responses: Recorded[]): Server {
   return createServer((req, res) => {
     const path = req.url ?? "";
-    const record = (status: number, headers: IncomingHttpHeaders = {}) =>
-      responses.push({
+    const record = (status: number, headers: IncomingHttpHeaders = {}) => {
+      const boundary = MULTIPART.exec(headers["content-type"] ?? "")?.[1];
+      const entry = {
         path,
+        expectSignature: req.headers["expo-expect-signature"] as string | undefined,
         status,
         im: headers.im as string | undefined,
         baseUpdateId: headers["expo-base-update-id"] as string | undefined,
-      });
+        boundary,
+        body: boundary === undefined ? undefined : new Uint8Array(),
+      };
+      responses.push(entry);
+      return entry;
+    };
     const hex = /^\/assets\/([0-9a-f]{64})$/.exec(path)?.[1];
     if (hex !== undefined && (req.method === "GET" || req.method === "HEAD")) {
       readFile(join(storeDir, diskPath(`assets/${hex}`))).then(
@@ -219,7 +262,13 @@ function recorder(upstream: number, agent: Agent, storeDir: string, responses: R
       { host: LOOPBACK, port: upstream, method: req.method, path, headers: req.headers, agent },
       (reply) => {
         const status = reply.statusCode ?? 0;
-        record(status, reply.headers);
+        const entry = record(status, reply.headers);
+        if (entry.body !== undefined) {
+          // Added before the pipe, so each chunk is recorded before it is forwarded.
+          reply.on("data", (chunk: Buffer) => {
+            entry.body = new Uint8Array(Buffer.concat([entry.body ?? new Uint8Array(), chunk]));
+          });
+        }
         res.writeHead(status, reply.rawHeaders);
         reply.pipe(res);
       },

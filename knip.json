@@ -1,7 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignore": [
-    ".claude/workflows/**"
+    ".claude/workflows/**",
+    "conformance/apps/**"
   ],
   "ignoreBinaries": [
     "mkfifo"
@@ -27,6 +28,7 @@
     "conformance": {
       "entry": [
         "src/main.ts",
+        "test/fake-android.ts",
         "test/hold-stack.ts",
         "test/hung-export.ts",
         "test/leave-worker.ts"
