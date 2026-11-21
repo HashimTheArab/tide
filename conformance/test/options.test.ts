@@ -1,22 +1,32 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, onTestFinished, test } from "vitest";
 
 import { EXPO_VERSIONS, SCENARIOS, USAGE, parseRun } from "../src/options.ts";
+import { fakeSdk } from "./harness.ts";
 
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const ALL_SCENARIOS = Object.keys(SCENARIOS);
 
-/** Runs the conformance bin with `TMPDIR` set to a fresh empty directory, which it returns too. */
-async function conformance(args: string[]) {
+/** Runs the conformance bin with `TMPDIR` set to a fresh empty directory, which it returns too, and `env`. */
+async function conformance(args: string[], env: Record<string, string> = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "tide-conformance-test-"));
   onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
   const proc = spawn(process.execPath, [MAIN, ...args], {
-    env: { PATH: process.env.PATH ?? "", TMPDIR: tmp },
+    env: { PATH: process.env.PATH ?? "", TMPDIR: tmp, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -121,15 +131,60 @@ describe("the conformance bin", () => {
   });
 
   test.each([
-    [
-      ["--platform", "android"],
-      "no full, patch-ota, corrupt-patch, rollback, patch-embedded scenario exists yet",
-    ],
-    [["--platform", "android", "--scenario", "full"], "no full scenario exists yet"],
+    [["--platform", "android"], "set ANDROID_HOME to the Android SDK"],
     [["--platform", "ios", "--scenario", "embedded"], "no ios device driver exists yet"],
   ])("%j exits 1 before creating anything: %s", async (args, message) => {
     const result = await conformance(args);
     expect(result).toMatchObject({ code: 1, stdout: "", tmpEntries: [] });
     expect(result.stderr).toMatch(new RegExp(`^conformance: ${message}`));
+  });
+
+  test("a version whose Gradle build fails prints a line per scenario, and the next version still builds", async () => {
+    const fake = fakeSdk({ running: { "emulator-5554": {} } });
+    const bin = join(fake.sdk, "bin");
+    const tool = join(fake.sdk, "tool");
+    const gradleLog = join(fake.sdk, "gradle.log");
+    mkdirSync(bin);
+    // npm ci links in expo, whose prebuild links in a gradlew that fails in the 55 app and builds nothing in the 58.
+    // All are links to one script, since macOS checks each new executable on its first run, which is slow.
+    writeFileSync(
+      tool,
+      `#!/bin/sh
+case "$(basename "$0")" in
+npm) mkdir -p node_modules/.bin && ln -s '${tool}' node_modules/.bin/expo ;;
+expo) mkdir -p android && ln -s '${tool}' android/gradlew ;;
+gradlew) echo "$(pwd) $1" >> "$GRADLE_LOG"
+  case "$(pwd)" in */app-55/android) echo "FAILURE: Build failed with an exception."; exit 1;; esac ;;
+esac
+`,
+    );
+    chmodSync(tool, 0o755);
+    symlinkSync(tool, join(bin, "npm"));
+    const result = await conformance(["--platform", "android"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      ANDROID_HOME: fake.sdk,
+      GRADLE_LOG: gradleLog,
+    });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe(
+      [
+        ...ALL_SCENARIOS.map(
+          (s) => `android expo-updates 55 ${s}: fail: not run: gradlew assembleRelease exited 1:`,
+        ),
+        ...ALL_SCENARIOS.map(
+          (s) => `android expo-updates 58 ${s}: fail: not run: unzip -q exited 9:`,
+        ),
+      ]
+        .map((line) => `${line}\n`)
+        .join(""),
+    );
+    expect(result.stderr).toContain("FAILURE: Build failed with an exception.");
+    expect(
+      readFileSync(gradleLog, "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => line.split("/").slice(-2).join("/")),
+    ).toEqual(["app-55/android assembleRelease", "app-58/android assembleRelease"]);
+    expect(result.tmpEntries).toEqual([]);
   });
 });
