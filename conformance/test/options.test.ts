@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, onTestFinished, test } from "vitest";
 
 import { EXPO_VERSIONS, SCENARIOS, USAGE, parseRun } from "../src/options.ts";
-import { fakeSdk } from "./harness.ts";
+import { fakeSdk, fakeXcrun } from "./harness.ts";
 
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const ALL_SCENARIOS = Object.keys(SCENARIOS);
@@ -44,12 +44,19 @@ describe("parseRun", () => {
       versions: ["55", "58"],
       scenarios: ALL_SCENARIOS,
       avd: undefined,
+      simulator: undefined,
     });
   });
 
   test("--avd names the AVD to boot", () => {
     expect(parseRun(["--platform", "android", "--avd", "Pixel_9"])).toMatchObject({
       avd: "Pixel_9",
+    });
+  });
+
+  test("--simulator names the simulator to use", () => {
+    expect(parseRun(["--platform", "ios", "--simulator", "iPhone 17"])).toMatchObject({
+      simulator: "iPhone 17",
     });
   });
 
@@ -72,6 +79,7 @@ describe("parseRun", () => {
       versions: ["58"],
       scenarios: ["full", "rollback"],
       avd: undefined,
+      simulator: undefined,
     });
   });
 
@@ -93,6 +101,8 @@ describe("parseRun", () => {
     ],
     [["--platform", "android", "extra"], "unrecognised arguments"],
     [["--platform", "android", "--device", "x"], "unrecognised arguments"],
+    [["--platform", "ios", "--avd", "Pixel"], "--avd is for --platform android"],
+    [["--platform", "android", "--simulator", "iPhone"], "--simulator is for --platform ios"],
   ])("%j is a usage error: %s", (args, message) => {
     expect(() => parseRun(args)).toThrow(message);
   });
@@ -130,13 +140,10 @@ describe("the conformance bin", () => {
     expect(result.tmpEntries).toEqual([]);
   });
 
-  test.each([
-    [["--platform", "android"], "set ANDROID_HOME to the Android SDK"],
-    [["--platform", "ios", "--scenario", "embedded"], "no ios device driver exists yet"],
-  ])("%j exits 1 before creating anything: %s", async (args, message) => {
-    const result = await conformance(args);
+  test("--platform android exits 1 before creating anything without ANDROID_HOME", async () => {
+    const result = await conformance(["--platform", "android"]);
     expect(result).toMatchObject({ code: 1, stdout: "", tmpEntries: [] });
-    expect(result.stderr).toMatch(new RegExp(`^conformance: ${message}`));
+    expect(result.stderr).toMatch(/^conformance: set ANDROID_HOME to the Android SDK/);
   });
 
   test("a version whose Gradle build fails prints a line per scenario, and the next version still builds", async () => {
@@ -185,6 +192,64 @@ esac
         .split("\n")
         .map((line) => line.split("/").slice(-2).join("/")),
     ).toEqual(["app-55/android assembleRelease", "app-58/android assembleRelease"]);
+    expect(result.tmpEntries).toEqual([]);
+  });
+
+  test("a version whose Xcode build fails prints a line per scenario, the next still builds, and the booted simulator stays booted", async () => {
+    const fake = fakeXcrun([{ udid: "A1", name: "iPhone", state: "Booted" }]);
+    const bin = join(fake.dir, "bin");
+    const tool = join(fake.dir, "tool");
+    const buildLog = join(fake.dir, "xcodebuild.log");
+    // npm ci links in expo, whose prebuild writes a workspace; xcodebuild fails in the 55 app and builds no .app in the
+    // 58. All are links to one script, since macOS checks each new executable on its first run, which is slow.
+    writeFileSync(
+      tool,
+      `#!/bin/sh
+case "$(basename "$0")" in
+npm) mkdir -p node_modules/.bin && ln -s '${tool}' node_modules/.bin/expo ;;
+expo) mkdir -p ios/App.xcworkspace ;;
+xcodebuild) echo "$(pwd) $*" >> "$BUILD_LOG"
+  case "$(pwd)" in */app-55) echo "** BUILD FAILED **"; exit 65;; esac
+  mkdir -p derived/Build/Products/Release-iphonesimulator ;;
+esac
+`,
+    );
+    chmodSync(tool, 0o755);
+    for (const name of ["npm", "pod", "xcodebuild"]) symlinkSync(tool, join(bin, name));
+    const result = await conformance(["--platform", "ios"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      BUILD_LOG: buildLog,
+    });
+    expect(result.code).toBe(1);
+    const lines = result.stdout.trimEnd().split("\n");
+    expect(lines.slice(0, ALL_SCENARIOS.length)).toEqual(
+      ALL_SCENARIOS.map(
+        (s) => `ios expo-updates 55 ${s}: fail: not run: xcodebuild build exited 65:`,
+      ),
+    );
+    const noApp = "/derived/Build/Products/Release-iphonesimulator holds 0 .app entries, not 1";
+    expect(lines.slice(ALL_SCENARIOS.length).map((l) => l.replace(/ \/\S*\/app-58/, " "))).toEqual(
+      ALL_SCENARIOS.map((s) => `ios expo-updates 58 ${s}: fail: not run: ${noApp}`),
+    );
+    expect(result.stderr).toContain("** BUILD FAILED **");
+    // Each build runs in its app dir, for the simulator's own architecture and without signing.
+    expect(
+      readFileSync(buildLog, "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => line.replace(/\/\S*\/(app-\d+)\b/g, "$1")),
+    ).toEqual(
+      ["55", "58"].map((v) =>
+        [
+          `app-${v} build -workspace app-${v}/ios/App.xcworkspace -scheme App`,
+          `-configuration Release -destination id=A1 -derivedDataPath app-${v}/derived`,
+          "ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO",
+        ].join(" "),
+      ),
+    );
+    expect(fake.state().simulators[0]?.state).toBe("Booted");
+    expect(fake.calls().filter(([c]) => c === "boot" || c === "shutdown")).toEqual([]);
+    expect(fake.stream().ended).toBe(true);
     expect(result.tmpEntries).toEqual([]);
   });
 });

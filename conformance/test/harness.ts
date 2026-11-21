@@ -1,8 +1,9 @@
-// Fixtures the harness tests share: what `tide export` writes without running Expo, and a fake Android SDK.
+// Fixtures the harness tests share: what `tide export` writes without running Expo, and fake Android and iOS tools.
 import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -21,6 +22,7 @@ import type { Stack } from "../src/stack.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
 
 const FAKE = fileURLToPath(new URL("fake-android.ts", import.meta.url));
+const FAKE_IOS = fileURLToPath(new URL("fake-ios.ts", import.meta.url));
 export const FIXTURE_EXPORT = fileURLToPath(
   new URL("../../packages/cli/test/fixtures/export", import.meta.url),
 );
@@ -100,5 +102,62 @@ export function fakeSdk(state: Partial<FakeState>, avds: string[] = ["Pixel", "T
     /** Sets the lines the app logs on each launch. */
     appLogs: (lines: string[]) =>
       writeFileSync(join(sdk, "app.log"), lines.map((l) => `${l}\n`).join("")),
+  };
+}
+
+interface FakeSimulator {
+  udid: string;
+  name: string;
+  state: "Booted" | "Shutdown" | "Booting";
+  runtime?: string; // An iOS runtime unless named.
+  isAvailable?: boolean;
+}
+
+interface FakeXcrunState {
+  simulators: Required<FakeSimulator>[];
+  installed: Record<string, string[]>;
+  running: string[];
+}
+
+/** Writes a fake `bin/xcrun`, removed when the test ends, that is fake-ios.ts over `simulators`. */
+export function fakeXcrun(simulators: FakeSimulator[]) {
+  const dir = mkdtempSync(join(tmpdir(), "tide-fake-xcrun-"));
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  const xcrun = join(dir, "bin", "xcrun");
+  mkdirSync(join(dir, "bin"));
+  writeFileSync(xcrun, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_IOS}' '${dir}' "$@"\n`);
+  chmodSync(xcrun, 0o755);
+  const state: FakeXcrunState = {
+    simulators: simulators.map((s) => ({
+      runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+      isAvailable: true,
+      ...s,
+    })),
+    installed: {},
+    running: [],
+  };
+  writeFileSync(join(dir, "state.json"), JSON.stringify(state));
+  writeFileSync(join(dir, "calls.log"), "");
+  writeFileSync(join(dir, "app.log"), "");
+  const text = (name: string) => readFileSync(join(dir, name), "utf8");
+  return {
+    dir,
+    xcrun,
+    state: () => JSON.parse(text("state.json")) as FakeXcrunState,
+    /** Each call's arguments after `simctl`. */
+    calls: () =>
+      text("calls.log")
+        .trimEnd()
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => (JSON.parse(l) as string[]).slice(1)),
+    /** Sets the lines the app logs on each launch. */
+    appLogs: (lines: string[]) =>
+      writeFileSync(join(dir, "app.log"), lines.map((l) => `${l}\n`).join("")),
+    /** The log stream's PID, and whether SIGTERM ended it. */
+    stream: () => ({
+      pid: Number(text("stream.pid")),
+      ended: existsSync(join(dir, "stream.ended")),
+    }),
   };
 }

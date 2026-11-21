@@ -4,11 +4,13 @@ import { randomUUID } from "node:crypto";
 import type { AndroidDevice } from "./android.ts";
 import type { App, Build } from "./app.ts";
 import type { Device } from "./device.ts";
+import type { IosDevice } from "./ios.ts";
 import type { ExpoVersion, Run, Scenario } from "./options.ts";
 import type { Outcome, Target } from "./scenarios.ts";
 import type { Stack } from "./stack.ts";
 import { androidDevice } from "./android.ts";
-import { buildAndroid, exportUpdate, materialise } from "./app.ts";
+import { buildAndroid, buildIos, exportUpdate, materialise } from "./app.ts";
+import { iosDevice } from "./ios.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
 import { STEPS, message, plan, runScenarios } from "./scenarios.ts";
 import { withStack } from "./stack.ts";
@@ -34,11 +36,8 @@ async function main(args: readonly string[]): Promise<number> {
     out(USAGE);
     return 0;
   }
-  if (run.platform === "ios") {
-    say("no ios device driver exists yet");
-    return 1;
-  }
   try {
+    if (run.platform === "ios") return await conform(run, ios(run));
     const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
     if (sdk === undefined || sdk === "") {
       say("set ANDROID_HOME to the Android SDK");
@@ -70,6 +69,14 @@ const android = (run: Run, sdk: string): Driver<AndroidDevice> => ({
     return { device, about };
   },
   build: (stack, app, device, marker) => buildAndroid(stack, app, sdk, device.abi, marker),
+});
+
+const ios = (run: Run): Driver<IosDevice> => ({
+  async open(stack) {
+    const device = await iosDevice(stack, { xcrun: "xcrun", simulator: run.simulator });
+    return { device, about: `${device.name} (${device.udid}${device.booted ? ", booted" : ""})` };
+  },
+  build: (stack, app, device, marker) => buildIos(stack, app, device.udid, marker),
 });
 
 /**

@@ -4,8 +4,10 @@ import {
   copyFileSync,
   cpSync,
   createWriteStream,
+  existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -124,6 +126,42 @@ export async function buildAndroid(
 }
 
 /**
+ * Installs the app's locked dependencies, prebuilds it with its pods and runs a Release simulator build for the
+ * simulator `udid`'s architecture, then reads the embedded update for `register-build` from the built `.app`.
+ */
+export async function buildIos(
+  stack: Stack,
+  app: App,
+  udid: string,
+  marker: string,
+): Promise<Build> {
+  // CocoaPods refuses to run without a UTF-8 locale.
+  const step = await prebuild(stack, app, marker, { LANG: "en_US.UTF-8" });
+  const ios = join(app.dir, "ios");
+  await step("pod", ["install"], ios);
+  const workspace = only(ios, ".xcworkspace");
+  const derived = join(app.dir, "derived");
+  await step("xcodebuild", [
+    "build",
+    ...["-workspace", join(ios, workspace), "-scheme", workspace.slice(0, -".xcworkspace".length)],
+    ...["-configuration", "Release", "-destination", `id=${udid}`, "-derivedDataPath", derived],
+    ...["ONLY_ACTIVE_ARCH=YES", "CODE_SIGNING_ALLOWED=NO"],
+  ]);
+  const products = join(derived, "Build", "Products", "Release-iphonesimulator");
+  const artifact = join(products, only(products, ".app"));
+  // The manifest the client loads: EXUpdates.bundle's, beside the statically linked EXUpdates, else the .app's own.
+  const bundled = join(artifact, "EXUpdates.bundle", "app.manifest");
+  return embeddedBuild({
+    artifact,
+    marker,
+    manifest: existsSync(bundled) ? bundled : join(artifact, "app.manifest"),
+    bundle: join(artifact, "main.jsbundle"),
+    // Metro's copies: the image is not compiled into an asset catalog.
+    assetsDir: join(artifact, "assets"),
+  });
+}
+
+/**
  * Writes `marker`, installs the app's locked dependencies and prebuilds its native project for its platform; returns
  * a runner for the build's further steps, which log to the same file, with `env` added to the host's.
  */
@@ -142,6 +180,13 @@ async function prebuild(stack: Stack, app: App, marker: string, env: Record<stri
     "--no-install",
   ]);
   return step;
+}
+
+/** Returns the one entry of `dir` whose name ends with `suffix`. */
+function only(dir: string, suffix: string): string {
+  const found = readdirSync(dir).filter((name) => name.endsWith(suffix));
+  if (found.length !== 1) throw new Error(`${dir} holds ${found.length} ${suffix} entries, not 1`);
+  return found[0] ?? "";
 }
 
 /** Returns `build` with its embedded update ID, after checking that the update ships the app's one image. */
