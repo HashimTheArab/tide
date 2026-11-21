@@ -2,6 +2,30 @@
   "name": "@tide/cli",
   "version": "0.0.0",
   "private": true,
+  "description": "Tide CLI: export, sign and publish Expo updates, register builds for bundle diffing, roll back and inspect storage.",
+  "keywords": [
+    "expo",
+    "expo-updates",
+    "over-the-air",
+    "ota",
+    "react-native",
+    "cli",
+    "code-signing",
+    "bsdiff"
+  ],
+  "homepage": "https://github.com/HashimTheArab/tide#readme",
+  "bugs": {
+    "url": "https://github.com/HashimTheArab/tide/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HashimTheArab/tide.git",
+    "directory": "packages/cli"
+  },
+  "files": [
+    "src"
+  ],
   "type": "module",
   "bin": {
     "tide": "./src/main.ts"

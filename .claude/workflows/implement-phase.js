@@ -23,7 +23,6 @@ export const meta = {
 };
 
 // ---- Arguments
-const REPO = "/Users/hashim/dev/oss/tide";
 const a = args || {};
 const PHASE = String(a.phase || "").toUpperCase();
 if (!/^P\d{1,2}$/.test(PHASE)) throw new Error('args.phase must look like "P12"');
@@ -43,9 +42,6 @@ const DECISIONS = a.notes
   : "";
 
 // ---- Constants
-const OUT = `${REPO}/.agent-output/phases/${PHASE.toLowerCase()}`;
-const PLAN = `${OUT}/plan.json`;
-const GATE = `${OUT}/trusted/gate.mjs`; // copied from origin/main before every run, so a branch cannot grade itself
 const RISKY_PHASES = ["P2", "P3", "P4", "P5"];
 const SOL = '-m gpt-6.2-sol -c model_reasoning_effort="high"';
 const FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
@@ -322,6 +318,20 @@ ${
     fail(`${label}: no review in ${file}`);
   return c.findings;
 }
+
+// ---- Checkout
+// The main checkout of the repository the run starts in; worktrees resolve to it through the shared git dir.
+const top = await ok(
+  "find checkout",
+  'top=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") && test -f "$top/scripts/gate.mjs" && echo "$top"',
+);
+const REPO = top.trim().split("\n").findLast((l) => l.startsWith("/")) ?? "";
+// Interpolated unquoted into shell commands below, so it must be a plain path; the trim hides trailing spaces.
+if (!/^\/[A-Za-z0-9._/-]+$/.test(REPO))
+  throw new Error(`run implement-phase from a Tide checkout; got ${JSON.stringify(REPO)}`);
+const OUT = `${REPO}/.agent-output/phases/${PHASE.toLowerCase()}`;
+const PLAN = `${OUT}/plan.json`;
+const GATE = `${OUT}/trusted/gate.mjs`; // copied from origin/main before every run, so a branch cannot grade itself
 
 // ---- Plan
 phase("Plan");
