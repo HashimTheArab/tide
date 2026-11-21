@@ -181,6 +181,7 @@ async function boot(
       await exited;
     }
   });
+  const waiting = new AbortController();
   const ready = tool(
     adbPath,
     [
@@ -188,12 +189,13 @@ async function boot(
       'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done',
     ],
     BOOT_MS,
+    waiting.signal,
   );
-  const quit = exited.then(() => {
+  if (!(await Promise.race([ready.then(() => true), exited.then(() => false)]))) {
+    waiting.abort();
+    await ready.catch(() => undefined); // Reaps the wait, so nothing outlives the failed boot.
     throw new Error(`the emulator for ${name} exited while booting:\n${tail(logFile)}`);
-  });
-  quit.catch(() => undefined); // After a boot it rejects only once the emulator stops at close.
-  await Promise.race([ready, quit]);
+  }
   return serial;
 }
 
@@ -264,19 +266,40 @@ async function readReports(
   };
 }
 
-/** Runs a short tool command and returns its stdout; a non-zero exit or the deadline throws with its stderr. */
-function tool(file: string, args: readonly string[], ms = COMMAND_MS): Promise<string> {
+/**
+ * Runs a tool command and returns its stdout; a non-zero exit, the deadline or `signal` throws, once the command has
+ * exited.
+ */
+function tool(
+  file: string,
+  args: readonly string[],
+  ms = COMMAND_MS,
+  signal?: AbortSignal,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       file,
       args,
-      { encoding: "utf8", env: hostEnv(), timeout: ms, killSignal: "SIGKILL", maxBuffer: 1 << 26 },
+      {
+        encoding: "utf8",
+        env: hostEnv(),
+        timeout: ms,
+        signal,
+        killSignal: "SIGKILL",
+        maxBuffer: 1 << 26,
+      },
       (error, stdout, stderr) => {
         if (error === null) return resolve(stdout);
-        const why = error.killed
-          ? `took over ${ms} ms`
-          : stderr.trim() || stdout.trim() || error.message;
-        reject(new Error(`${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`));
+        const why = signal?.aborted
+          ? "was cancelled"
+          : error.killed
+            ? `took over ${ms} ms`
+            : stderr.trim() || stdout.trim() || error.message;
+        const failed = () =>
+          reject(new Error(`${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`));
+        // A cancel reports before the killed command exits.
+        if (child.exitCode === null && child.signalCode === null) child.once("exit", failed);
+        else failed();
       },
     );
   });

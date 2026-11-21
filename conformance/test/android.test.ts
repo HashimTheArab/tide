@@ -128,6 +128,21 @@ describe("the Android device driver", () => {
     expect(alive(pid)).toBe(false);
   });
 
+  test("fails at once, leaving no adb wait behind, when the emulator it boots exits before registering", async () => {
+    const fake = fakeSdk({}, ["Crash"]);
+    const failed = withStack((stack) =>
+      androidDevice(stack, { sdk: fake.sdk, serial: undefined, avd: undefined }),
+    );
+    await expect(failed).rejects.toThrow(
+      "exited while booting:\nx86_64 emulation currently requires hardware acceleration",
+    );
+    const wait = Number(readFileSync(join(fake.sdk, "wait.pid"), "utf8"));
+    onTestFinished(() => {
+      if (alive(wait)) process.kill(wait, "SIGKILL");
+    });
+    expect(alive(wait)).toBe(false);
+  });
+
   test("refuses an AVD that does not exist, and boots nothing", async () => {
     await withStack(async (stack) => {
       const fake = fakeSdk({});

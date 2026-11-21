@@ -1,5 +1,6 @@
 // Stands in for the SDK's adb (argv[2] "adb") and emulator (argv[2] "emulator") over a state file in argv[3], the
-// fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt.
+// fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt. The AVD
+// "Crash" exits while booting.
 import {
   appendFileSync,
   existsSync,
@@ -40,13 +41,22 @@ if (role === "emulator") {
   } else {
     const avd = args[args.indexOf("-avd") + 1] ?? "";
     const port = Number(args[args.indexOf("-port") + 1]);
-    // Holds the console port open, as a real emulator does, until `adb emu kill` ends it.
-    createServer().listen(port, "127.0.0.1", () => {
-      const state = read();
-      state.running[`emulator-${port}`] = { pid: process.pid, avd };
-      write(state);
-    });
-    process.once("SIGTERM", () => process.exit(0));
+    if (avd === "Crash") {
+      // Exits before registering, as an emulator without hardware acceleration does, once adb is waiting for it.
+      whenever(() => {
+        if (!existsSync(file("wait.pid"))) return false;
+        process.stdout.write("x86_64 emulation currently requires hardware acceleration\n");
+        process.exit(1);
+      });
+    } else {
+      // Holds the console port open, as a real emulator does, until `adb emu kill` ends it.
+      createServer().listen(port, "127.0.0.1", () => {
+        const state = read();
+        state.running[`emulator-${port}`] = { pid: process.pid, avd };
+        write(state);
+      });
+      process.once("SIGTERM", () => process.exit(0));
+    }
   }
 } else if (args[0] === "devices") {
   const lines = Object.keys(read().running).map((s) => `${s}\tdevice\n`);
@@ -56,6 +66,7 @@ if (role === "emulator") {
   const sub = rest.join(" ");
   const state = read();
   if (command === "wait-for-device") {
+    writeFileSync(file("wait.pid"), String(process.pid));
     whenever(() => serial in read().running);
   } else if (!(serial in state.running)) {
     process.stderr.write(`adb: device '${serial}' not found\n`);
