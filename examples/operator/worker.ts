@@ -1,1 +1,1 @@
-export { default } from "@tide/server/workers";
+export { default } from "@tide-ota/server/workers";

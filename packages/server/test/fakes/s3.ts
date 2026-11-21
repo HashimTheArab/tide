@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { MAX_REPLY_BYTES, signV4 } from "@tide/protocol";
+import { MAX_REPLY_BYTES, signV4 } from "@tide-ota/protocol";
 
 import type { Behaviour, FakeEvent } from "../shared/fake-s3.ts";
 import { BEHAVIOURS, FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";

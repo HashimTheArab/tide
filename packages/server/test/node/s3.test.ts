@@ -2,8 +2,8 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import type { S3Config } from "@tide/protocol";
-import { contentKey, sha256Base64Url } from "@tide/protocol";
+import type { S3Config } from "@tide-ota/protocol";
+import { contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import type { FakeS3 } from "../fakes/s3.ts";
 import type { Behaviour } from "../shared/fake-s3.ts";

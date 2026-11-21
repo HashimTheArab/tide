@@ -2,8 +2,8 @@ import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
-import type { BaseAsset } from "@tide/protocol";
-import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide/protocol";
+import type { BaseAsset } from "@tide-ota/protocol";
+import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide-ota/protocol";
 
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { publish } from "../src/publish.ts";

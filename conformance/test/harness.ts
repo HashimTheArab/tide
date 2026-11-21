@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { onTestFinished } from "vitest";
 
-import { contentKey, sha256Base64Url } from "@tide/protocol";
+import { contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import type { Platform } from "../src/options.ts";
 import type { Stack } from "../src/stack.ts";

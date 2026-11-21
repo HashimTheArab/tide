@@ -15,7 +15,7 @@ import {
   s3Target,
   sha256Base64Url,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Objects } from "./publish-fixture.ts";
 import { FAKE_S3 } from "../../server/test/fakes/s3.ts";

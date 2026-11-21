@@ -1,4 +1,4 @@
-import { MAX_REPLY_BYTES } from "@tide/protocol";
+import { MAX_REPLY_BYTES } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";

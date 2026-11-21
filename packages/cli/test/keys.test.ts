@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import type { Signer } from "@tide/protocol";
+import type { Signer } from "@tide-ota/protocol";
 import {
   certificatePublicKey,
   cryptoKeySigner,
@@ -12,7 +12,7 @@ import {
   encodeStoredReply,
   expoSignature,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { CertificateOptions } from "../../protocol/test/fixtures.ts";
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";

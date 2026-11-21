@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 
-import { NO_UPDATE_KEY, decodeStoredReply } from "@tide/protocol";
+import { NO_UPDATE_KEY, decodeStoredReply } from "@tide-ota/protocol";
 
 import type { Objects } from "./publish-fixture.ts";
 import { publish } from "../src/publish.ts";

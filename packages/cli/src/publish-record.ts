@@ -1,4 +1,4 @@
-import type { BaseRecord, JsonObject } from "@tide/protocol";
+import type { BaseRecord, JsonObject } from "@tide-ota/protocol";
 import {
   MAX_BASE_BYTES,
   MAX_REPLY_BYTES,
@@ -8,7 +8,7 @@ import {
   contentKey,
   decodeBaseRecord,
   replyKey,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { isKey } from "./bucket.ts";

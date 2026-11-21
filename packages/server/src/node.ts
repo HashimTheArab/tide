@@ -7,7 +7,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 
-import { diskPath, storageFromEnv } from "@tide/protocol";
+import { diskPath, storageFromEnv } from "@tide-ota/protocol";
 
 import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
-import { diskPath } from "@tide/protocol";
+import { diskPath } from "@tide-ota/protocol";
 
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";

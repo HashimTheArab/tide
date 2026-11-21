@@ -1,4 +1,4 @@
-import { diskPath } from "@tide/protocol";
+import { diskPath } from "@tide-ota/protocol";
 
 interface BucketObject {
   readonly bytes: Uint8Array<ArrayBuffer>;

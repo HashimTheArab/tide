@@ -1,5 +1,5 @@
 {
-  "name": "@tide/server",
+  "name": "@tide-ota/server",
   "version": "0.0.0",
   "private": true,
   "description": "Read-only Expo Updates server for Cloudflare Workers with R2, or Node with S3-compatible or disk storage.",
@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@hono/node-server": "catalog:",
-    "@tide/protocol": "workspace:*",
+    "@tide-ota/protocol": "workspace:*",
     "hono": "catalog:"
   },
   "devDependencies": {

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import type { Part } from "@tide/protocol";
+import type { Part } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   decodeStoredReply,
@@ -12,7 +12,7 @@ import {
   encodeStoredReply,
   parseMultipart,
   patchKey,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Report } from "../src/device.ts";
 import type { Platform, Scenario } from "../src/options.ts";

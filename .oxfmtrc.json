@@ -15,13 +15,13 @@
         "groupName": "type-tide",
         "selector": "type",
         "elementNamePattern": [
-          "@tide/**"
+          "@tide-ota/**"
         ]
       },
       {
         "groupName": "tide",
         "elementNamePattern": [
-          "@tide/**"
+          "@tide-ota/**"
         ]
       }
     ],

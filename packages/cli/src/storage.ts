@@ -1,4 +1,4 @@
-import { storageFromEnv } from "@tide/protocol";
+import { storageFromEnv } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";

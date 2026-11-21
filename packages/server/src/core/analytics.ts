@@ -1,5 +1,5 @@
-import type { StoredReply } from "@tide/protocol";
-import { UUID } from "@tide/protocol";
+import type { StoredReply } from "@tide-ota/protocol";
+import { UUID } from "@tide-ota/protocol";
 
 /** Stock clients list at most this many recently failed updates. */
 const MAX_FAILED_IDS = 5;

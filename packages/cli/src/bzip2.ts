@@ -1,4 +1,4 @@
-import { bzip2CrcStep } from "@tide/protocol";
+import { bzip2CrcStep } from "@tide-ota/protocol";
 
 /** libbzip2's `nblockMAX` at level 9: the most RLE1 bytes one block holds. */
 const BLOCK_MAX = 900_000 - 19;

@@ -1,4 +1,4 @@
-import { CONTENT_KEY, LEGACY_MAP_KEY, contentKey } from "@tide/protocol";
+import { CONTENT_KEY, LEGACY_MAP_KEY, contentKey } from "@tide-ota/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";

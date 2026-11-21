@@ -3,7 +3,7 @@ import { gzipSync } from "node:zlib";
 import fc from "fast-check";
 import { describe, expect, inject, test } from "vitest";
 
-import { applyBsdiff } from "@tide/protocol";
+import { applyBsdiff } from "@tide-ota/protocol";
 
 import type { BundleModule } from "./bundle-fixture.ts";
 import { MAX_BSDIFF_INPUT, diffBlocks, makeBsdiff } from "../src/bsdiff.ts";

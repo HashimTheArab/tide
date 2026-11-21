@@ -1,5 +1,5 @@
 {
-  "name": "@tide/protocol",
+  "name": "@tide-ota/protocol",
   "version": "0.0.0",
   "private": true,
   "description": "Expo Updates protocol v1 manifests, multipart bodies, signatures and bsdiff patches, on web-standard APIs.",

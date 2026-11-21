@@ -36,7 +36,7 @@
     "format": "oxfmt --check packages examples scripts conformance",
     "format:fix": "oxfmt packages examples scripts conformance",
     "test": "pnpm -r --workspace-concurrency=1 test",
-    "test:container": "pnpm -F @tide/cli test:container",
+    "test:container": "pnpm -F @tide-ota/cli test:container",
     "build": "pnpm -r build",
     "knip": "knip --no-config-hints",
     "docs:check": "node scripts/check-docs.mjs",

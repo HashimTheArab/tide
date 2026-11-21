@@ -11,8 +11,8 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Readable } from "node:stream";
 
-import { diskPath, patchKey } from "@tide/protocol";
-import { diskStore, startServer } from "@tide/server/node";
+import { diskPath, patchKey } from "@tide-ota/protocol";
+import { diskStore, startServer } from "@tide-ota/server/node";
 
 import { RSA_SHA256, certificate, pem } from "../../packages/protocol/test/fixtures.ts";
 

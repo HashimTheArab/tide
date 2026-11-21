@@ -8,7 +8,7 @@ import {
   decodeBaseRecord,
   decodeStoredReply,
   sha256Base64Url,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Manifest } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";

@@ -1,11 +1,11 @@
-import type { StoredReply } from "@tide/protocol";
+import type { StoredReply } from "@tide-ota/protocol";
 import {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   decodeStoredReply,
   parseExpoSignature,
   parseMultipart,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";

@@ -1,6 +1,12 @@
 import { gzipSync } from "node:zlib";
 
-import { ProtocolError, applyBsdiff, contentKey, patchKey, sha256Base64Url } from "@tide/protocol";
+import {
+  ProtocolError,
+  applyBsdiff,
+  contentKey,
+  patchKey,
+  sha256Base64Url,
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import type { Platform } from "./publish-record.ts";

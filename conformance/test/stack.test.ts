@@ -30,7 +30,7 @@ import {
   patchKey,
   replyKey,
   sha256Base64Url,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Recorded, Stack } from "../src/stack.ts";
 import { EXPORT_FILE } from "../../packages/cli/src/publish-export.ts";

@@ -4,7 +4,7 @@ import type { KeyObject } from "node:crypto";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { signV4 } from "@tide/protocol";
+import { signV4 } from "@tide-ota/protocol";
 
 /** The fake's KMS key and credentials; a request signed with any other secret gets InvalidSignatureException. */
 export const FAKE_KMS = {

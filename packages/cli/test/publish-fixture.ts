@@ -19,7 +19,7 @@ import {
   parseMultipart,
   sha256Base64Url,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";

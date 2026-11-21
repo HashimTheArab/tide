@@ -3,7 +3,7 @@ import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import type { BaseAsset } from "@tide/protocol";
+import type { BaseAsset } from "@tide-ota/protocol";
 import {
   MAX_BASE_BYTES,
   ProtocolError,
@@ -13,7 +13,7 @@ import {
   encodeBaseRecord,
   replyKey,
   sha256Base64Url,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import type { Env } from "./keys.ts";

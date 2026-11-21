@@ -1,5 +1,5 @@
 {
-  "name": "@tide/cli",
+  "name": "@tide-ota/cli",
   "version": "0.0.0",
   "private": true,
   "description": "Tide CLI: export, sign and publish Expo updates, register builds for bundle diffing, roll back and inspect storage.",
@@ -36,7 +36,7 @@
     "test:container": "vitest run --config vitest.container.config.ts"
   },
   "dependencies": {
-    "@tide/protocol": "workspace:*"
+    "@tide-ota/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

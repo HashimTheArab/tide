@@ -7,7 +7,7 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
-import { diskPath, encodeStoredReply } from "@tide/protocol";
+import { diskPath, encodeStoredReply } from "@tide-ota/protocol";
 
 import type { Objects } from "./publish-fixture.ts";
 import { startServer, storeFromEnv } from "../../server/src/node.ts";

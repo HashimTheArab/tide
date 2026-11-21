@@ -1,5 +1,5 @@
-import type { S3Config } from "@tide/protocol";
-import { S3Error, s3Absent, s3BodyProblem, s3Fetch, s3Target } from "@tide/protocol";
+import type { S3Config } from "@tide-ota/protocol";
+import { S3Error, s3Absent, s3BodyProblem, s3Fetch, s3Target } from "@tide-ota/protocol";
 
 import type { Store } from "./store.ts";
 
