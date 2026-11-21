@@ -53,9 +53,9 @@ for (const permission of permissions) {
   }
 }
 
-// README: opens with the package description as its tagline, links only to files that exist, and names only the CLI
-// commands and flags the CLI's own usage lists.
-const readme = readFileSync(join(root, "README.md"), "utf8");
+// README (or the file argv names): opens with the package description as its tagline, links only to files that exist,
+// and names only the CLI commands and flags the CLI's own usage lists, across shell line continuations.
+const readme = readFileSync(process.argv[2] ?? join(root, "README.md"), "utf8");
 const tagline =
   /** @type {{ description?: string }} */ (
     JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
@@ -80,7 +80,9 @@ for (const [, command, rest] of usage.matchAll(/^(?:usage:)?\s*tide ([a-z-]+)(.*
   flags.set(command, known);
 }
 if (flags.size === 0) errors.push("packages/cli/src/main.ts: printed no usage");
-for (const [, command, rest] of readme.matchAll(/\btide ([a-z][a-z-]*)([^\n`|]*)/g)) {
+for (const [, command, rest] of readme
+  .replaceAll(/\\\n\s*/g, " ")
+  .matchAll(/\btide ([a-z][a-z-]*)([^\n`|]*)/g)) {
   const known = flags.get(command);
   if (known === undefined) {
     errors.push(`README.md: names tide ${command}, which the CLI does not have`);

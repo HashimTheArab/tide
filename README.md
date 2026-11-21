@@ -60,13 +60,28 @@ docker build -f packages/server/Dockerfile -t tide .
 docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_DIR=/bucket tide
 ```
 
-For S3, set the five `TIDE_S3_*` variables, with read-only credentials, instead of `TIDE_DISK_DIR`. `GET /hc` is the health check.
-[docs/deploy.md](docs/deploy.md#the-container) lists every variable.
+For S3, set the five `TIDE_S3_*` variables, with read-only credentials, instead of `TIDE_DISK_DIR`. `GET /hc` is the
+health check. [docs/deploy.md](docs/deploy.md#the-container) lists every variable.
+
+The container serves manifests and launch bundles, not other assets such as images and fonts. Before the first
+publish, serve the bucket's `assets/` directory from a static origin (disk) or the bucket's public domain (S3), and
+publish with `TIDE_ASSET_URL` set to it and `TIDE_SERVER_URL` set to the container's public origin. Both are signed
+into manifests, so they must keep working ([docs/design.md](docs/design.md#other-routes)).
 
 ### The app
 
-A build finds its updates by URL, channel and runtime version, and trusts them by certificate. Generate a
-certificate and key with `npx expo-updates codesigning:generate` (keep the key out of the app's repository), then:
+A build finds its updates by URL, channel and runtime version, and trusts them by certificate. From the app's
+directory, write the certificate where the app config reads it and the private key outside the app's repository:
+
+```sh
+npx expo-updates codesigning:generate \
+  --certificate-output-directory keys \
+  --key-output-directory ../signing-key \
+  --certificate-validity-duration-years 10 \
+  --certificate-common-name "Example App"
+```
+
+Then set the app config:
 
 ```js
 {
@@ -122,12 +137,14 @@ tide register-build --platform android --runtime-version 1.0.0 \
 | --- | --- |
 | `tide status` | One line per pointer: channel, runtime, platform, kind, update ID and time |
 | `tide storage` | Read-only report of objects nothing references; deletes nothing |
-| `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Fetches the manifest as an installed build would, verifies its signature and the launch bundle's hash; needs no store credentials or key |
+| `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Fetches the manifest as an installed build would, verifies its signature and the launch bundle's hash |
 | `tide rollback --embedded --channel <name> --runtime-version <version>` | Serves a signed rollback to the bundle inside the build |
 | `tide rollback --to <updateId>` | Serves an earlier update again, as a new and newer publish |
 | `tide republish <updateId>...` | Serves stored updates again, optionally to another `--channel` or `--runtime-version` |
 
-On Workers, every manifest request also writes one Workers Analytics Engine data point. Exit codes and every rule
+`tide probe` needs no store credentials or signing key, only the builds' public pins: `TIDE_BUILD_KEYID` and one of
+`TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE` ([setup](docs/design.md#tide-probe)). The other commands
+read the bucket, and `rollback` and `republish` also sign. On Workers, every manifest request also writes one Workers Analytics Engine data point. Exit codes and every rule
 are in [docs/design.md](docs/design.md#cli).
 
 ## Compared with other servers
