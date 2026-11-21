@@ -182,6 +182,16 @@ describe("diskStore", () => {
   });
 });
 
+test("a hostname binds the entry to that address only", async () => {
+  const server = await startServer({
+    port: 0,
+    hostname: "127.0.0.1",
+    store: diskStore(tempRoot()),
+  });
+  cleanup.push(() => new Promise((resolve) => server.close(resolve)));
+  expect((server.address() as AddressInfo).address).toBe("127.0.0.1");
+});
+
 describe("app ID", () => {
   test("the entry rejects a mismatched expo-app-id when TIDE_APP_ID is set", async () => {
     const root = tempRoot();
