@@ -54,7 +54,7 @@ interface Driver {
   open(stack: Stack): Promise<{
     device: Device;
     about: string;
-    build(app: App, marker: string): Promise<Build>;
+    build: (app: App, marker: string) => Promise<Build>;
   }>;
 }
 
@@ -113,7 +113,7 @@ async function conform(run: Run, driver: Driver): Promise<number> {
     } catch (e) {
       return notRun(run.versions, e);
     }
-    const { device, about, build: buildApp } = opened;
+    const { device, about, build } = opened;
     say(`using ${about}`);
     let seeded = false;
     for (const [i, version] of run.versions.entries()) {
@@ -122,8 +122,7 @@ async function conform(run: Run, driver: Driver): Promise<number> {
         const app = materialise(stack, version, run.platform);
         say(`building the expo-updates ${version} release ${run.platform} app`);
         const marker = `embedded-${version}-${randomUUID().slice(0, 8)}`;
-        const build = await buildApp(app, marker);
-        target = { stack, device, cli, app, build };
+        target = { stack, device, cli, app, build: await build(app, marker) };
       } catch (e) {
         notRun([version], e);
         continue;
