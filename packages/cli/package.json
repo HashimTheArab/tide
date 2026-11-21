@@ -13,7 +13,7 @@
     "code-signing",
     "bsdiff"
   ],
-  "homepage": "https://github.com/HashimTheArab/tide/tree/main/packages/cli",
+  "homepage": "https://github.com/HashimTheArab/tide#readme",
   "bugs": {
     "url": "https://github.com/HashimTheArab/tide/issues"
   },

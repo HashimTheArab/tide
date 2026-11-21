@@ -14,7 +14,8 @@ same checks.
 
 ## Making a change
 
-Requires Node 26, pnpm 12 and [Betterleaks](https://github.com/betterleaks/betterleaks) for the secrets check.
+Requires the Node and pnpm versions in `engines` in [package.json](package.json), and
+[Betterleaks](https://github.com/betterleaks/betterleaks) for the secrets check.
 
 ```sh
 pnpm install
@@ -22,8 +23,7 @@ pnpm format:fix  # oxfmt formats and orders imports
 pnpm gate        # every check CI runs, as JSON; commit first, it refuses a dirty tree
 ```
 
-A pull request is ready when `pnpm gate` reports `"allChecksPassed": true`. Behaviour changes and bug fixes come with
-a test, and a bug fix with a test that fails on the old code. `pnpm test:container` (needs Docker) and
+A pull request is ready when `pnpm gate` reports `"allChecksPassed": true`. `pnpm test:container` (needs Docker) and
 `pnpm conformance` are not part of the gate; run them when you change the image or what clients see.
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE).

@@ -1,6 +1,6 @@
 # Security
 
-Tide delivers code to users' devices, so we treat security reports as the most important issues we get.
+Tide delivers code to users' devices.
 
 ## Reporting a vulnerability
 
