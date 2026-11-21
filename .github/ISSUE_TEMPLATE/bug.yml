@@ -1,0 +1,16 @@
+name: Bug
+description: Tide does something wrong.
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got. Remove keys, tokens and bucket names.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Setup
+      description: Tide commit, runtime (Workers or Node), storage, expo-updates version and platform.
+    validations:
+      required: true

@@ -37,6 +37,7 @@ export interface Harness {
 }
 
 const IMMUTABLE = "public, max-age=31536000, immutable";
+const BUNDLE_VARY = "A-IM, Expo-Current-Update-ID, Expo-Requested-Update-ID";
 const EMPTY_HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
 
 /** Returns every byte value followed by `label`, so each case stores distinct bytes under its own hash. */
@@ -143,6 +144,8 @@ export function serverCases(harness: Harness): void {
       expect(body).toEqual(method === "GET" ? a.bytes : new Uint8Array());
       expect(res.headers.get("content-type")).toBe("application/javascript");
       expect(res.headers.get("cache-control")).toBe(IMMUTABLE);
+      // A shared cache must not answer a later patch request with this full bundle.
+      expect(res.headers.get("vary")).toBe(BUNDLE_VARY);
       expect(res.headers.get("content-length")).toBe(String(a.bytes.length));
     }
   });
@@ -275,7 +278,7 @@ export function bundleCases(harness: Harness): void {
     expect(res.headers.get("im")).toBe("bsdiff");
     expect(res.headers.get("expo-base-update-id")).toBe(current);
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    expect(res.headers.get("vary")).toBe("A-IM, Expo-Current-Update-ID");
+    expect(res.headers.get("vary")).toBe(BUNDLE_VARY);
     expect(res.headers.get("content-type")).toBe("application/octet-stream");
     expect(res.headers.get("content-length")).toBe(String(p.patch.length));
   };
@@ -290,8 +293,9 @@ export function bundleCases(harness: Harness): void {
     expect(body).toEqual(head ? new Uint8Array() : p.target);
     expect(res.headers.get("content-type")).toBe("application/javascript");
     expect(res.headers.get("cache-control")).toBe(IMMUTABLE);
+    expect(res.headers.get("vary")).toBe(BUNDLE_VARY);
     expect(res.headers.get("content-length")).toBe(String(p.target.length));
-    for (const name of ["im", "expo-base-update-id", "vary"]) {
+    for (const name of ["im", "expo-base-update-id"]) {
       expect([name, res.headers.get(name)]).toEqual([name, null]);
     }
   };

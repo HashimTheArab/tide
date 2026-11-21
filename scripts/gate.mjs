@@ -1,6 +1,7 @@
 // Prints the delivery loop's gate evidence as JSON: check exit codes, test counts, diff risk and tampering signals.
 // The loop runs a copy taken from origin/main at the start of a run, so a branch cannot grade itself.
 // Usage: node gate.mjs [--base origin/main] [--diff-only] [--frozen a.ts,b.ts] [--out file.json]
+// Exits 1 when a check fails, after writing the report; a gate that throws writes none.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -213,3 +214,4 @@ const report = {
 const json = JSON.stringify(report, null, 2);
 if (out) writeFileSync(out, json);
 process.stdout.write(`${json}\n`);
+if (report.allChecksPassed === false) process.exitCode = 1;

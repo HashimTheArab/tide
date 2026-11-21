@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-20
+updated: 2026-11-21
 ---
 
 # Design
@@ -201,20 +201,21 @@ with no body and cancels every stream it holds.
   requested hash naming another bundle), the other read is cancelled rather than awaited.
 - A patch found: 226 with its bytes, `content-type: application/octet-stream`, `im: bsdiff`,
   `expo-base-update-id: <current ID, lowercase>`, `cache-control: private, no-store`, `vary: A-IM,
-  Expo-Current-Update-ID`. The bundle read's body is cancelled.
-- Anything else is 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`: no or
-  declined `A-IM`, a missing or malformed ID, an unknown base, a requested base naming another hash, no patch, and,
-  logged, a base record that is oversized, fails to decode or names another ID, a store error on a base or patch, or
-  the lookup passing its deadline. The full bundle is always correct and the client hashes it; a 503 would block
-  every client on a broken base until the bucket is repaired.
+  Expo-Current-Update-ID, Expo-Requested-Update-ID`. The bundle read's body is cancelled.
+- Anything else is 200, the full bundle as `application/javascript`, `public, max-age=31536000, immutable`, with
+  the same `vary`: no or declined `A-IM`, a missing or malformed ID, an unknown base, a requested base naming
+  another hash, no patch, and, logged, a base record that is oversized, fails to decode or names another ID, a store
+  error on a base or patch, or the lookup passing its deadline. The full bundle is always correct and the client
+  hashes it; a 503 would block every client on a broken base until the bucket is repaired.
 - The lookup has its own 2 s deadline, so the fallback stays well inside the Android client's 10 s read timeout. The
   deadline covers the base reads and the patch's headers only, never a 226 body already on the wire.
 - The server checks nothing it serves: not the patch bytes, the hashes, or that the bases share a runtime and
   platform (the CLI applied and hash-checked every patch before upload).
 - Patches are never shared-cached: a cached patch under the plain URL would break the client's full-file retry. The
-  200 carries no `Vary`, so a shared cache could answer a later `A-IM` request with the full bundle, losing only the
-  saving. Workers Cache (opt-in, unset in Tide's `wrangler.jsonc`) answers before the Worker runs; a deployment that
-  enables it must let `/bundles/` requests carrying `A-IM` reach the Worker.
+  200's `Vary` keeps a shared cache from answering a later `A-IM` request with a full bundle cached for a plain one;
+  a cache that ignores `Vary` would do so, losing only the saving. Workers Cache (opt-in, unset in Tide's
+  `wrangler.jsonc`) answers before the Worker runs; a deployment that enables it must let `/bundles/` requests
+  carrying `A-IM` reach the Worker.
 
 ### Other routes
 

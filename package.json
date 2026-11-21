@@ -1,6 +1,26 @@
 {
   "name": "tide-monorepo",
   "private": true,
+  "description": "A serverless Expo Updates server for Cloudflare Workers or any container.",
+  "keywords": [
+    "expo",
+    "expo-updates",
+    "over-the-air",
+    "ota",
+    "react-native",
+    "cloudflare-workers",
+    "code-signing",
+    "bsdiff"
+  ],
+  "homepage": "https://github.com/HashimTheArab/tide#readme",
+  "bugs": {
+    "url": "https://github.com/HashimTheArab/tide/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HashimTheArab/tide.git"
+  },
   "type": "module",
   "engines": {
     "node": "^26.13.1",
