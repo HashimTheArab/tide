@@ -23,6 +23,12 @@
         "test/fake-expo.ts",
         "test/open-writer.ts"
       ]
+    },
+    "conformance": {
+      "entry": [
+        "src/main.ts",
+        "test/hold-stack.ts"
+      ]
     }
   }
 }

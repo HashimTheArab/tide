@@ -224,6 +224,25 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  conformance:
+    dependencies:
+      '@tide/protocol':
+        specifier: workspace:*
+        version: link:../packages/protocol
+      '@tide/server':
+        specifier: workspace:*
+        version: link:../packages/server
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
+
   examples/operator:
     dependencies:
       '@tide/server':
