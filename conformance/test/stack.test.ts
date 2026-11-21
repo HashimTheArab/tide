@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo, Socket } from "node:net";
 import { describe, expect, onTestFinished, test } from "vitest";
 
+import type { Part } from "@tide/protocol";
 import {
   baseKey,
   codeSigningCertificate,
@@ -27,15 +28,19 @@ import {
   NO_UPDATE_KEY,
   decodeStoredReply,
   diskPath,
+  encodeMultipart,
   encodeStoredReply,
+  parseMultipart,
   patchKey,
   replyKey,
   sha256Base64Url,
 } from "@tide/protocol";
 
+import type { AndroidDevice, Report } from "../src/android.ts";
+import type { Target } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
-import { expectNoUpdate } from "../src/scenarios.ts";
+import { STEPS } from "../src/scenarios.ts";
 import { tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
 
@@ -509,11 +514,24 @@ describe("the harness stack shuts down", () => {
 });
 
 describe("the embedded scenario", () => {
-  test("accepts a no-update answer only when it carries a directive signed for the run", async () => {
-    await withStack(async (stack) => {
-      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
-      const check = async () => {
-        const before = stack.responses.length;
+  /** A target whose app, on each launch, makes the signed check a client makes and reports what the app logs. */
+  function target(stack: Stack): Target {
+    const build = {
+      apk: "app.apk",
+      marker: "m1",
+      embeddedUpdateId: "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f",
+      manifest: "app.manifest",
+      bundle: "index.android.bundle",
+      resDir: "res",
+    };
+    let reports: Report[] = [];
+    const device: AndroidDevice = {
+      serial: "emulator-5554",
+      abi: "x86_64",
+      booted: false,
+      reverse: () => Promise.resolve(),
+      install: () => Promise.resolve(),
+      async launch() {
         const res = await fetch(`${stack.serverUrl}/manifest`, {
           headers: {
             "expo-protocol-version": "1",
@@ -524,22 +542,77 @@ describe("the embedded scenario", () => {
           },
         });
         await res.arrayBuffer();
-        return stack.responses.slice(before);
-      };
-      await expectNoUpdate(stack, await check(), "first");
+        reports = [
+          {
+            event: "running",
+            marker: build.marker,
+            updateId: build.embeddedUpdateId,
+            embedded: true,
+          },
+          { event: "check", marker: build.marker, result: "none" },
+        ];
+      },
+      forceStop: () => Promise.resolve(),
+      nextReport: () => {
+        const [next, ...rest] = reports;
+        reports = rest;
+        return next === undefined ? Promise.reject(new Error("no report")) : Promise.resolve(next);
+      },
+      drain: () => undefined,
+    };
+    const app = {
+      version: "55",
+      dir: stack.dir,
+      packageName: "dev.tide.conformance",
+      channel: MAIN.channel,
+    } as const;
+    return { stack, device, app, build };
+  }
 
-      // The same boundary with no parts: a client finds no directive, so nothing to verify, and reports no update.
-      const path = join(stack.storeDir, diskPath(NO_UPDATE_KEY));
-      const { boundary } = decodeStoredReply(readFileSync(path));
-      const body = new Uint8Array(Buffer.from(`--${boundary}--\r\n`));
-      writeFileSync(path, encodeStoredReply({ kind: "noUpdateAvailable", boundary, body }));
-      const seen = await check();
-      expect(seen.map((r) => [r.path, r.status, r.boundary])).toEqual([
-        ["/manifest", 200, boundary],
-      ]);
-      await expect(expectNoUpdate(stack, seen, "second")).rejects.toThrow(
-        `got ${NO_UPDATE_KEY}, which is not a noUpdateAvailable directive signed for the run`,
+  /** Rewrites the stored no-update reply's body, keeping its boundary. */
+  function rewriteNoUpdate(
+    stack: Stack,
+    change: (parts: Part[], boundary: string) => Uint8Array<ArrayBuffer>,
+  ) {
+    const path = join(stack.storeDir, diskPath(NO_UPDATE_KEY));
+    const { boundary, body } = decodeStoredReply(readFileSync(path));
+    const next = change(parseMultipart(body, boundary), boundary);
+    writeFileSync(path, encodeStoredReply({ kind: "noUpdateAvailable", boundary, body: next }));
+  }
+
+  const unsigned = `got ${NO_UPDATE_KEY}, which is not a noUpdateAvailable directive signed for the run`;
+
+  test("passes when both launches get the stored signed no-update reply", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      await expect(STEPS.embedded?.(target(stack))).resolves.toContain(
+        `accepted the signed ${NO_UPDATE_KEY}`,
       );
+    });
+  });
+
+  test("fails when the reply has the stored boundary but no directive to verify", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      rewriteNoUpdate(stack, (_, boundary) => new Uint8Array(Buffer.from(`--${boundary}--\r\n`)));
+      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
+    });
+  });
+
+  test("fails when the directive's signature does not verify under the run's certificate", async () => {
+    await withStack(async (stack) => {
+      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
+      rewriteNoUpdate(stack, ([part], boundary) => {
+        const signature = (part?.signature ?? "").replace(
+          /sig="(.)/,
+          (_, c: string) => `sig="${c === "A" ? "B" : "A"}`,
+        );
+        return encodeMultipart(
+          [{ name: "directive", body: part?.body ?? new Uint8Array(), signature }],
+          boundary,
+        ).body;
+      });
+      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
     });
   });
 });

@@ -1,14 +1,7 @@
 // Stands in for the SDK's adb (argv[2] "adb") and emulator (argv[2] "emulator") over a state file in argv[3], the
 // fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt. The AVD
 // "Crash" exits while booting.
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  renameSync,
-  watch,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
@@ -21,18 +14,20 @@ interface State {
 const [role = "", sdk = "", ...args] = process.argv.slice(2);
 const file = (name: string) => join(sdk, name);
 const read = (): State => JSON.parse(readFileSync(file("state.json"), "utf8")) as State;
-const write = (state: State) => {
-  writeFileSync(file("state.json.tmp"), JSON.stringify(state));
-  renameSync(file("state.json.tmp"), file("state.json"));
+/** Replaces `name` in one step, so a reader never sees it half-written. */
+const publish = (name: string, text: string) => {
+  writeFileSync(file(`${name}.tmp`), text);
+  renameSync(file(`${name}.tmp`), file(name));
 };
+const write = (state: State) => publish("state.json", JSON.stringify(state));
 appendFileSync(file("calls.log"), `${JSON.stringify([role, ...args])}\n`);
 
-/** Runs `check` now and on every change in the SDK dir until it returns true. */
+/** Runs `check` now and every 20 ms until it returns true; polling has no gap for a change to slip through. */
 function whenever(check: () => boolean) {
   if (check()) return;
-  const watcher = watch(sdk, () => {
-    if (check()) watcher.close();
-  });
+  const timer = setInterval(() => {
+    if (check()) clearInterval(timer);
+  }, 20);
 }
 
 if (role === "emulator") {
@@ -66,7 +61,8 @@ if (role === "emulator") {
   const sub = rest.join(" ");
   const state = read();
   if (command === "wait-for-device") {
-    writeFileSync(file("wait.pid"), String(process.pid));
+    // Its own file: a write to state.json here could overwrite the booting emulator's registration.
+    publish("wait.pid", String(process.pid));
     whenever(() => serial in read().running);
   } else if (!(serial in state.running)) {
     process.stderr.write(`adb: device '${serial}' not found\n`);

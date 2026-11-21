@@ -138,8 +138,9 @@ describe("the Android device driver", () => {
     );
     const wait = Number(readFileSync(join(fake.sdk, "wait.pid"), "utf8"));
     onTestFinished(() => {
-      if (alive(wait)) process.kill(wait, "SIGKILL");
+      if (wait > 0 && alive(wait)) process.kill(wait, "SIGKILL");
     });
+    expect(Number.isInteger(wait) && wait > 0).toBe(true);
     expect(alive(wait)).toBe(false);
   });
 

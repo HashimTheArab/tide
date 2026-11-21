@@ -60,7 +60,7 @@ async function embedded({ stack, device, app, build }: Target): Promise<string> 
  * reply's exact bytes, a noUpdateAvailable directive that verifies under the run's certificate. Any other body, such
  * as one with no parts, could pass a client's check with nothing to verify.
  */
-export async function expectNoUpdate(
+async function expectNoUpdate(
   stack: Stack,
   seen: Stack["responses"],
   launch: string,
