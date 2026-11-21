@@ -238,12 +238,13 @@ async function gate(tag) {
     `cd ${WT} && git fetch -q origin && git show origin/main:scripts/gate.mjs > ${GATE} && node ${GATE} --base origin/main --out ${out}`,
     { clear: [out] },
   );
-  if (run.exitCode !== 0)
+  // A failing check exits 1 with a report; only a gate that did not finish leaves none.
+  const r = await sh(`read gate ${tag}`, `node -e ${q(SUMMARY)} ${out}`);
+  if (r.exitCode !== 0)
     return {
       passed: false,
       problem: `The gate did not finish (exit ${run.exitCode}). Its log ends:\n${run.output}`,
     };
-  const r = await sh(`read gate ${tag}`, `node -e ${q(SUMMARY)} ${out}`);
   let g;
   try {
     // The step runner sometimes appends a line such as "exit=0"; the summary is the last JSON line.
