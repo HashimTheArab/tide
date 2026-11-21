@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import {
   chmodSync,
   cpSync,
@@ -11,15 +13,15 @@ import {
 } from "node:fs";
 import { request } from "node:http";
 import { join, relative } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 
 import { codeSigningCertificate, contentKey, patchKey, sha256Base64Url } from "@tide/protocol";
 
 import type { Stack } from "../src/stack.ts";
-import { startStack, tamperPatch, withStack } from "../src/stack.ts";
+import { tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
-import { child } from "./child.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("../../packages/cli/test/fake-expo.ts", import.meta.url));
 const HOLD = fileURLToPath(new URL("hold-stack.ts", import.meta.url));
@@ -106,10 +108,28 @@ function get(url: string, headers: Record<string, string> = {}) {
   });
 }
 
-/** Fails unless nothing listens at any of `urls` and `dir` is gone. */
-async function expectClosed(dir: string, urls: readonly string[]) {
+/** Starts a Node child running `script`; `line()` resolves its next stdout line. It is killed when the test ends. */
+function child(script: string) {
+  const proc = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "inherit"] });
+  onTestFinished(() => {
+    proc.kill("SIGKILL");
+  });
+  const lines = createInterface({ input: proc.stdout })[Symbol.asyncIterator]();
+  return {
+    proc,
+    async line(): Promise<string> {
+      const { value, done } = await lines.next();
+      if (done === true) throw new Error(`${script} ended before writing a line`);
+      return value;
+    },
+    exited: once(proc, "exit"),
+  };
+}
+
+/** Fails unless nothing listens at `url` and `dir` is gone. */
+async function expectClosed({ dir, url }: { dir: string; url: string }) {
   expect(existsSync(dir)).toBe(false);
-  for (const url of urls) await expect(fetch(`${url}/hc`)).rejects.toThrow("fetch failed");
+  await expect(fetch(`${url}/hc`)).rejects.toThrow("fetch failed");
 }
 
 describe("the harness stack", () => {
@@ -144,25 +164,31 @@ describe("the harness stack", () => {
           expect(file.startsWith(`${dir}/`)).toBe(true);
         }
         expect(statSync(identity.keyFile).mode & 0o777).toBe(0o600);
-        expect(readFileSync(identity.certificateFile, "utf8")).toBe(identity.certificate);
-        await codeSigningCertificate(identity.certificate, new Date());
-        pems.push(identity.certificate);
+        const pem = readFileSync(identity.certificateFile, "utf8");
+        await codeSigningCertificate(pem, new Date());
+        pems.push(pem);
       });
     }
     expect(pems[0]).not.toBe(pems[1]);
   });
 
-  test("the asset origin serves stored assets by content key and nothing else", async () => {
+  test("serves and records stored assets by content key from the store", async () => {
     await withStack(async (stack) => {
       await tideCli(stack).publish(await exported(stack), "main");
       const dir = join(stack.dir, "export", "dist", "assets");
       const [name = ""] = readdirSync(dir);
       const bytes = readFileSync(join(dir, name));
-      const res = await fetch(`${stack.assetUrl}/assets/${await hexOf(bytes)}`);
+      const path = `/assets/${await hexOf(bytes)}`;
+      const missing = `/assets/${"0".repeat(64)}`;
+      const before = stack.responses.length;
+      const res = await fetch(`${stack.serverUrl}${path}`);
       expect(res.status).toBe(200);
       expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true);
-      expect((await fetch(`${stack.assetUrl}/assets/${"0".repeat(64)}`)).status).toBe(404);
-      expect((await fetch(`${stack.assetUrl}/manifest`)).status).toBe(404);
+      expect((await fetch(`${stack.serverUrl}${missing}`)).status).toBe(404);
+      expect(stack.responses.slice(before)).toEqual([
+        { path, status: 200, im: undefined, baseUpdateId: undefined },
+        { path: missing, status: 404, im: undefined, baseUpdateId: undefined },
+      ]);
     });
   });
 
@@ -254,32 +280,31 @@ describe("the harness stack", () => {
 });
 
 describe("the harness stack shuts down", () => {
-  const where = (s: Stack) => ({ dir: s.dir, urls: [s.serverUrl, s.assetUrl] });
+  const where = (s: Stack) => ({ dir: s.dir, url: s.serverUrl });
 
   test("on success", async () => {
-    const seen = await withStack((stack) => Promise.resolve(where(stack)));
-    await expectClosed(seen.dir, seen.urls);
+    await expectClosed(await withStack((stack) => Promise.resolve(where(stack))));
   });
 
   test("on failure, passing the failure on", async () => {
-    let seen = { dir: "", urls: [] as string[] };
+    let seen = { dir: "", url: "" };
     await expect(
       withStack((stack) => {
         seen = where(stack);
         return Promise.reject(new Error("scenario failed"));
       }),
     ).rejects.toThrow("scenario failed");
-    await expectClosed(seen.dir, seen.urls);
+    await expectClosed(seen);
   });
 
   test("on close, ending a CLI command still running", async () => {
-    const stack = await startStack();
-    const ended = expect(tideCli(stack).probe(ANDROID)).rejects.toThrow(
-      "The operation was aborted",
-    );
-    await stack.close();
+    let ended: Promise<void> | undefined;
+    const seen = await withStack((stack) => {
+      ended = expect(tideCli(stack).probe(ANDROID)).rejects.toThrow("The operation was aborted");
+      return Promise.resolve(where(stack));
+    });
     await ended;
-    await expectClosed(stack.dir, [stack.serverUrl, stack.assetUrl]);
+    await expectClosed(seen);
   });
 
   test.each([
@@ -287,11 +312,11 @@ describe("the harness stack shuts down", () => {
     ["SIGTERM", 143],
   ] as const)("on %s, exiting %i", async (signal, code) => {
     const held = child(HOLD);
-    const seen = JSON.parse(await held.line()) as { dir: string; urls: string[] };
+    const seen = JSON.parse(await held.line()) as { dir: string; url: string };
     expect(existsSync(seen.dir)).toBe(true);
-    expect((await fetch(`${seen.urls[0]}/hc`)).status).toBe(200);
+    expect((await fetch(`${seen.url}/hc`)).status).toBe(200);
     held.proc.kill(signal);
     expect(await held.exited).toEqual([code, null]);
-    await expectClosed(seen.dir, seen.urls);
+    await expectClosed(seen);
   });
 });

@@ -3,13 +3,10 @@ import { parseArgs } from "node:util";
 const PLATFORMS = ["android", "ios"] as const;
 export type Platform = (typeof PLATFORMS)[number];
 
-/**
- * The expo-updates lines under test: the oldest with bsdiff support and the latest stable. `embeddedPatches` is the
- * first release that applies a patch against the bundle embedded in the binary.
- */
+/** The expo-updates lines under test: the oldest with bsdiff support and the latest stable. */
 export const EXPO_VERSIONS = {
-  "55": { bsdiff: "opt-in via enableBsdiffPatchSupport", embeddedPatches: "55.0.31" },
-  "58": { bsdiff: "on by default", embeddedPatches: "58.0.1" },
+  "55": "bsdiff opt-in via enableBsdiffPatchSupport; embedded-base patches from 55.0.31",
+  "58": "bsdiff on by default; embedded-base patches from 58.0.1",
 } as const;
 type ExpoVersion = keyof typeof EXPO_VERSIONS;
 
@@ -24,16 +21,10 @@ export const SCENARIOS = {
 } as const;
 type Scenario = keyof typeof SCENARIOS;
 
-const list = (table: object) =>
+const list = (table: Readonly<Record<string, string>>) =>
   Object.entries(table)
-    .map(([name, about]) => `  ${name.padEnd(16)}${String(about)}`)
+    .map(([name, about]) => `  ${name.padEnd(16)}${about}`)
     .join("\n");
-const versions = Object.fromEntries(
-  Object.entries(EXPO_VERSIONS).map(
-    ([v, { bsdiff, embeddedPatches }]) =>
-      [v, `bsdiff ${bsdiff}; embedded-base patches from ${embeddedPatches}`] as const,
-  ),
-);
 
 export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]...
 
@@ -42,7 +33,7 @@ Runs stock expo-updates release apps against a local Tide. Every version and sce
 Platforms: ${PLATFORMS.join(", ")}
 
 expo-updates versions (--expo):
-${list(versions)}
+${list(EXPO_VERSIONS)}
 
 Scenarios (--scenario):
 ${list(SCENARIOS)}`;

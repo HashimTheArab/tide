@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Agent, createServer, request } from "node:http";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Server } from "node:http";
+import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { diskPath, patchKey } from "@tide/protocol";
@@ -21,7 +21,6 @@ interface Identity {
   readonly keyId: string;
   readonly keyFile: string; // PKCS#8 PEM, mode 0600
   readonly certificateFile: string;
-  readonly certificate: string;
 }
 
 /** One reply the local Tide sent, with the headers the scenarios assert on. */
@@ -35,8 +34,7 @@ interface Recorded {
 export interface Stack {
   readonly dir: string; // Removed by `close`.
   readonly storeDir: string; // TIDE_DISK_DIR
-  readonly serverUrl: string; // TIDE_SERVER_URL: the Node entry, behind the recorder.
-  readonly assetUrl: string; // TIDE_ASSET_URL: a static origin over the store's assets/.
+  readonly serverUrl: string; // TIDE_SERVER_URL and TIDE_ASSET_URL: the recorder.
   readonly identity: Identity;
   readonly responses: readonly Recorded[]; // In the order their headers were sent.
   readonly signal: AbortSignal; // Aborted by `close`; a child spawned with it is killed then.
@@ -45,7 +43,7 @@ export interface Stack {
 }
 
 /** Starts a stack; one that fails to start has already removed what it made. */
-export async function startStack(): Promise<Stack> {
+async function startStack(): Promise<Stack> {
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "tide-conformance-")));
   const controller = new AbortController();
   const steps: Step[] = [() => rm(dir, { recursive: true, force: true })];
@@ -72,18 +70,8 @@ export async function startStack(): Promise<Stack> {
     const responses: Recorded[] = [];
     const agent = new Agent();
     steps.push(() => agent.destroy());
-    const serverUrl = await serve(recorder(port(tide), agent, responses), steps);
-    const assetUrl = await serve(assetOrigin(storeDir), steps);
-    return {
-      dir,
-      storeDir,
-      serverUrl,
-      assetUrl,
-      identity,
-      responses,
-      signal: controller.signal,
-      close,
-    };
+    const serverUrl = await serve(recorder(port(tide), agent, storeDir, responses), steps);
+    return { dir, storeDir, serverUrl, identity, responses, signal: controller.signal, close };
   } catch (e) {
     await close();
     throw e;
@@ -152,53 +140,54 @@ async function writeIdentity(dir: string): Promise<Identity> {
   const certificateFile = join(dir, "certificate.pem");
   await writeFile(keyFile, pem(pkcs8, "PRIVATE KEY"), { mode: 0o600, flag: "wx" });
   await writeFile(certificateFile, cert, { flag: "wx" });
-  return { keyId: "conformance", keyFile, certificateFile, certificate: cert };
+  return { keyId: "conformance", keyFile, certificateFile };
 }
 
-/** A proxy to the Tide on `upstream` that records each reply before passing it on unchanged. */
-function recorder(upstream: number, agent: Agent, responses: Recorded[]): Server {
+/**
+ * Records each reply before sending it. Serves GET and HEAD of `assets/<hex>` from the disk store, as an operator's
+ * public bucket domain does, and passes everything else to the Tide on `upstream` unchanged.
+ */
+function recorder(upstream: number, agent: Agent, storeDir: string, responses: Recorded[]): Server {
   return createServer((req, res) => {
     const path = req.url ?? "";
+    const record = (status: number, headers: IncomingHttpHeaders = {}) =>
+      responses.push({
+        path,
+        status,
+        im: headers.im as string | undefined,
+        baseUpdateId: headers["expo-base-update-id"] as string | undefined,
+      });
+    const hex = /^\/assets\/([0-9a-f]{64})$/.exec(path)?.[1];
+    if (hex !== undefined && (req.method === "GET" || req.method === "HEAD")) {
+      readFile(join(storeDir, diskPath(`assets/${hex}`))).then(
+        (bytes) => {
+          record(200);
+          // The disk store keeps no type; the client takes each asset's type from its manifest.
+          res.writeHead(200, {
+            "content-type": "application/octet-stream",
+            "content-length": bytes.length,
+            "cache-control": "public, max-age=31536000, immutable",
+          });
+          res.end(req.method === "HEAD" ? undefined : bytes);
+        },
+        () => {
+          record(404);
+          res.writeHead(404).end();
+        },
+      );
+      return;
+    }
     const forward = request(
       { host: LOOPBACK, port: upstream, method: req.method, path, headers: req.headers, agent },
       (reply) => {
         const status = reply.statusCode ?? 0;
-        const header = (name: string) => reply.headers[name] as string | undefined;
-        responses.push({
-          path,
-          status,
-          im: header("im"),
-          baseUpdateId: header("expo-base-update-id"),
-        });
+        record(status, reply.headers);
         res.writeHead(status, reply.rawHeaders);
         reply.pipe(res);
       },
     );
     forward.on("error", () => res.destroy());
     req.pipe(forward);
-  });
-}
-
-/** Serves `assets/<hex>` from the disk store, as an operator's public bucket domain does. */
-function assetOrigin(storeDir: string): Server {
-  return createServer((req, res) => {
-    const hex = /^\/assets\/([0-9a-f]{64})$/.exec(req.url ?? "")?.[1];
-    if (hex === undefined || (req.method !== "GET" && req.method !== "HEAD")) {
-      res.writeHead(404).end();
-      return;
-    }
-    readFile(join(storeDir, diskPath(`assets/${hex}`))).then(
-      (bytes) => {
-        // The disk store keeps no type; the client takes each asset's type from its manifest.
-        res.writeHead(200, {
-          "content-type": "application/octet-stream",
-          "content-length": bytes.length,
-          "cache-control": "public, max-age=31536000, immutable",
-        });
-        res.end(req.method === "HEAD" ? undefined : bytes);
-      },
-      () => res.writeHead(404).end(),
-    );
   });
 }
 

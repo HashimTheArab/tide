@@ -26,7 +26,6 @@ export interface TideCli {
     readonly runtimeVersion: string;
     readonly manifest: string;
     readonly bundle: string;
-    readonly assetsDir?: string;
   }): Promise<void>;
   rollbackToEmbedded(pointer: Pointer): Promise<void>;
   /** Returns `tide probe`'s report of what the stack serves for `pointer`. */
@@ -43,7 +42,7 @@ export function tideCli(stack: Stack): TideCli {
     ...pins,
     TIDE_SIGNING_KEY_FILE: stack.identity.keyFile,
     TIDE_SERVER_URL: stack.serverUrl,
-    TIDE_ASSET_URL: stack.assetUrl,
+    TIDE_ASSET_URL: stack.serverUrl,
     TIDE_DISK_DIR: stack.storeDir,
   };
   const tide = (args: string[], env: Record<string, string>) => run(args, env, stack.signal);
@@ -87,7 +86,6 @@ export function tideCli(stack: Stack): TideCli {
           build.manifest,
           "--bundle",
           build.bundle,
-          ...(build.assetsDir === undefined ? [] : ["--assets-dir", build.assetsDir]),
         ],
         write,
       );
