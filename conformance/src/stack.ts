@@ -16,6 +16,9 @@ import { diskStore, startServer } from "@tide/server/node";
 import { RSA_SHA256, certificate, pem } from "../../packages/protocol/test/fixtures.ts";
 
 const LOOPBACK = "127.0.0.1";
+const MULTIPART = /^multipart\/mixed; boundary=(.*)$/s;
+// Operator and cloud credentials in the caller's shell never reach a child.
+const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS)_/i;
 type Step = () => Promise<void> | void;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -32,6 +35,7 @@ interface Recorded {
   readonly status: number;
   readonly im: string | undefined;
   readonly baseUpdateId: string | undefined;
+  readonly boundary: string | undefined; // A multipart reply's boundary, which names the stored reply it came from.
 }
 
 export interface Stack {
@@ -44,7 +48,9 @@ export interface Stack {
    * Starts `command` with exactly `env` in a process group of its own. The group is killed once the child's stdout
    * and stderr close, or on `close`, which waits for those streams; its own children inherit them unless redirected.
    */
-  spawn(command: string, args: readonly string[], env: Record<string, string>): Child;
+  spawn(command: string, args: readonly string[], env: Record<string, string>, cwd?: string): Child;
+  /** Runs `step` on `close` after every child is killed and before the servers stop; later steps run first. */
+  onClose(step: Step): void;
   /** Stops every child and the servers, then removes the temp dir; later calls return the first call's promise. */
   close(): Promise<void>;
 }
@@ -82,10 +88,16 @@ async function startStack(): Promise<Stack> {
     const serverUrl = await serve(recorder(port(tide), agent, storeDir, responses), steps);
     const children = new Set<Promise<void>>();
     steps.push(() => Promise.all(children).then(() => undefined));
-    const start = (command: string, args: readonly string[], env: Record<string, string>) => {
+    const start = (
+      command: string,
+      args: readonly string[],
+      env: Record<string, string>,
+      cwd?: string,
+    ) => {
       if (controller.signal.aborted) throw new Error("the stack is closed");
       const child = spawn(command, args, {
         env,
+        cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -109,7 +121,11 @@ async function startStack(): Promise<Stack> {
       controller.signal.addEventListener("abort", kill, { once: true });
       return child;
     };
-    return { dir, storeDir, serverUrl, identity, responses, spawn: start, close };
+    const onClose = (step: Step) => {
+      if (controller.signal.aborted) throw new Error("the stack is closed");
+      steps.push(step);
+    };
+    return { dir, storeDir, serverUrl, identity, responses, spawn: start, onClose, close };
   } catch (e) {
     await close();
     throw e;
@@ -141,6 +157,15 @@ export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
+}
+
+/** Returns the caller's environment without operator and cloud credentials. */
+export function hostEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (e): e is [string, string] => e[1] !== undefined && !CREDENTIAL.test(e[0]),
+    ),
+  );
 }
 
 /**
@@ -194,6 +219,7 @@ function recorder(upstream: number, agent: Agent, storeDir: string, responses: R
         status,
         im: headers.im as string | undefined,
         baseUpdateId: headers["expo-base-update-id"] as string | undefined,
+        boundary: MULTIPART.exec(headers["content-type"] ?? "")?.[1],
       });
     const hex = /^\/assets\/([0-9a-f]{64})$/.exec(path)?.[1];
     if (hex !== undefined && (req.method === "GET" || req.method === "HEAD")) {

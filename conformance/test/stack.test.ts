@@ -24,8 +24,10 @@ import {
   codeSigningCertificate,
   contentKey,
   decodeBaseRecord,
+  decodeStoredReply,
   diskPath,
   patchKey,
+  replyKey,
   sha256Base64Url,
 } from "@tide/protocol";
 
@@ -213,13 +215,23 @@ describe("the harness stack", () => {
       expect(await cli.probe(ANDROID)).toBe(
         `manifest ${ids.android}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
       );
+      const pointer = decodeStoredReply(
+        readFileSync(join(stack.storeDir, diskPath(replyKey("main", "1.0.0", "android")))),
+      );
       expect(stack.responses.slice(before)).toEqual([
-        { path: "/manifest", status: 200, im: undefined, baseUpdateId: undefined },
+        {
+          path: "/manifest",
+          status: 200,
+          im: undefined,
+          baseUpdateId: undefined,
+          boundary: pointer.boundary,
+        },
         {
           path: `/bundles/${contentKey(hash)}`,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
+          boundary: undefined,
         },
       ]);
     });
@@ -258,8 +270,8 @@ describe("the harness stack", () => {
       expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true);
       expect((await fetch(`${stack.serverUrl}${missing}`)).status).toBe(404);
       expect(stack.responses.slice(before)).toEqual([
-        { path, status: 200, im: undefined, baseUpdateId: undefined },
-        { path: missing, status: 404, im: undefined, baseUpdateId: undefined },
+        { path, status: 200, im: undefined, baseUpdateId: undefined, boundary: undefined },
+        { path: missing, status: 404, im: undefined, baseUpdateId: undefined, boundary: undefined },
       ]);
     });
   });
@@ -290,6 +302,7 @@ describe("the harness stack", () => {
         status: 226,
         im: "bsdiff",
         baseUpdateId: u1.android,
+        boundary: undefined,
       });
 
       const before = tree(stack.storeDir);
@@ -350,6 +363,21 @@ describe("the harness stack", () => {
         "directive rollBackToEmbedded: signature verified; a directive has no bundle to check\n",
       );
     });
+  });
+
+  test("spawn runs in the given directory, and close runs onClose steps while the servers still answer", async () => {
+    const seen: unknown[] = [];
+    await withStack(async (stack) => {
+      const sub = join(stack.dir, "sub");
+      mkdirSync(sub);
+      const pwd = stack.spawn("/bin/pwd", [], {}, sub);
+      const [out] = (await once(pwd.stdout, "data")) as [Buffer];
+      expect(out.toString().trim()).toBe(sub);
+      stack.onClose(async () => {
+        seen.push((await fetch(`${stack.serverUrl}/hc`)).status, existsSync(stack.dir));
+      });
+    });
+    expect(seen).toEqual([200, true]);
   });
 
   test("a failing CLI command throws with its message", async () => {
