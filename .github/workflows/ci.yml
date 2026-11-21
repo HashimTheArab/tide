@@ -62,10 +62,23 @@ jobs:
       - name: Image smoke test
         run: pnpm test:container
 
+  # Installs the packed packages into a fresh npm project and uses them; nothing is published.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Packed-install test
+        run: pnpm test:pack
+
   # The one check branch protection requires: it passes only when every other job passed.
   check:
     if: ${{ always() }}
-    needs: [gate, container]
+    needs: [gate, container, package]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

@@ -1,6 +1,6 @@
 ---
 status: decided
-updated: 2026-11-19
+updated: 2026-11-22
 ---
 
 # Testing standard
@@ -37,6 +37,11 @@ holds.
 
 Real `expo-updates` clients (Android emulator nightly, iOS simulator before release) against a local Tide: update, no
 update, rollback, patch from an OTA update and from the embedded bundle, missing patch, corrupt patch.
+
+## Packages
+
+`pnpm test:pack` installs the packed tarballs into a fresh npm project, with the `@tide-ota` registry unreachable,
+and runs the `tide` bin, the Node server and a TypeScript consumer from them. It runs as its own CI job.
 
 ## Reviewers reject
 
