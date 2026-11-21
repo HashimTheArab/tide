@@ -1,6 +1,6 @@
 ---
 status: decided
-updated: 2026-11-19
+updated: 2026-11-21
 ---
 
 # Delivery loop
@@ -16,7 +16,8 @@ override it. Agents are denied admin merges, force pushes, pushes to `main` and 
 
 ## Running it
 
-Run `implement-phase` with `{phase: "P2"}`. Each run delivers one slice: the one you name, or the next pending
+Run `implement-phase` with `{phase: "P2"}` from the Tide checkout or one of its worktrees; the run finds the main
+checkout through git. Each run delivers one slice: the one you name, or the next pending
 one. Run it again for the next slice. Progress lives in `.agent-output/phases/<phase>/plan.json`, and each
 slice's evidence (design note, gate reports, Codex reviews, PR body) in `.agent-output/phases/<phase>/<slice>/`.
 Always start a fresh run; never use `resumeFromRunId`, which replays stale evidence.
