@@ -89,7 +89,7 @@ export async function iosDevice(stack: Stack, options: IosOptions): Promise<IosD
       try {
         await simctl(["boot", sim.udid], BOOT_MS);
       } catch (e) {
-        mayBeBooted = e instanceof ToolError && e.killed;
+        mayBeBooted = e instanceof ToolError && e.exitCode === null;
         throw e;
       }
       mayBeBooted = true;

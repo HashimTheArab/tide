@@ -79,7 +79,7 @@ jobs:
           echo no | "$tools/avdmanager" create avd --name "$AVD" --package "$SYSTEM_IMAGE" --device pixel_6
           printf '%s\n' hw.ramSize=4096 disk.dataPartition.size=6G hw.gpu.enabled=yes \
             hw.gpu.mode=swiftshader_indirect >> "$ANDROID_AVD_HOME/$AVD.avd/config.ini"
-          # Fails without KVM; the x86_64 emulator would not boot without it either.
+          # Puts KVM use in the run log, which the harness only shows when the emulator fails.
           "$ANDROID_HOME/emulator/emulator" -accel-check
 
       # Boots the AVD read-only, builds the release app and runs every scenario.

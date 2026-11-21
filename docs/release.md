@@ -20,5 +20,3 @@ The checks before each release. A failed step stops the release until a fix land
 
    It uses the booted simulator or boots one (`--simulator` picks another), and must print `pass` for every version
    and scenario and exit 0. Keep its result lines with the release notes.
-
-Publishing steps join this list with npm releases ([roadmap](roadmap.md), P9).

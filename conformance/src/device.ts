@@ -86,13 +86,11 @@ export function readReports(log: Readable, name: string): Pick<Device, "nextRepo
   };
 }
 
-/** A failed tool command; `killed` when a signal ended it, so what it did is unknown. */
+/** A failed tool command; `exitCode` is null when a signal ended it, so what it did is unknown. */
 export class ToolError extends Error {
-  readonly killed: boolean;
-  readonly exitCode: number | null; // null when it never exited by itself.
-  constructor(message: string, killed: boolean, exitCode: number | null) {
+  readonly exitCode: number | null;
+  constructor(message: string, exitCode: number | null) {
     super(message);
-    this.killed = killed;
     this.exitCode = exitCode;
   }
 }
@@ -130,7 +128,6 @@ export function tool(
           reject(
             new ToolError(
               `${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`,
-              child.signalCode !== null,
               child.exitCode,
             ),
           );
