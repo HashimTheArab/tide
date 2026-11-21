@@ -27,6 +27,8 @@ update in a single bucket and serves it from Cloudflare Workers or from a contai
   the store build, so even a fresh install's first update can download only what changed.
 - **Building and signing stay apart.** Only the build step runs your app's code, and it holds no secrets. The step
   that signs and uploads runs none of your code.
+- **Two runtime dependencies.** The server uses [Hono](https://hono.dev) and its Node adapter; the CLI and the
+  protocol package use none. Patching, compression, S3 signing and the AWS KMS client are built in.
 
 ## How it works
 
