@@ -1,6 +1,8 @@
 // Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status
-// front matter, or when deploy.md omits a permission the server's S3 credentials need.
-import { readdirSync, readFileSync } from "node:fs";
+// front matter, when deploy.md omits a permission the server's S3 credentials need, or when README.md drifts from the
+// tagline, the files it links or the CLI's commands and flags.
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +49,44 @@ const deploy = readFileSync(join(docsDir, "deploy.md"), "utf8");
 for (const permission of permissions) {
   if (!deploy.includes(permission)) {
     errors.push(`deploy.md: does not name ${permission}, which the server's S3 credentials need`);
+  }
+}
+
+// README: opens with the package description as its tagline, links only to files that exist, and names only the CLI
+// commands and flags the CLI's own usage lists.
+const root = fileURLToPath(new URL("../", import.meta.url));
+const readme = readFileSync(join(root, "README.md"), "utf8");
+const pkg = /** @type {unknown} */ (JSON.parse(readFileSync(join(root, "package.json"), "utf8")));
+const tagline =
+  typeof pkg === "object" && pkg !== null && "description" in pkg ? String(pkg.description) : "";
+if (tagline === "") errors.push("package.json: needs a description, the README's tagline");
+if (!readme.startsWith(`# Tide\n\n**${tagline}**\n`)) {
+  errors.push(`README.md: must open with "# Tide" and the tagline **${tagline}**`);
+}
+for (const [, target] of readme.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
+  if (!/^[a-z]+:/.test(target) && !existsSync(join(root, target))) {
+    errors.push(`README.md: links to ${target}, which does not exist`);
+  }
+}
+const usage = spawnSync(process.execPath, [join(root, "packages/cli/src/main.ts")], {
+  encoding: "utf8",
+}).stderr;
+/** @type {Map<string, Set<string>>} */
+const flags = new Map();
+for (const [, command, rest] of usage.matchAll(/^(?:usage:)?\s*tide ([a-z-]+)(.*)$/gm)) {
+  const known = flags.get(command) ?? new Set();
+  for (const [flag] of rest.matchAll(/--[a-z-]+/g)) known.add(flag);
+  flags.set(command, known);
+}
+if (flags.size === 0) errors.push("packages/cli/src/main.ts: printed no usage");
+for (const [, command, rest] of readme.matchAll(/\btide ([a-z][a-z-]*)([^\n`|]*)/g)) {
+  const known = flags.get(command);
+  if (known === undefined) {
+    errors.push(`README.md: names tide ${command}, which the CLI does not have`);
+    continue;
+  }
+  for (const [flag] of rest.matchAll(/--[a-z-]+/g)) {
+    if (!known.has(flag)) errors.push(`README.md: tide ${command} has no ${flag}`);
   }
 }
 
