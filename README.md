@@ -63,25 +63,15 @@ docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_
 For S3, set the five `TIDE_S3_*` variables, with read-only credentials, instead of `TIDE_DISK_DIR`. `GET /hc` is the
 health check. [docs/deploy.md](docs/deploy.md#the-container) lists every variable.
 
-The container serves manifests and launch bundles, not other assets such as images and fonts. Before the first
-publish, serve the bucket's `assets/` directory from a static origin (disk) or the bucket's public domain (S3), and
-publish with `TIDE_ASSET_URL` set to it and `TIDE_SERVER_URL` set to the container's public origin. Both are signed
-into manifests, so they must keep working ([docs/design.md](docs/design.md#other-routes)).
+The container serves manifests and launch bundles, not images or fonts, so set up an asset origin and the
+publisher's `TIDE_SERVER_URL` and `TIDE_ASSET_URL` before the first publish
+([docs/deploy.md](docs/deploy.md#the-container)).
 
 ### The app
 
-A build finds its updates by URL, channel and runtime version, and trusts them by certificate. From the app's
-directory, write the certificate where the app config reads it and the private key outside the app's repository:
-
-```sh
-npx expo-updates codesigning:generate \
-  --certificate-output-directory keys \
-  --key-output-directory ../signing-key \
-  --certificate-validity-duration-years 10 \
-  --certificate-common-name "Example App"
-```
-
-Then set the app config:
+A build finds its updates by URL, channel and runtime version, and trusts them by certificate
+([docs/deploy.md](docs/deploy.md#the-app); step 5 of
+[Setting up an environment](docs/deploy.md#setting-up-an-environment) generates the certificate). The app config:
 
 ```js
 {

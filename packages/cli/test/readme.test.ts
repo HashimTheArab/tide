@@ -42,36 +42,6 @@ test("the docs check rejects an unknown flag on a continued command line", () =>
   expect(typo.stderr).toContain("README.md: tide register-build has no --asset-dirr");
 });
 
-// expo-updates' codesigning:generate exits without writing anything unless all four flags are given.
-test("the README's certificate command is complete and writes the key outside the app", () => {
-  const command = /npx expo-updates codesigning:generate((?:[^\n]*\\\n)*[^\n]*)/
-    .exec(README)?.[1]
-    ?.replaceAll(/\\\n\s*/g, " ");
-  const flags = new Map(
-    [...(command ?? "").matchAll(/(--[a-z-]+) ("[^"]*"|\S+)/g)].map(([, f, v]) => [f, v]),
-  );
-  expect(new Set(flags.keys())).toEqual(
-    new Set([
-      "--certificate-common-name",
-      "--certificate-output-directory",
-      "--certificate-validity-duration-years",
-      "--key-output-directory",
-    ]),
-  );
-  const certificate = /codeSigningCertificate: "\.\/([^"]+)"/.exec(README)?.[1];
-  expect(certificate).toBe(`${flags.get("--certificate-output-directory")}/certificate.pem`);
-  expect(flags.get("--key-output-directory")).toMatch(/^\.\.\//);
-});
-
-// The Node server serves no non-launch assets, so a container needs both signed origins before its first publish.
-test("the container quick start names every origin publish signs into manifests", () => {
-  const origins = variables(/^\*\*Configuration\.\*\*[^\n]*/m.exec(DESIGN)?.[0] ?? "");
-  expect([...origins]).toEqual(["TIDE_SERVER_URL", "TIDE_ASSET_URL"]);
-  const container = section(README, "### Container");
-  for (const origin of origins) expect(container).toContain(`\`${origin}\``);
-  expect(container).toContain("`assets/`");
-});
-
 test("the README names every build pin tide probe requires", () => {
   const pins = variables(section(DESIGN, "### `tide probe`"));
   expect(pins.size).toBeGreaterThan(0);

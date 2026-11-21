@@ -505,7 +505,9 @@ write. No writer runs project code (CLI).
 **KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
 imported:
 
-1. `npx expo-updates codesigning:generate`, then `openssl pkcs8 -topk8 -nocrypt -outform DER` on the private key.
+1. `npx expo-updates codesigning:generate` with all four flags (`deploy.md`, Signing identity), writing the key
+   outside every checkout (for example `--key-output-directory ~/tide-signing/main`, never inside a repository), then
+   `openssl pkcs8 -topk8 -nocrypt -outform DER` on the private key.
 2. `aws kms create-key --origin EXTERNAL --key-spec RSA_2048 --key-usage SIGN_VERIFY` (the spec matching the key).
 3. `get-parameters-for-import --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256`, wrap the DER, and
    `import-key-material --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE`.
