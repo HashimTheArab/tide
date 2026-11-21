@@ -11,54 +11,46 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { request } from "node:http";
+import { Agent, request } from "node:http";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo, Socket } from "node:net";
 import { describe, expect, onTestFinished, test } from "vitest";
 
-import type { Part } from "@tide/protocol";
 import {
   baseKey,
   codeSigningCertificate,
   contentKey,
   decodeBaseRecord,
-  NO_UPDATE_KEY,
   decodeStoredReply,
   diskPath,
-  encodeMultipart,
-  encodeStoredReply,
-  parseMultipart,
   patchKey,
   replyKey,
   sha256Base64Url,
 } from "@tide/protocol";
 
-import type { AndroidDevice, Report } from "../src/android.ts";
-import type { Target } from "../src/scenarios.ts";
-import type { Stack } from "../src/stack.ts";
-import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
-import { STEPS } from "../src/scenarios.ts";
-import { tamperPatch, withStack } from "../src/stack.ts";
+import type { Recorded, Stack } from "../src/stack.ts";
+import { EXPORT_FILE } from "../../packages/cli/src/publish-export.ts";
+import { recorder, tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
+import {
+  ANDROID,
+  ANDROID_BUNDLE,
+  FIXTURE_EXPORT,
+  MAIN,
+  fixtureExport,
+  hexOf,
+  sha256Hex,
+  signingMetadata,
+} from "./harness.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("../../packages/cli/test/fake-expo.ts", import.meta.url));
-const FIXTURE_EXPORT = fileURLToPath(
-  new URL("../../packages/cli/test/fixtures/export", import.meta.url),
-);
 const HOLD = fileURLToPath(new URL("hold-stack.ts", import.meta.url));
 const HUNG_EXPORT = fileURLToPath(new URL("hung-export.ts", import.meta.url));
 const LEAVE_WORKER = fileURLToPath(new URL("leave-worker.ts", import.meta.url));
-const ANDROID_BUNDLE = "dist/_expo/static/js/android/index-android.hbc";
-const MAIN = { channel: "main", runtimeVersion: "1.0.0" } as const;
-const ANDROID = { ...MAIN, platform: "android" } as const;
-
-const signingMetadata = (stack: Stack) => ({
-  keyid: stack.identity.keyId,
-  alg: "rsa-v1_5-sha256" as const,
-});
 
 /**
  * Writes an Expo project under the stack, signed by the run's identity, whose `expo` tools are the CLI tests' fake;
@@ -96,24 +88,6 @@ function project(stack: Stack, exporter?: string): string {
   return root;
 }
 
-/**
- * Writes at `<stack>/<name>` what `tide export` writes for the CLI tests' fixture export under the run's identity,
- * without running Expo; `bundle` replaces the Android launch bundle.
- */
-function fixtureExport(stack: Stack, name: string, bundle?: Uint8Array): string {
-  const out = join(stack.dir, name);
-  cpSync(FIXTURE_EXPORT, join(out, "dist"), { recursive: true });
-  if (bundle !== undefined) writeFileSync(join(out, ANDROID_BUNDLE), bundle);
-  const value = {
-    certificate: readFileSync(stack.identity.certificateFile, "utf8"),
-    codeSigningMetadata: signingMetadata(stack),
-    expoClient: { name: "Conformance", slug: "conformance", version: "1.0.0" },
-    platforms: { android: { runtimeVersion: MAIN.runtimeVersion } },
-  };
-  writeFileSync(join(out, EXPORT_FILE), encodeProjectExport(value));
-  return out;
-}
-
 /** Every file under `root` with its bytes as base64. */
 function tree(root: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -127,8 +101,6 @@ function tree(root: string): Map<string, string> {
   walk(root);
   return out;
 }
-
-const hexOf = async (bytes: Uint8Array) => contentKey(await sha256Base64Url(new Uint8Array(bytes)));
 
 /** Requests `url` with `headers`; resolves the status and the patch headers. */
 function get(url: string, headers: Record<string, string> = {}) {
@@ -230,20 +202,28 @@ describe("the harness stack", () => {
         {
           path: "/manifest",
           expectSignature: `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
+          aIm: undefined,
+          currentUpdateId: undefined,
+          requestedUpdateId: undefined,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
           boundary: pointer.boundary,
           body: pointer.body,
+          sha256: sha256Hex(pointer.body),
         },
         {
           path: `/bundles/${contentKey(hash)}`,
           expectSignature: undefined,
+          aIm: undefined,
+          currentUpdateId: undefined,
+          requestedUpdateId: undefined,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
           body: undefined,
+          sha256: contentKey(hash),
         },
       ]);
     });
@@ -285,20 +265,28 @@ describe("the harness stack", () => {
         {
           path,
           expectSignature: undefined,
+          aIm: undefined,
+          currentUpdateId: undefined,
+          requestedUpdateId: undefined,
           status: 200,
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
           body: undefined,
+          sha256: undefined,
         },
         {
           path: missing,
           expectSignature: undefined,
+          aIm: undefined,
+          currentUpdateId: undefined,
+          requestedUpdateId: undefined,
           status: 404,
           im: undefined,
           baseUpdateId: undefined,
           boundary: undefined,
           body: undefined,
+          sha256: undefined,
         },
       ]);
     });
@@ -325,18 +313,23 @@ describe("the harness stack", () => {
         im: "bsdiff",
         base: u1.android,
       });
+      const stored = sha256Hex(readFileSync(join(stack.storeDir, key)));
       expect(stack.responses.at(-1)).toEqual({
         path: `/bundles/${toHex}`,
         expectSignature: undefined,
+        aIm: "bsdiff",
+        currentUpdateId: u1.android,
+        requestedUpdateId: u2.android,
         status: 226,
         im: "bsdiff",
         baseUpdateId: u1.android,
         boundary: undefined,
         body: undefined,
+        sha256: stored,
       });
 
       const before = tree(stack.storeDir);
-      expect(tamperPatch(stack.storeDir, fromHex, toHex)).toBe(join(stack.storeDir, key));
+      expect(tamperPatch(stack.storeDir, fromHex, toHex)).toBe(stored);
       const after = tree(stack.storeDir);
       const changed = [...after].filter(([path, bytes]) => before.get(path) !== bytes);
       expect(changed.map(([path]) => path)).toEqual([key]);
@@ -350,6 +343,33 @@ describe("the harness stack", () => {
         `${patchKey(toHex, fromHex)} is not stored`,
       );
     });
+  });
+
+  test("a reply the upstream cuts off closes the client's connection and records no digest", async () => {
+    // Promises 100 bytes, sends 10 and hangs up.
+    const upstream = createServer((socket) => {
+      socket.once("data", () =>
+        socket.end("HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n0123456789"),
+      );
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const responses: Recorded[] = [];
+    const agent = new Agent();
+    const server = recorder((upstream.address() as AddressInfo).port, agent, tmpdir(), responses);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    onTestFinished(() => {
+      agent.destroy();
+      server.closeAllConnections();
+      server.close();
+      upstream.close();
+    });
+    const path = `/bundles/${"a".repeat(64)}`;
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`);
+    expect(res.status).toBe(200);
+    await expect(res.arrayBuffer()).rejects.toThrow("terminated");
+    expect(responses).toMatchObject([{ path, status: 200, sha256: undefined }]);
   });
 
   test("register-build stores an embedded base with its assets that a later publish patches from, and a rollback serves its directive", async () => {
@@ -510,109 +530,5 @@ describe("the harness stack shuts down", () => {
     held.proc.kill(signal);
     expect(await held.exited).toEqual([code, null]);
     await expectClosed(seen);
-  });
-});
-
-describe("the embedded scenario", () => {
-  /** A target whose app, on each launch, makes the signed check a client makes and reports what the app logs. */
-  function target(stack: Stack): Target {
-    const build = {
-      apk: "app.apk",
-      marker: "m1",
-      embeddedUpdateId: "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f",
-      manifest: "app.manifest",
-      bundle: "index.android.bundle",
-      resDir: "res",
-    };
-    let reports: Report[] = [];
-    const device: AndroidDevice = {
-      serial: "emulator-5554",
-      abi: "x86_64",
-      booted: false,
-      reverse: () => Promise.resolve(),
-      install: () => Promise.resolve(),
-      async launch() {
-        const res = await fetch(`${stack.serverUrl}/manifest`, {
-          headers: {
-            "expo-protocol-version": "1",
-            "expo-platform": "android",
-            "expo-runtime-version": MAIN.runtimeVersion,
-            "expo-channel-name": MAIN.channel,
-            "expo-expect-signature": `sig, keyid="${stack.identity.keyId}", alg="rsa-v1_5-sha256"`,
-          },
-        });
-        await res.arrayBuffer();
-        reports = [
-          {
-            event: "running",
-            marker: build.marker,
-            updateId: build.embeddedUpdateId,
-            embedded: true,
-          },
-          { event: "check", marker: build.marker, result: "none" },
-        ];
-      },
-      forceStop: () => Promise.resolve(),
-      nextReport: () => {
-        const [next, ...rest] = reports;
-        reports = rest;
-        return next === undefined ? Promise.reject(new Error("no report")) : Promise.resolve(next);
-      },
-      drain: () => undefined,
-    };
-    const app = {
-      version: "55",
-      dir: stack.dir,
-      packageName: "dev.tide.conformance",
-      channel: MAIN.channel,
-    } as const;
-    return { stack, device, app, build };
-  }
-
-  /** Rewrites the stored no-update reply's body, keeping its boundary. */
-  function rewriteNoUpdate(
-    stack: Stack,
-    change: (parts: Part[], boundary: string) => Uint8Array<ArrayBuffer>,
-  ) {
-    const path = join(stack.storeDir, diskPath(NO_UPDATE_KEY));
-    const { boundary, body } = decodeStoredReply(readFileSync(path));
-    const next = change(parseMultipart(body, boundary), boundary);
-    writeFileSync(path, encodeStoredReply({ kind: "noUpdateAvailable", boundary, body: next }));
-  }
-
-  const unsigned = `got ${NO_UPDATE_KEY}, which is not a noUpdateAvailable directive signed for the run`;
-
-  test("passes when both launches get the stored signed no-update reply", async () => {
-    await withStack(async (stack) => {
-      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
-      await expect(STEPS.embedded?.(target(stack))).resolves.toContain(
-        `accepted the signed ${NO_UPDATE_KEY}`,
-      );
-    });
-  });
-
-  test("fails when the reply has the stored boundary but no directive to verify", async () => {
-    await withStack(async (stack) => {
-      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
-      rewriteNoUpdate(stack, (_, boundary) => new Uint8Array(Buffer.from(`--${boundary}--\r\n`)));
-      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
-    });
-  });
-
-  test("fails when the directive's signature does not verify under the run's certificate", async () => {
-    await withStack(async (stack) => {
-      await tideCli(stack).publish(fixtureExport(stack, "export"), "seed");
-      rewriteNoUpdate(stack, ([part], boundary) => {
-        const signature = (part?.signature ?? "").replace(
-          /sig="(.)/,
-          (_, c: string) => `sig="${c === "A" ? "B" : "A"}`,
-        );
-        return encodeMultipart(
-          [{ name: "directive", body: part?.body ?? new Uint8Array(), signature }],
-          boundary,
-        ).body;
-      });
-      await expect(STEPS.embedded?.(target(stack))).rejects.toThrow(unsigned);
-    });
   });
 });

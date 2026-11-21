@@ -1,55 +1,14 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, onTestFinished, test } from "vitest";
 
 import { androidDevice, parseDevices, parseReport } from "../src/android.ts";
 import { withStack } from "../src/stack.ts";
+import { fakeSdk } from "./harness.ts";
 
-const FAKE = fileURLToPath(new URL("fake-android.ts", import.meta.url));
 const PKG = "dev.tide.conformance.sdk55";
 const running = (r: string, marker: string) =>
   `tide-conformance ${JSON.stringify({ event: "running", marker, updateId: r, embedded: true })}`;
-
-interface FakeState {
-  running: Record<string, { pid?: number; avd?: string }>;
-  installed: string[];
-  reverse: string[];
-}
-
-/** Writes a fake SDK, removed when the test ends, whose adb and emulator are fake-android.ts over `state`. */
-function fakeSdk(state: Partial<FakeState>, avds: string[] = ["Pixel", "Tablet"]) {
-  const sdk = mkdtempSync(join(tmpdir(), "tide-fake-sdk-"));
-  onTestFinished(() => rmSync(sdk, { recursive: true, force: true }));
-  for (const [dir, tool] of [
-    ["platform-tools", "adb"],
-    ["emulator", "emulator"],
-  ] as const) {
-    mkdirSync(join(sdk, dir), { recursive: true });
-    const path = join(sdk, dir, tool);
-    writeFileSync(path, `#!/bin/sh\nexec '${process.execPath}' '${FAKE}' ${tool} '${sdk}' "$@"\n`);
-    chmodSync(path, 0o755);
-  }
-  writeFileSync(
-    join(sdk, "state.json"),
-    JSON.stringify({ running: {}, installed: [], reverse: [], ...state }),
-  );
-  writeFileSync(join(sdk, "avds.txt"), avds.map((a) => `${a}\n`).join(""));
-  writeFileSync(join(sdk, "calls.log"), "");
-  return {
-    sdk,
-    state: () => JSON.parse(readFileSync(join(sdk, "state.json"), "utf8")) as FakeState,
-    calls: () =>
-      readFileSync(join(sdk, "calls.log"), "utf8")
-        .trimEnd()
-        .split("\n")
-        .map((l) => JSON.parse(l) as string[]),
-    /** Sets the lines the app logs on each launch. */
-    appLogs: (lines: string[]) =>
-      writeFileSync(join(sdk, "app.log"), lines.map((l) => `${l}\n`).join("")),
-  };
-}
 
 const alive = (pid: number) => {
   try {

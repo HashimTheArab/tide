@@ -1,5 +1,6 @@
 // The host side of a conformance run: a temp dir, a signing identity generated for the run, and a local Tide.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Agent, createServer, request } from "node:http";
@@ -29,15 +30,19 @@ interface Identity {
   readonly certificateFile: string;
 }
 
-/** One reply the local Tide sent, with the headers the scenarios assert on. */
-interface Recorded {
+/** One reply the local Tide sent, with the request and reply headers the scenarios assert on. */
+export interface Recorded {
   readonly path: string;
   readonly expectSignature: string | undefined; // The request's; a client sends it only with a certificate embedded.
+  readonly aIm: string | undefined; // The request's A-IM.
+  readonly currentUpdateId: string | undefined; // The request's Expo-Current-Update-ID.
+  readonly requestedUpdateId: string | undefined; // The request's Expo-Requested-Update-ID.
   readonly status: number;
   readonly im: string | undefined;
   readonly baseUpdateId: string | undefined;
   readonly boundary: string | undefined; // A multipart reply's boundary, which names the stored reply it came from.
   readonly body: Uint8Array<ArrayBuffer> | undefined; // A multipart reply's body as forwarded so far, before the client gets it.
+  readonly sha256: string | undefined; // Hex SHA-256 of a forwarded body, set once the upstream reply has ended.
 }
 
 export interface Stack {
@@ -181,7 +186,7 @@ export function tail(file: string): string {
 
 /**
  * Inverts every byte after the BSDIFF40 header of the stored patch from bundle `fromHex` to bundle `toHex`, so the
- * client still recognises the patch but cannot apply it. Returns the file's path.
+ * client still recognises the patch but cannot apply it. Returns the hex SHA-256 the file had before.
  */
 export function tamperPatch(storeDir: string, fromHex: string, toHex: string): string {
   const key = patchKey(fromHex, toHex);
@@ -195,9 +200,10 @@ export function tamperPatch(storeDir: string, fromHex: string, toHex: string): s
   if (bytes.length <= 32 || bytes.toString("latin1", 0, 8) !== "BSDIFF40") {
     throw new Error(`${key} is not a BSDIFF40 patch`);
   }
+  const intact = createHash("sha256").update(bytes).digest("hex");
   for (let i = 32; i < bytes.length; i++) bytes[i] = (bytes[i] ?? 0) ^ 0xff;
   writeFileSync(path, bytes);
-  return path;
+  return intact;
 }
 
 async function writeIdentity(dir: string): Promise<Identity> {
@@ -219,21 +225,32 @@ async function writeIdentity(dir: string): Promise<Identity> {
 
 /**
  * Records each reply before sending it. Serves GET and HEAD of `assets/<hex>` from the disk store, as an operator's
- * public bucket domain does, and passes everything else to the Tide on `upstream` unchanged.
+ * public bucket domain does, and passes everything else to the Tide on `upstream` unchanged. A reply the upstream cuts
+ * off closes the client's connection and keeps no `sha256`.
  */
-function recorder(upstream: number, agent: Agent, storeDir: string, responses: Recorded[]): Server {
+export function recorder(
+  upstream: number,
+  agent: Agent,
+  storeDir: string,
+  responses: Recorded[],
+): Server {
   return createServer((req, res) => {
     const path = req.url ?? "";
     const record = (status: number, headers: IncomingHttpHeaders = {}) => {
       const boundary = MULTIPART.exec(headers["content-type"] ?? "")?.[1];
-      const entry = {
+      const header = (name: string) => req.headers[name] as string | undefined;
+      const entry: { -readonly [K in keyof Recorded]: Recorded[K] } = {
         path,
-        expectSignature: req.headers["expo-expect-signature"] as string | undefined,
+        expectSignature: header("expo-expect-signature"),
+        aIm: header("a-im"),
+        currentUpdateId: header("expo-current-update-id"),
+        requestedUpdateId: header("expo-requested-update-id"),
         status,
         im: headers.im as string | undefined,
         baseUpdateId: headers["expo-base-update-id"] as string | undefined,
         boundary,
         body: boundary === undefined ? undefined : new Uint8Array(),
+        sha256: undefined,
       };
       responses.push(entry);
       return entry;
@@ -263,12 +280,16 @@ function recorder(upstream: number, agent: Agent, storeDir: string, responses: R
       (reply) => {
         const status = reply.statusCode ?? 0;
         const entry = record(status, reply.headers);
-        if (entry.body !== undefined) {
-          // Added before the pipe, so each chunk is recorded before it is forwarded.
-          reply.on("data", (chunk: Buffer) => {
-            entry.body = new Uint8Array(Buffer.concat([entry.body ?? new Uint8Array(), chunk]));
-          });
-        }
+        const digest = createHash("sha256");
+        // Added before the pipe, so each chunk is recorded before it is forwarded.
+        reply.on("data", (chunk: Buffer) => {
+          digest.update(chunk);
+          if (entry.body !== undefined) {
+            entry.body = new Uint8Array(Buffer.concat([entry.body, chunk]));
+          }
+        });
+        reply.on("end", () => (entry.sha256 = digest.digest("hex")));
+        reply.on("error", () => res.destroy());
         res.writeHead(status, reply.rawHeaders);
         reply.pipe(res);
       },

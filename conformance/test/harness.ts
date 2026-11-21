@@ -1,0 +1,94 @@
+// Fixtures the harness tests share: what `tide export` writes without running Expo, and a fake Android SDK.
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { onTestFinished } from "vitest";
+
+import { contentKey, sha256Base64Url } from "@tide/protocol";
+
+import type { Stack } from "../src/stack.ts";
+import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
+
+const FAKE = fileURLToPath(new URL("fake-android.ts", import.meta.url));
+export const FIXTURE_EXPORT = fileURLToPath(
+  new URL("../../packages/cli/test/fixtures/export", import.meta.url),
+);
+export const ANDROID_BUNDLE = "dist/_expo/static/js/android/index-android.hbc";
+export const MAIN = { channel: "main", runtimeVersion: "1.0.0" } as const;
+export const ANDROID = { ...MAIN, platform: "android" } as const;
+
+export const signingMetadata = (stack: Stack) => ({
+  keyid: stack.identity.keyId,
+  alg: "rsa-v1_5-sha256" as const,
+});
+
+/**
+ * Writes at `<stack>/<name>` what `tide export` writes for the CLI tests' fixture export under the run's identity,
+ * without running Expo; `bundle` replaces the Android launch bundle.
+ */
+export function fixtureExport(stack: Stack, name: string, bundle?: Uint8Array): string {
+  const out = join(stack.dir, name);
+  cpSync(FIXTURE_EXPORT, join(out, "dist"), { recursive: true });
+  if (bundle !== undefined) writeFileSync(join(out, ANDROID_BUNDLE), bundle);
+  const value = {
+    certificate: readFileSync(stack.identity.certificateFile, "utf8"),
+    codeSigningMetadata: signingMetadata(stack),
+    expoClient: { name: "Conformance", slug: "conformance", version: "1.0.0" },
+    platforms: { android: { runtimeVersion: MAIN.runtimeVersion } },
+  };
+  writeFileSync(join(out, EXPORT_FILE), encodeProjectExport(value));
+  return out;
+}
+
+export const sha256Hex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+export const hexOf = async (bytes: Uint8Array) =>
+  contentKey(await sha256Base64Url(new Uint8Array(bytes)));
+
+interface FakeState {
+  running: Record<string, { pid?: number; avd?: string }>;
+  installed: string[];
+  reverse: string[];
+}
+
+/** Writes a fake SDK, removed when the test ends, whose adb and emulator are fake-android.ts over `state`. */
+export function fakeSdk(state: Partial<FakeState>, avds: string[] = ["Pixel", "Tablet"]) {
+  const sdk = mkdtempSync(join(tmpdir(), "tide-fake-sdk-"));
+  onTestFinished(() => rmSync(sdk, { recursive: true, force: true }));
+  for (const [dir, tool] of [
+    ["platform-tools", "adb"],
+    ["emulator", "emulator"],
+  ] as const) {
+    mkdirSync(join(sdk, dir), { recursive: true });
+    const path = join(sdk, dir, tool);
+    writeFileSync(path, `#!/bin/sh\nexec '${process.execPath}' '${FAKE}' ${tool} '${sdk}' "$@"\n`);
+    chmodSync(path, 0o755);
+  }
+  writeFileSync(
+    join(sdk, "state.json"),
+    JSON.stringify({ running: {}, installed: [], reverse: [], ...state }),
+  );
+  writeFileSync(join(sdk, "avds.txt"), avds.map((a) => `${a}\n`).join(""));
+  writeFileSync(join(sdk, "calls.log"), "");
+  return {
+    sdk,
+    state: () => JSON.parse(readFileSync(join(sdk, "state.json"), "utf8")) as FakeState,
+    calls: () =>
+      readFileSync(join(sdk, "calls.log"), "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((l) => JSON.parse(l) as string[]),
+    /** Sets the lines the app logs on each launch. */
+    appLogs: (lines: string[]) =>
+      writeFileSync(join(sdk, "app.log"), lines.map((l) => `${l}\n`).join("")),
+  };
+}
