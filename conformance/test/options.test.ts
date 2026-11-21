@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -141,27 +142,24 @@ describe("the conformance bin", () => {
   test("a version whose Gradle build fails prints a line per scenario, and the next version still builds", async () => {
     const fake = fakeSdk({ running: { "emulator-5554": {} } });
     const bin = join(fake.sdk, "bin");
+    const tool = join(fake.sdk, "tool");
     const gradleLog = join(fake.sdk, "gradle.log");
     mkdirSync(bin);
-    // npm ci installs an expo whose prebuild writes a gradlew that fails in the 55 app and builds nothing in the 58.
+    // npm ci links in expo, whose prebuild links in a gradlew that fails in the 55 app and builds nothing in the 58.
+    // All are links to one script, since macOS checks each new executable on its first run, which is slow.
     writeFileSync(
-      join(bin, "npm"),
+      tool,
       `#!/bin/sh
-mkdir -p node_modules/.bin
-cat > node_modules/.bin/expo <<'EXPO'
-#!/bin/sh
-mkdir -p android
-cat > android/gradlew <<'GRADLE'
-#!/bin/sh
-echo "$(pwd) $1" >> "$GRADLE_LOG"
-case "$(pwd)" in */app-55/android) echo "FAILURE: Build failed with an exception."; exit 1;; esac
-GRADLE
-chmod +x android/gradlew
-EXPO
-chmod +x node_modules/.bin/expo
+case "$(basename "$0")" in
+npm) mkdir -p node_modules/.bin && ln -s '${tool}' node_modules/.bin/expo ;;
+expo) mkdir -p android && ln -s '${tool}' android/gradlew ;;
+gradlew) echo "$(pwd) $1" >> "$GRADLE_LOG"
+  case "$(pwd)" in */app-55/android) echo "FAILURE: Build failed with an exception."; exit 1;; esac ;;
+esac
 `,
     );
-    chmodSync(join(bin, "npm"), 0o755);
+    chmodSync(tool, 0o755);
+    symlinkSync(tool, join(bin, "npm"));
     const result = await conformance(["--platform", "android"], {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       ANDROID_HOME: fake.sdk,
