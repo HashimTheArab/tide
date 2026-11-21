@@ -323,7 +323,7 @@ const top = await ok(
   'top=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") && test -f "$top/scripts/gate.mjs" && echo "$top"',
 );
 const REPO = top.trim().split("\n").findLast((l) => l.startsWith("/")) ?? "";
-// Interpolated unquoted into shell commands below, so anything but a plain path stops the run.
+// Interpolated unquoted into shell commands below, so it must be a plain path; the trim hides trailing spaces.
 if (!/^\/[A-Za-z0-9._/-]+$/.test(REPO))
   throw new Error(`run implement-phase from a Tide checkout; got ${JSON.stringify(REPO)}`);
 const OUT = `${REPO}/.agent-output/phases/${PHASE.toLowerCase()}`;
