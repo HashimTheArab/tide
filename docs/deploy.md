@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-20
+updated: 2026-11-21
 ---
 
 # Deploying
@@ -59,7 +59,18 @@ Once per environment, in this order.
    `https://assets.example.com/assets/<hex>` then serves the object `assets/<hex>`. Every object in the bucket
    becomes public; Tide stores nothing secret there. Connect it before the first publish.
 5. **Signing identity.** A self-signed certificate per environment with its `keyid` (`design.md`, Keys). Tide
-   rejects unsigned apps. The key goes only to the writer job (Publishing), as `TIDE_SIGNING_KEY_FILE`,
+   rejects unsigned apps. From the app's directory, write the certificate where the app config reads it and the key
+   outside every checkout, never inside a repository:
+
+   ```sh
+   npx expo-updates codesigning:generate \
+     --certificate-output-directory keys \
+     --key-output-directory ~/tide-signing/main \
+     --certificate-validity-duration-years 10 \
+     --certificate-common-name "Example App"
+   ```
+
+   The key goes only to the writer job (Publishing), as `TIDE_SIGNING_KEY_FILE`,
    `TIDE_SIGNING_KEY` or `TIDE_KMS_KEY_ID`. Every writer, `register-build` included, and `tide probe` read the
    builds' identity from `TIDE_BUILD_KEYID` and one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`,
    taken from a shipped binary.
@@ -208,4 +219,6 @@ configuration or credential: pass them at run time, from the orchestrator's secr
   stalls is cut off when the orchestrator's grace period ends.
 - Node records no analytics.
 - `TIDE_SERVER_URL` is the container's public origin. `TIDE_ASSET_URL` is the bucket's public domain (S3) or, on
-  disk, a static origin over `TIDE_DISK_DIR/assets/` that sets each object's type (`design.md`, Other routes).
+  disk, a static origin such as `https://assets.example.com` where `https://assets.example.com/assets/<hex>` serves
+  `TIDE_DISK_DIR/assets/<hex>` with each object's type. Tide adds `/assets/` itself, as in step 4 of Setting up an
+  environment (`design.md`, Other routes).
