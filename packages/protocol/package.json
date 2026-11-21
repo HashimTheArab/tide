@@ -2,6 +2,30 @@
   "name": "@tide/protocol",
   "version": "0.0.0",
   "private": true,
+  "description": "Expo Updates protocol v1 manifests, multipart bodies, signatures and bsdiff patches, on web-standard APIs.",
+  "keywords": [
+    "expo",
+    "expo-updates",
+    "over-the-air",
+    "ota",
+    "react-native",
+    "code-signing",
+    "multipart",
+    "bsdiff"
+  ],
+  "homepage": "https://github.com/HashimTheArab/tide/tree/main/packages/protocol",
+  "bugs": {
+    "url": "https://github.com/HashimTheArab/tide/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HashimTheArab/tide.git",
+    "directory": "packages/protocol"
+  },
+  "files": [
+    "src"
+  ],
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

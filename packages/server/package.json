@@ -2,6 +2,31 @@
   "name": "@tide/server",
   "version": "0.0.0",
   "private": true,
+  "description": "Read-only Expo Updates server for Cloudflare Workers with R2, or Node with S3-compatible or disk storage.",
+  "keywords": [
+    "expo",
+    "expo-updates",
+    "over-the-air",
+    "ota",
+    "react-native",
+    "cloudflare-workers",
+    "hono",
+    "r2",
+    "s3"
+  ],
+  "homepage": "https://github.com/HashimTheArab/tide/tree/main/packages/server",
+  "bugs": {
+    "url": "https://github.com/HashimTheArab/tide/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HashimTheArab/tide.git",
+    "directory": "packages/server"
+  },
+  "files": [
+    "src"
+  ],
   "type": "module",
   "exports": {
     "./workers": "./src/workers.ts",
