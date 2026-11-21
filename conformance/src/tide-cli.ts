@@ -1,6 +1,7 @@
 // Drives the Tide CLI as an operator's CI would, against a stack's store and identity only.
-import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Platform } from "./options.ts";
@@ -26,13 +27,14 @@ export interface TideCli {
     readonly runtimeVersion: string;
     readonly manifest: string;
     readonly bundle: string;
+    readonly assetsDir?: string; // Required when the manifest lists assets.
   }): Promise<void>;
   rollbackToEmbedded(pointer: Pointer): Promise<void>;
   /** Returns `tide probe`'s report of what the stack serves for `pointer`. */
   probe(pointer: Pointer): Promise<string>;
 }
 
-/** Returns a driver whose commands run with exactly the stack's variables and end when the stack closes. */
+/** Returns a driver whose commands run with exactly the stack's variables and are stopped when the stack closes. */
 export function tideCli(stack: Stack): TideCli {
   const pins = {
     TIDE_BUILD_KEYID: stack.identity.keyId,
@@ -45,7 +47,7 @@ export function tideCli(stack: Stack): TideCli {
     TIDE_ASSET_URL: stack.serverUrl,
     TIDE_DISK_DIR: stack.storeDir,
   };
-  const tide = (args: string[], env: Record<string, string>) => run(args, env, stack.signal);
+  const tide = (args: string[], env: Record<string, string>) => run(stack, args, env);
   const at = (p: Pointer) => [
     "--channel",
     p.channel,
@@ -61,6 +63,8 @@ export function tideCli(stack: Stack): TideCli {
           (e): e is [string, string] => e[1] !== undefined && !CREDENTIAL.test(e[0]),
         ),
       );
+      // The export stages Expo's output under TMPDIR, so a killed export leaves nothing outside the stack.
+      env.TMPDIR = await mkdtemp(join(stack.dir, "tmp-"));
       const selected = platforms.flatMap((p) => ["--platform", p]);
       await tide(["export", "--project-root", projectRoot, "--out", out, ...selected], env);
     },
@@ -86,6 +90,7 @@ export function tideCli(stack: Stack): TideCli {
           build.manifest,
           "--bundle",
           build.bundle,
+          ...(build.assetsDir === undefined ? [] : ["--assets-dir", build.assetsDir]),
         ],
         write,
       );
@@ -97,18 +102,18 @@ export function tideCli(stack: Stack): TideCli {
   };
 }
 
-/** Runs the CLI with exactly `env` and returns its stdout; a non-zero exit throws with its stderr. */
-async function run(args: string[], env: Record<string, string>, signal: AbortSignal) {
-  const proc = spawn(process.execPath, [CLI, ...args], {
-    env,
-    signal,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+/** Runs the CLI with exactly `env` and returns its stdout; a non-zero exit or a kill throws with its stderr. */
+async function run(stack: Stack, args: string[], env: Record<string, string>) {
+  const proc = stack.spawn(process.execPath, [CLI, ...args], env);
   let stdout = "";
   let stderr = "";
   proc.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
   proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
-  const [code] = (await once(proc, "close")) as [number | null];
-  if (code !== 0) throw new Error(`tide ${args[0]} exited ${code}: ${stderr.trim()}`);
+  const [code, signal] = (await once(proc, "close")) as [number | null, NodeJS.Signals | null];
+  if (code !== 0) {
+    throw new Error(
+      `tide ${args[0]} ${signal ? `was killed by ${signal}` : `exited ${code}`}: ${stderr.trim()}`,
+    );
+  }
   return stdout;
 }

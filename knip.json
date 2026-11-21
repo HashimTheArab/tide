@@ -27,7 +27,8 @@
     "conformance": {
       "entry": [
         "src/main.ts",
-        "test/hold-stack.ts"
+        "test/hold-stack.ts",
+        "test/hung-export.ts"
       ]
     }
   }

@@ -1,11 +1,14 @@
 // The host side of a conformance run: a temp dir, a signing identity generated for the run, and a local Tide.
+import { spawn } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Agent, createServer, request } from "node:http";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ChildProcessByStdio } from "node:child_process";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Readable } from "node:stream";
 
 import { diskPath, patchKey } from "@tide/protocol";
 import { diskStore, startServer } from "@tide/server/node";
@@ -37,10 +40,16 @@ export interface Stack {
   readonly serverUrl: string; // TIDE_SERVER_URL and TIDE_ASSET_URL: the recorder.
   readonly identity: Identity;
   readonly responses: readonly Recorded[]; // In the order their headers were sent.
-  readonly signal: AbortSignal; // Aborted by `close`; a child spawned with it is killed then.
-  /** Stops the servers and removes the temp dir; later calls return the first call's promise. */
+  /**
+   * Starts `command` with exactly `env` in a process group of its own. `close` kills the group and waits until the
+   * child's stdout and stderr, which its own children inherit unless they redirect them, have closed.
+   */
+  spawn(command: string, args: readonly string[], env: Record<string, string>): Child;
+  /** Stops every child and the servers, then removes the temp dir; later calls return the first call's promise. */
   close(): Promise<void>;
 }
+
+type Child = ChildProcessByStdio<null, Readable, Readable>;
 
 /** Starts a stack; one that fails to start has already removed what it made. */
 async function startStack(): Promise<Stack> {
@@ -71,7 +80,34 @@ async function startStack(): Promise<Stack> {
     const agent = new Agent();
     steps.push(() => agent.destroy());
     const serverUrl = await serve(recorder(port(tide), agent, storeDir, responses), steps);
-    return { dir, storeDir, serverUrl, identity, responses, signal: controller.signal, close };
+    const children = new Set<Promise<void>>();
+    steps.push(() => Promise.all(children).then(() => undefined));
+    const start = (command: string, args: readonly string[], env: Record<string, string>) => {
+      if (controller.signal.aborted) throw new Error("the stack is closed");
+      const child = spawn(command, args, {
+        env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const kill = () => {
+        if (child.pid === undefined) return; // It never started; kill(0) would signal our own group.
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // The group has already gone.
+        }
+      };
+      const closed = new Promise<void>((resolve) => {
+        child.once("close", () => resolve()).once("error", () => resolve());
+      }).then(() => {
+        controller.signal.removeEventListener("abort", kill);
+        children.delete(closed);
+      });
+      children.add(closed);
+      controller.signal.addEventListener("abort", kill, { once: true });
+      return child;
+    };
+    return { dir, storeDir, serverUrl, identity, responses, spawn: start, close };
   } catch (e) {
     await close();
     throw e;
