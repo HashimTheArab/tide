@@ -26,6 +26,8 @@ import { abortable, discard, readBounded } from "./store.ts";
 // Only a 200 may be cached: a missing object can be uploaded later, and an outage must not stick.
 const NO_STORE = { "cache-control": "no-store" };
 const IMMUTABLE = "public, max-age=31536000, immutable";
+// Every header the patch lookup reads, so a shared cache never answers a patch request with a cached full bundle.
+const BUNDLE_VARY = "A-IM, Expo-Current-Update-ID, Expo-Requested-Update-ID";
 const CONTENT_HEX = /^[0-9a-f]{64}$/; // A bundle key's SHA-256, as stored.
 // Media-type parameters and q-values are ignored: stock clients send multipart/mixed, the only type Tide stores.
 const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
@@ -294,6 +296,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       return send(c, object, 200, {
         "content-type": assetContentType("bundle"),
         "cache-control": IMMUTABLE,
+        vary: BUNDLE_VARY,
       });
     }
     discard(object.body);
@@ -303,7 +306,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       im: "bsdiff",
       "expo-base-update-id": request.current,
       "cache-control": "private, no-store",
-      vary: "A-IM, Expo-Current-Update-ID",
+      vary: BUNDLE_VARY,
     });
   });
 

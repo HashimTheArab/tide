@@ -39,14 +39,15 @@ jobs:
           sudo tar -xzf betterleaks.tar.gz -C /usr/local/bin betterleaks
           betterleaks version
 
-      # The gate exits 0 even when a check fails, so the job result comes from its JSON.
+      # A failing check exits 1 after the report is written, so the summary prints before the step fails.
       - name: Gate
         run: |
           base=origin/main
           git rev-parse --verify -q "$base" > /dev/null || base=$(git rev-list --max-parents=0 HEAD)
-          node scripts/gate.mjs --base "$base" --out "$RUNNER_TEMP/gate.json" > /dev/null
+          status=0
+          node scripts/gate.mjs --base "$base" --out "$RUNNER_TEMP/gate.json" > /dev/null || status=$?
           jq '{allChecksPassed, tests, checks: (.checks | map_values(.exitCode))}' "$RUNNER_TEMP/gate.json"
-          jq -e '.allChecksPassed == true' "$RUNNER_TEMP/gate.json" > /dev/null
+          exit "$status"
 
   # Builds the Node image and runs it over a bucket the CLI publishes; needs docker, so it is not in the gate.
   container:
