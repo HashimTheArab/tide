@@ -58,16 +58,21 @@ export function storeFromEnv(env: Readonly<Record<string, string | undefined>>):
   return "disk" in storage ? diskStore(storage.disk) : s3Store(storage.s3);
 }
 
-/** Starts the app on Node; port 0 picks a free port. */
+/** Starts the app on Node; port 0 picks a free port, and no `hostname` listens on every interface. */
 export function startServer(options: {
   port: number;
+  hostname?: string;
   store: Store;
   appId?: string | undefined;
 }): Promise<Server> {
   const app = createApp(options.store, { appId: options.appId });
+  const { port, hostname } = options;
   return new Promise((resolve) => {
     // Without a createServer option, serve makes an HTTP/1.1 server.
-    const server = serve({ fetch: app.fetch, port: options.port }, () => resolve(server as Server));
+    const server = serve(
+      { fetch: app.fetch, port, ...(hostname !== undefined && { hostname }) },
+      () => resolve(server as Server),
+    );
   });
 }
 

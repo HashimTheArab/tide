@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./workers": "./src/workers.ts"
+    "./workers": "./src/workers.ts",
+    "./node": "./src/node.ts"
   },
   "scripts": {
     "wrangler": "WRANGLER_SEND_METRICS=false WRANGLER_SEND_ERROR_REPORTS=false wrangler",
