@@ -17,6 +17,7 @@ Start here; keep this index current when adding a doc.
 - [Testing standard](testing.md): decided, what to test and what reviewers reject
 - [Deploying](deploy.md): draft, an operator's Worker, staging and production, and the container
 - [Delivery loop](delivery-loop.md): decided, how a roadmap phase goes from plan to merge
+- [Comparison sources](comparison.md): draft, the sources behind the README comparison table
 
 Decisions:
 

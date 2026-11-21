@@ -2,44 +2,94 @@
 
 **A serverless Expo Updates server for Cloudflare Workers or any container.**
 
-Tide serves over-the-air updates to React Native apps that use the stock
-[`expo-updates`](https://docs.expo.dev/versions/latest/sdk/updates/) library, over the Expo Updates protocol v1. A
-CLI builds, signs and uploads every reply to one bucket (R2 or S3-compatible); the server picks a stored reply from
-the request headers and streams it. The same server runs on Cloudflare Workers or in a Node container.
+[![CI](https://github.com/HashimTheArab/tide/actions/workflows/ci.yml/badge.svg)](https://github.com/HashimTheArab/tide/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> Status: pre-release. Nothing is on npm yet, and it is not ready for production use. See [Status](#status).
+Tide sends over-the-air (OTA) updates to React Native apps that use Expo's own
+[`expo-updates`](https://docs.expo.dev/versions/latest/sdk/updates/) library. There is no custom client SDK to adopt,
+no database to run, and no signing key on the server. You publish from your machine or CI; Tide stores each signed
+update in a single bucket and serves it from Cloudflare Workers or from a container on any host.
+
+> [!NOTE]
+> **Pre-release.** Nothing is on npm yet, so Tide runs from a checkout of this repository. See [Status](#status).
 
 ## Why Tide
 
-- **The server signs nothing.** Manifests are signed once, at publish time, by the CLI. The server holds no key, so
-  a compromised server can withhold or replay updates but cannot make an app accept new code.
-- **Code signing is required.** Apps must ship a code-signing certificate, and the CLI never publishes unsigned. An
-  app without a certificate would run whatever the bucket holds, so Tide does not support one.
-- **No database.** One bucket holds every update, reply and patch. Publishing makes one conditional pointer write
-  per platform.
-- **Bundle diffing, including from the embedded bundle.** The CLI builds bsdiff patches at publish time, from earlier
-  updates and from the bundle inside a store build, so a fresh install's first update can be a patch too.
-- **Read-only server.** The server has no dashboard, no publish API and read-only storage credentials. The one
-  exception is the Workers R2 binding, which cannot be made read-only; the Worker only reads through it.
+- **Signed at publish time, never by the server.** Only the CLI signs, so the server holds no key. Whoever takes
+  over the server can stop or replay updates, but cannot make your apps run new code.
+- **Code signing is required, not optional.** Apps ship with a certificate and the CLI never publishes an unsigned
+  update, so every update a device accepts has been verified against that certificate first.
+- **Stock client, no migration.** Tide speaks Expo Updates protocol v1. Your app keeps using `expo-updates` exactly
+  as Expo ships it; there is no SDK to swap in and no Expo account to depend on.
+- **One bucket, no database.** Everything the server needs is in one R2 or S3-compatible bucket. That is the whole
+  state, which is why the same server runs on Workers or in a container.
+- **Small downloads.** At publish time Tide builds bsdiff patches from earlier updates and from the bundle inside
+  the store build, so even a fresh install's first update can download only what changed.
+- **Building and signing stay apart.** Only the build step runs your app's code, and it holds no secrets. The step
+  that signs and uploads runs none of your code.
 
-[docs/design.md](docs/design.md) explains how it works and [docs/decisions/](docs/decisions/0001-architecture.md)
-why.
+## How it works
+
+```text
+  tide export            tide publish              Bucket (R2 / S3)           Tide server
+  builds your app,  ──►  signs and uploads  ──►    signed updates,    ◄───    Workers or container,
+  holds no secrets       runs no app code          patches, assets           reads only, holds no key
+                                                                                    │
+                                                                                    │ Expo Updates protocol v1
+                                                                                    ▼
+                                                                      Your app (stock expo-updates)
+                                                                      verifies the signature, then applies
+```
+
+1. **Publish.** The CLI composes each update, signs the exact bytes it will serve, and uploads them to the bucket.
+   The pointer each channel serves is then swapped with a conditional write, so a reader sees the old reply or the
+   new one, never a mix.
+2. **Serve.** The server chooses a stored reply from the request's channel, runtime version and platform, and
+   streams those exact signed bytes back. It never re-serialises what was signed, and it only ever reads.
+3. **Verify.** The stock client checks the manifest signature and every asset hash before anything runs. Bytes
+   that fail those checks never execute, whoever served them.
+
+The design behind all of this — storage layout, wire rules, key handling — is in [docs/design.md](docs/design.md).
+
+## How Tide compares
+
+| | Tide | EAS Update | xprem | Xavia OTA | Hot Updater |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Self-hosted | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Works with stock `expo-updates` (no SDK swap) | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Server holds no signing key | ✅ | ✅¹ | ❌ | ❌ | ✅ |
+| Signing key can stay in AWS KMS | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Runs on Cloudflare Workers | ✅ | ❌ | ❌ | ❌ | ✅ |
+| No database or Expo account needed | ✅ | ❌ | ❌² | ❌ | ❌ |
+| Bundle diffing (download only what changed) | ✅ | ✅ | ✅² | ❌ | ✅ |
+| Diffing from the bundle inside the store build | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Web dashboard | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Staged rollouts | ❌³ | ✅ | ✅² | ❌ | ✅ |
+
+❌ also means the project's own docs do not mention the feature.
+
+1. Only on Expo's Production and Enterprise plans, where `eas update` signs locally.
+2. xprem needs PostgreSQL for bundle diffing and rollouts. Its stateless mode drops PostgreSQL but reads channels
+   from Expo's API and has neither feature.
+3. Planned; see "Later" in [docs/design.md](docs/design.md#later).
+
+Sources for every cell: [docs/comparison.md](docs/comparison.md).
 
 ## Quick start
 
-Until the packages are on npm, Tide runs from a checkout of this repository. You need the Node and pnpm versions in
-`engines` in [package.json](package.json).
+You need the Node and pnpm versions listed under `engines` in [package.json](package.json). Packages are not on
+npm yet, so everything runs from this checkout:
 
 ```sh
 pnpm install
 alias tide="node $PWD/packages/cli/src/main.ts"   # the CLI, run from source
 ```
 
-### Cloudflare Workers
+### Run the server on Cloudflare Workers
 
-[`examples/operator/`](examples/operator/) is a complete operator project: a one-line `worker.ts` and a
-`wrangler.jsonc` with a `staging` and a `production` environment, each binding its own R2 bucket. In your fork, set
-the Worker names, bucket names and `TIDE_APP_ID` in its `wrangler.jsonc`, then:
+[`examples/operator/`](examples/operator/) is a ready-made operator project with a `staging` and a `production`
+environment, each with its own R2 bucket. Set the Worker names, bucket names and `TIDE_APP_ID` in its
+`wrangler.jsonc`, then:
 
 ```sh
 cd examples/operator
@@ -47,31 +97,26 @@ pnpm run wrangler r2 bucket create <bucket>
 pnpm run wrangler deploy --env staging
 ```
 
-Every deploy needs `--env`; without it the Worker has no bindings. Attach a domain you control to the Worker and
-another to the bucket's public access before the first publish: both are inside signed manifests on devices, so they
-must keep working. [docs/deploy.md](docs/deploy.md) covers accounts, tokens, domains and routine deploys.
+Always pass `--env`. Before the first publish, give the Worker and the bucket each a domain you own: those
+addresses end up inside signed updates on users' phones, so they must keep working for as long as those builds are
+installed. [docs/deploy.md](docs/deploy.md) walks through the full setup, accounts and tokens included.
 
-### Container
-
-Build the Node image from the repository root and point it at a bucket directory or an S3-compatible bucket:
+### Or run it in a container
 
 ```sh
 docker build -f packages/server/Dockerfile -t tide .
 docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_DIR=/bucket tide
 ```
 
-For S3, set the five `TIDE_S3_*` variables, with read-only credentials, instead of `TIDE_DISK_DIR`. `GET /hc` is the
-health check. [docs/deploy.md](docs/deploy.md#the-container) lists every variable.
+This serves a local folder. To serve an S3-compatible bucket instead, set the `TIDE_S3_*` variables with read-only
+credentials. The container does not serve images and fonts, so give the bucket's assets a public address of their
+own, and set `TIDE_SERVER_URL` and `TIDE_ASSET_URL` before the first publish.
+[docs/deploy.md](docs/deploy.md#the-container) lists every variable.
 
-The container serves manifests and launch bundles, not images or fonts, so set up an asset origin and the
-publisher's `TIDE_SERVER_URL` and `TIDE_ASSET_URL` before the first publish
-([docs/deploy.md](docs/deploy.md#the-container)).
+### Point your app at it
 
-### The app
-
-A build finds its updates by URL, channel and runtime version, and trusts them by certificate
-([docs/deploy.md](docs/deploy.md#the-app); step 5 of
-[Setting up an environment](docs/deploy.md#setting-up-an-environment) generates the certificate). The app config:
+Give the app your server's address and the signing certificate (step 5 of
+[Setting up an environment](docs/deploy.md#setting-up-an-environment) creates it):
 
 ```js
 {
@@ -85,125 +130,98 @@ A build finds its updates by URL, channel and runtime version, and trusts them b
 }
 ```
 
-## Publishing and signing
+The channel header is required, and the runtime version must resolve to one you have published; a runtime with
+nothing published answers with a signed "no update available" rather than an error.
 
-Publishing is two steps, meant to run as two CI jobs:
+## Publishing
+
+Publishing is two steps, designed to run as two separate CI jobs:
 
 ```sh
-tide export --project-root <app> --out <dir>      # runs Expo; reads no credential
-tide publish --from <dir> --channel main          # signs and uploads; runs no project code
+tide export --project-root <app> --out <dir>      # builds the app; needs no secrets
+tide publish --from <dir> --channel main          # signs and uploads; runs no app code
 ```
 
-- **`tide export`** is the only command that runs project code (the app config, Babel and Metro). It holds no
-  secret, and Expo's tools get only an allowlisted environment. Its output directory is public data: the bundle,
-  assets, public config and certificate.
-- **`tide publish --from`** checks the export, signs one manifest per platform with a key from a file, the
-  environment or AWS KMS, verifies every signature against the build certificate, uploads what is missing and writes
-  each pointer with a conditional write.
-
-Writers run one at a time, in one CI concurrency group. Nothing is ever deleted from the bucket. The workflow,
-runner and credential setup is in [docs/deploy.md](docs/deploy.md#publishing), and key handling, including KMS
-provisioning, in [docs/design.md](docs/design.md#keys).
+The signing key can come from a file, an environment variable, or AWS KMS — through KMS the private key never
+leaves AWS. Run one publish at a time (a single CI concurrency group), and know that Tide never deletes anything
+from the bucket: published URLs must keep working for every device that holds them.
+[docs/deploy.md](docs/deploy.md#publishing) shows a complete CI setup, and [docs/design.md](docs/design.md#keys)
+covers how keys and certificates are checked.
 
 ## Bundle diffing
 
-Clients with bsdiff enabled (`updates.enableBsdiffPatchSupport`) ask for a patch from the update they run. At
-publish time the CLI builds a `BSDIFF40` patch to the new bundle from each registered base, applies it, and keeps it
-only if the result hashes to the new bundle and the patch is at most half the bundle's gzip size. The server serves a
-stored patch when one exists, and the full bundle otherwise.
-
-Earlier updates become bases on their own. To patch from the bundle inside a store build, register that build once:
+Turn on `updates.enableBsdiffPatchSupport` in the app, and it will ask for a patch instead of the whole bundle.
+Tide builds patches when you publish, applies each one back and checks the result's hash before uploading, and
+keeps a patch only when it is at most half the bundle's compressed size; otherwise the app simply gets the whole
+bundle. Patches from earlier updates need no setup. To also patch from the bundle inside a store build — so a
+fresh install's first update is small too — register that build once:
 
 ```sh
 tide register-build --platform android --runtime-version 1.0.0 \
   --manifest app.manifest --bundle index.android.bundle --assets-dir <dir>
 ```
 
-[docs/design.md](docs/design.md#patches) has the patch format and which files to take from an APK or an `.app`.
+[docs/design.md](docs/design.md#patches) explains which files to take from an APK or an `.app`.
 
 ## Operations
 
 | Command | What it does |
 | --- | --- |
-| `tide status` | One line per pointer: channel, runtime, platform, kind, update ID and time |
-| `tide storage` | Read-only report of objects nothing references; deletes nothing |
-| `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Fetches the manifest as an installed build would, verifies its signature and the launch bundle's hash |
-| `tide rollback --embedded --channel <name> --runtime-version <version>` | Serves a signed rollback to the bundle inside the build |
-| `tide rollback --to <updateId>` | Serves an earlier update again, as a new and newer publish |
-| `tide republish <updateId>...` | Serves stored updates again, optionally to another `--channel` or `--runtime-version` |
+| `tide status` | Lists what each channel serves right now |
+| `tide storage` | Lists files nothing references any more; deletes nothing |
+| `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Checks a live server the way an installed app would |
+| `tide rollback --embedded --channel <name> --runtime-version <version>` | Sends apps back to the bundle inside the store build |
+| `tide rollback --to <updateId>` | Serves an earlier update again |
+| `tide republish <updateId>... [--channel <name>] [--runtime-version <version>]` | Serves stored updates again, optionally on another channel or runtime |
 
-`tide probe` needs no store credentials or signing key, only the builds' public pins: `TIDE_BUILD_KEYID` and one of
-`TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE` ([setup](docs/design.md#tide-probe)). The other commands
-read the bucket, and `rollback` and `republish` also sign. On Workers, every manifest request also writes one Workers Analytics Engine data point. Exit codes and every rule
-are in [docs/design.md](docs/design.md#cli).
+`tide probe` needs no secrets and no bucket access. It identifies builds by `TIDE_BUILD_KEYID` and the certificate
+they embed, given as exactly one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, then checks a live
+server end to end: it verifies the reply's signature under that certificate and compares the served bundle's hash
+with the signed manifest. On Workers, every update check that reaches a reply also records one Analytics Engine
+data point; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
+and exit codes.
 
-## Compared with other servers
+## Security model
 
-Checked on 2026-11-21 against each project's own repository or documentation, at the versions in the sources list.
-? means the source does not say; — is for a hosted service.
+- **The server only reads.** It holds no signing key and no write credentials. On Workers the R2 binding cannot
+  be made read-only, so the Worker holds write access it never uses — its storage type admits only reads.
+- **The bucket is trusted by design, and devices are the backstop.** Only the CLI writes to the bucket, after
+  validating and signing. Even so, a stock client verifies every signature and asset hash, so bytes that were not
+  signed by your key never run.
+- **The key lives in CI, ideally in KMS.** A leaked signing key can ship code to every installed app, so publish
+  only from CI and prefer AWS KMS, where the key cannot be exported. One signing identity serves one bucket; a
+  new key means a new bucket and a new updates URL.
+- **Report problems privately.** See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
-| | Tide | EAS Update | xprem | custom-expo-updates-server | self-hosted-expo-updates-server | cloudflare-expo-updates-server | hot-updater | react-native-update |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Client | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Own SDK | Own SDK |
-| Runs on Cloudflare Workers | ✅ | — | ? | ? | ? | ✅ | ✅ | ? |
-| Runs as a container | ✅ | — | ✅ | ? | ✅ | ? | ✅ | ? |
-| Where updates are signed | CLI, at publish | EAS CLI, at publish | Server, on each request | Server, on each request | Server, on each request | Not supported | CLI, at deploy (optional) | ? |
-| Runs without a database | ✅ | — | ✅ stateless mode | ✅ | ❌ MongoDB | ✅ | ❌ | ? |
-| Bundle diffing | ✅ | ✅ | ✅ needs PostgreSQL | ? | ✅ | ? | ✅ | ✅ |
-| Patch from the embedded bundle | ✅ | ✅ | ? | ? | ? | ? | ❌ | ✅ |
-| Roll back to the embedded bundle | ✅ | ✅ | ✅ | ✅ | ? | ? | ✅ | ✅ SDK call (`resetToPackagedBundle`) |
-| Staged rollouts | ❌ | ✅ | ✅ needs PostgreSQL | ? | ? | ? | ✅ | ✅ |
-| Dashboard | ❌ | ✅ | ✅ | ❌ | ✅ | ? | ✅ | ✅ |
+## What's in this repository
 
-A server that signs on each request holds the key, so whoever controls it can sign any code; a server that serves
-manifests signed earlier cannot. "Not supported" means the project's README lists code signing as something to add.
-
-Sources, all checked on 2026-11-21:
-
-- **Tide**: [docs/design.md](docs/design.md) and the code on `main`.
-- **EAS Update** (called Expo Update in its docs): `docs/pages/eas-update/` in
-  [expo/expo@aa82194](https://github.com/expo/expo/tree/aa82194f82a84173211b2b832b9249b0cfd2b1ef/docs/pages/eas-update):
-  `introduction.mdx`, `code-signing.mdx` (signed locally by `eas update`; Production or Enterprise plans),
-  `bundle-diffing.mdx`, `rollbacks.mdx`, `rollouts.mdx` and `trace-update-id-expo-dashboard.mdx`.
-- **xprem** (formerly expo-open-ota):
-  [mercuretechnologies/xprem v3.2.7](https://github.com/mercuretechnologies/xprem/tree/v3.2.7) `README.md`, and its
-  documentation for v3.2.0 (the latest it lists): Bundle Diffing (control plane only; patches from the 5 previous
-  updates), Stateless mode, Rollback and Progressive rollouts.
-- **custom-expo-updates-server**:
-  [expo/custom-expo-updates-server@feb29fc](https://github.com/expo/custom-expo-updates-server/tree/feb29fc4ac1f5eb011bdfe95391190a91da4bb31),
-  a demonstration its README says is not meant as a full backend: `README.md`,
-  `expo-updates-server/pages/api/manifest.ts` and `expo-updates-server/common/helpers.ts`.
-- **self-hosted-expo-updates-server**:
-  [umbertoghio/self-hosted-expo-updates-server@64bd4e3](https://github.com/umbertoghio/self-hosted-expo-updates-server/tree/64bd4e3a71f42ebbc01df208dcdb0675ac186c53)
-  `README.md`, `docs/bsdiff-binary-patches.md` (bases are uploaded updates) and
-  `API/src/modules/expo/manifest.ts`.
-- **cloudflare-expo-updates-server**:
-  [isaiahbjork/cloudflare-expo-updates-server@aa7a768](https://github.com/isaiahbjork/cloudflare-expo-updates-server/tree/aa7a7686d8b2fbbb0b75a652c173c2d712d7597e)
-  `README.md` (Security lists code signing as a recommendation) and `src/index.js`.
-- **hot-updater**: [gronxb/hot-updater v1.1.0](https://github.com/gronxb/hot-updater/tree/v1.1.0) `README.md` and
-  `docs/content/docs/(latest)/`: `guides/bundle-signing.mdx`, `guides/bundle-diffing.mdx` (patches from earlier OTA
-  bundles; the first update reuses unchanged built-in files), `guides/rollout-cohorts.mdx`, `guides/console.mdx`,
-  `custom/hosting/docker.mdx` and `storage-adapters/cloudflare.mdx`.
-- **react-native-update**:
-  [reactnativecn/react-native-update v10.63.0](https://github.com/reactnativecn/react-native-update/tree/v10.63.0)
-  `README.md` (server: a hosted service or a paid private deployment; the SDK's `resetToPackagedBundle`) and
-  `src/NativePushy.ts` (patches from the bundle inside the binary).
+| Path | What it holds |
+| --- | --- |
+| `packages/server` | The Hono server: runtime-free core, plus Workers and Node entry points |
+| `packages/protocol` | The shared manifest, multipart, signature and patch contract |
+| `packages/cli` | The CLI: export, publish, register builds, roll back, inspect and probe |
+| `conformance/` | Stock `expo-updates` release apps checked against a local Tide |
+| `examples/operator/` | The minimal operator Worker described in the quick start |
+| `docs/` | Design, deploy guide, roadmap and decision records |
 
 ## Status
 
-Pre-release. The server, CLI, bundle diffing, operations commands and container image are built and tested on
-workerd and Node; npm releases come later on the roadmap. Conformance runs stock `expo-updates` release apps on an
-Android emulator against a local Tide (`pnpm conformance`, outside the gate), and its scenarios are still being
-added. [docs/roadmap.md](docs/roadmap.md) has every phase and its state.
+Pre-release. The server, the CLI, bundle diffing, the operations commands and the container image are built and
+covered by tests on both Workers and Node. Real `expo-updates` apps on an Android emulator check updates, patches
+and rollbacks against a local Tide (`pnpm conformance`, run separately from the gate). npm
+releases come later; [docs/roadmap.md](docs/roadmap.md) lists every phase and what remains.
 
 ## Development
 
-Requires Node 26 and pnpm 12. [CONTRIBUTING.md](CONTRIBUTING.md) has the rules.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rules and the reasoning behind them.
 
 ```sh
 pnpm install
-pnpm gate        # every check CI runs, as JSON
+pnpm gate        # every check CI runs
 ```
+
+Documentation starts at [docs/README.md](docs/README.md): the [design](docs/design.md) for how Tide works and
+the [deploy guide](docs/deploy.md) for running it.
 
 ## License
 
