@@ -22,12 +22,13 @@ describe("the conformance app", () => {
           dir: join(stack.dir, `app-${version}`),
           packageName: `dev.tide.conformance.sdk${version}`,
           channel: `expo-${version}`,
+          runtimeVersion: `1.0.0-sdk${version}`,
         });
         const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
           expo: Record<string, unknown>;
         };
         expect(expo).toMatchObject({
-          runtimeVersion: "1.0.0",
+          runtimeVersion: `1.0.0-sdk${version}`,
           android: { package: app.packageName },
           plugins: ["./cleartext.js"],
         });

@@ -16,8 +16,8 @@ override it. Agents are denied admin merges, force pushes, pushes to `main` and 
 
 ## Running it
 
-Run `implement-phase` with `{phase: "P2"}` from the Tide checkout or one of its worktrees; the run finds the main
-checkout through git. Its path must hold only letters, digits, `.`, `_`, `-` and `/`, since agents put it into
+Run `implement-phase` with `{phase: "P2"}` from the Tide checkout or one of its worktrees, or pass `repo: "<path>"`; the run
+finds the main checkout through git. Its path must hold only letters, digits, `.`, `_`, `-` and `/`, since agents put it into
 shell commands unquoted; other paths are unsupported. Each run delivers one slice: the one you name, or the next
 pending one. Run it again for the next slice. Progress lives in `.agent-output/phases/<phase>/plan.json`, and each
 slice's evidence (design note, gate reports, Codex reviews, PR body) in `.agent-output/phases/<phase>/<slice>/`.
