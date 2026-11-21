@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 
-const PLATFORMS = ["android", "ios"] as const;
+export const PLATFORMS = ["android", "ios"] as const;
 export type Platform = (typeof PLATFORMS)[number];
 
 /** The expo-updates lines under test: the oldest with bsdiff support and the latest stable. */

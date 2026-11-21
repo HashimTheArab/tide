@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 
-import type { AndroidDevice } from "./android.ts";
 import type { App, Build } from "./app.ts";
 import type { Device } from "./device.ts";
-import type { IosDevice } from "./ios.ts";
 import type { ExpoVersion, Run, Scenario } from "./options.ts";
 import type { Outcome, Target } from "./scenarios.ts";
 import type { Stack } from "./stack.ts";
@@ -51,13 +49,16 @@ async function main(args: readonly string[]): Promise<number> {
 }
 
 /** How a run reaches one platform's device and builds its app. */
-interface Driver<D extends Device> {
-  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, and a line naming it. */
-  open(stack: Stack): Promise<{ device: D; about: string }>;
-  build(stack: Stack, app: App, device: D, marker: string): Promise<Build>;
+interface Driver {
+  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, a line naming it, and its app builder. */
+  open(stack: Stack): Promise<{
+    device: Device;
+    about: string;
+    build(app: App, marker: string): Promise<Build>;
+  }>;
 }
 
-const android = (run: Run, sdk: string): Driver<AndroidDevice> => ({
+const android = (run: Run, sdk: string): Driver => ({
   async open(stack) {
     const device = await androidDevice(stack, {
       sdk,
@@ -65,25 +66,30 @@ const android = (run: Run, sdk: string): Driver<AndroidDevice> => ({
       avd: run.avd,
     });
     await device.reverse(Number(new URL(stack.serverUrl).port));
-    const about = `${device.serial} (${device.abi}${device.booted ? ", booted read-only" : ""})`;
-    return { device, about };
+    return {
+      device,
+      about: `${device.serial} (${device.abi}${device.booted ? ", booted read-only" : ""})`,
+      build: (app, marker) => buildAndroid(stack, app, sdk, device.abi, marker),
+    };
   },
-  build: (stack, app, device, marker) => buildAndroid(stack, app, sdk, device.abi, marker),
 });
 
-const ios = (run: Run): Driver<IosDevice> => ({
+const ios = (run: Run): Driver => ({
   async open(stack) {
     const device = await iosDevice(stack, { xcrun: "xcrun", simulator: run.simulator });
-    return { device, about: `${device.name} (${device.udid}${device.booted ? ", booted" : ""})` };
+    return {
+      device,
+      about: `${device.name} (${device.udid}${device.booted ? ", booted" : ""})`,
+      build: (app, marker) => buildIos(stack, app, device.udid, marker),
+    };
   },
-  build: (stack, app, device, marker) => buildIos(stack, app, device.udid, marker),
 });
 
 /**
  * Builds each version's app and runs the scenarios on one device, printing one line per version and scenario;
  * returns 1 if any failed or did not run.
  */
-async function conform<D extends Device>(run: Run, driver: Driver<D>): Promise<number> {
+async function conform(run: Run, driver: Driver): Promise<number> {
   const names = plan(run.scenarios);
   const failed: string[] = [];
   const report = (version: ExpoVersion, name: Scenario, outcome: Outcome) => {
@@ -101,14 +107,14 @@ async function conform<D extends Device>(run: Run, driver: Driver<D>): Promise<n
   };
   await withStack(async (stack) => {
     const cli = tideCli(stack);
-    let device: D;
+    let opened;
     try {
-      let about;
-      ({ device, about } = await driver.open(stack));
-      say(`using ${about}`);
+      opened = await driver.open(stack);
     } catch (e) {
       return notRun(run.versions, e);
     }
+    const { device, about, build: buildApp } = opened;
+    say(`using ${about}`);
     let seeded = false;
     for (const [i, version] of run.versions.entries()) {
       let target: Target;
@@ -116,7 +122,7 @@ async function conform<D extends Device>(run: Run, driver: Driver<D>): Promise<n
         const app = materialise(stack, version, run.platform);
         say(`building the expo-updates ${version} release ${run.platform} app`);
         const marker = `embedded-${version}-${randomUUID().slice(0, 8)}`;
-        const build = await driver.build(stack, app, device, marker);
+        const build = await buildApp(app, marker);
         target = { stack, device, cli, app, build };
       } catch (e) {
         notRun([version], e);

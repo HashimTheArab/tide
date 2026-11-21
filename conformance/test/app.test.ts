@@ -3,14 +3,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
-import type { Platform } from "../src/options.ts";
 import { materialise, writeMarker } from "../src/app.ts";
-import { EXPO_VERSIONS } from "../src/options.ts";
+import { EXPO_VERSIONS, PLATFORMS } from "../src/options.ts";
 import { withStack } from "../src/stack.ts";
 
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
 const VERSIONS = Object.keys(EXPO_VERSIONS) as (keyof typeof EXPO_VERSIONS)[];
-const PLATFORMS: Platform[] = ["android", "ios"];
 const bytes = (path: string) => readFileSync(path).toString("base64");
 
 describe("the conformance app", () => {
