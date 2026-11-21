@@ -6,7 +6,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const docsDir = fileURLToPath(new URL("../docs/", import.meta.url));
+const root = fileURLToPath(new URL("../", import.meta.url));
+const docsDir = join(root, "docs");
 const index = readFileSync(join(docsDir, "README.md"), "utf8");
 
 /** @type {(dir: string) => string[]} */
@@ -54,11 +55,11 @@ for (const permission of permissions) {
 
 // README: opens with the package description as its tagline, links only to files that exist, and names only the CLI
 // commands and flags the CLI's own usage lists.
-const root = fileURLToPath(new URL("../", import.meta.url));
 const readme = readFileSync(join(root, "README.md"), "utf8");
-const pkg = /** @type {unknown} */ (JSON.parse(readFileSync(join(root, "package.json"), "utf8")));
 const tagline =
-  typeof pkg === "object" && pkg !== null && "description" in pkg ? String(pkg.description) : "";
+  /** @type {{ description?: string }} */ (
+    JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
+  ).description ?? "";
 if (tagline === "") errors.push("package.json: needs a description, the README's tagline");
 if (!readme.startsWith(`# Tide\n\n**${tagline}**\n`)) {
   errors.push(`README.md: must open with "# Tide" and the tagline **${tagline}**`);

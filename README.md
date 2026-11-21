@@ -60,8 +60,7 @@ docker build -f packages/server/Dockerfile -t tide .
 docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_DIR=/bucket tide
 ```
 
-For S3, pass `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and
-`TIDE_S3_SECRET_ACCESS_KEY` with read-only credentials instead of `TIDE_DISK_DIR`. `GET /hc` is the health check.
+For S3, set the five `TIDE_S3_*` variables, with read-only credentials, instead of `TIDE_DISK_DIR`. `GET /hc` is the health check.
 [docs/deploy.md](docs/deploy.md#the-container) lists every variable.
 
 ### The app
@@ -93,14 +92,9 @@ tide publish --from <dir> --channel main          # signs and uploads; runs no p
 - **`tide export`** is the only command that runs project code (the app config, Babel and Metro). It holds no
   secret, and Expo's tools get only an allowlisted environment. Its output directory is public data: the bundle,
   assets, public config and certificate.
-- **`tide publish --from`** checks the export, composes one manifest per platform, signs it, uploads what is missing
-  and writes each platform's pointer with a conditional write. The key comes from exactly one of
-  `TIDE_SIGNING_KEY_FILE` (a PEM file), `TIDE_SIGNING_KEY` (the PEM) or `TIDE_KMS_KEY_ID` (an AWS KMS key, with its
-  region and credentials). Every signature is verified against the certificate before it is used.
-- **The builds pin the identity.** Every writer reads `TIDE_BUILD_KEYID` and `TIDE_BUILD_CERTIFICATE_FILE` (or
-  `TIDE_BUILD_CERTIFICATE`), taken from a shipped binary, and refuses an export signed for anything else.
-- **The server never holds a key.** Its storage credentials are read-only. `TIDE_SERVER_URL`, `TIDE_ASSET_URL` and
-  the bucket (`TIDE_S3_*` or `TIDE_DISK_DIR`) configure the writers.
+- **`tide publish --from`** checks the export, signs one manifest per platform with a key from a file, the
+  environment or AWS KMS, verifies every signature against the build certificate, uploads what is missing and writes
+  each pointer with a conditional write.
 
 Writers run one at a time, in one CI concurrency group. Nothing is ever deleted from the bucket. The workflow,
 runner and credential setup is in [docs/deploy.md](docs/deploy.md#publishing), and key handling, including KMS
