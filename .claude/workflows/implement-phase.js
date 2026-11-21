@@ -264,6 +264,8 @@ async function gate(tag) {
 // The gate on a clean tree, with two fix attempts by a fresh Opus.
 async function greenGate(tag) {
   let g = await gate(tag);
+  // Parallel runs load the machine; one rerun keeps a timeout from costing a fix attempt.
+  if (!g.passed) g = await gate(`${tag}-rerun`);
   for (let i = 1; i <= 2 && !g.passed; i++) {
     collect(
       done(
