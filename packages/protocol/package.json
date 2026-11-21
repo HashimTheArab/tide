@@ -1,7 +1,6 @@
 {
   "name": "@tide-ota/protocol",
   "version": "0.0.0",
-  "private": true,
   "description": "Expo Updates protocol v1 manifests, multipart bodies, signatures and bsdiff patches, on web-standard APIs.",
   "keywords": [
     "expo",
@@ -24,13 +23,28 @@
     "directory": "packages/protocol"
   },
   "files": [
-    "src"
+    "dist",
+    "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
   "exports": {
     ".": "./src/index.ts"
   },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "types": "./dist/index.d.ts"
+  },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run"
   },

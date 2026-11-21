@@ -1,0 +1,12 @@
+{
+  // Added to a package's runtime config to emit its published dist; the workspace itself runs from src.
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "${configDir}/src",
+    "outDir": "${configDir}/dist",
+    "incremental": false,
+    "tsBuildInfoFile": null
+  }
+}
