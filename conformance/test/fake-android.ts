@@ -1,6 +1,6 @@
 // Stands in for the SDK's adb (argv[2] "adb") and emulator (argv[2] "emulator") over a state file in argv[3], the
 // fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt. The AVD
-// "Crash" exits while booting.
+// "Crash" exits while booting; "Fresh" drops adb's connection once, as a fresh AVD's first boot does.
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -63,7 +63,15 @@ if (role === "emulator") {
   if (command === "wait-for-device") {
     // Its own file: a write to state.json here could overwrite the booting emulator's registration.
     publish("wait.pid", String(process.pid));
-    whenever(() => serial in read().running);
+    whenever(() => {
+      const booting = read().running[serial];
+      if (booting === undefined) return false;
+      if (booting.avd === "Fresh" && !existsSync(file("dropped"))) {
+        writeFileSync(file("dropped"), "");
+        process.exit(255);
+      }
+      return true;
+    });
   } else if (!(serial in state.running)) {
     process.stderr.write(`adb: device '${serial}' not found\n`);
     process.exitCode = 1;

@@ -209,8 +209,9 @@ and exit codes.
 ## Status
 
 Pre-release. The server, the CLI, bundle diffing, the operations commands and the container image are built and
-covered by tests on both Workers and Node. Real `expo-updates` apps on an Android emulator check updates, patches
-and rollbacks against a local Tide (`pnpm conformance`, run separately from the gate). npm
+covered by tests on both Workers and Node. Real `expo-updates` apps check updates, patches and rollbacks against a
+local Tide (`pnpm conformance`, run separately from the gate): nightly on an Android emulator, and on an iOS simulator
+before each release. npm
 releases come later; [docs/roadmap.md](docs/roadmap.md) lists every phase and what remains.
 
 ## Development

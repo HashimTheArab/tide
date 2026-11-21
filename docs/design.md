@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-21
+updated: 2026-11-22
 ---
 
 # Design
@@ -18,7 +18,8 @@ CLI refuses to publish without a key. Without it, anyone who can write the bucke
 - It applies a manifest only if its `createdAt` is newer than the update it runs, after filtering by
   `expo-manifest-filters`. So a rollback is a new, newer publish: a pointer can never move back in time.
 - It verifies `expo-signature` over the exact bytes of the multipart part, and each asset's SHA-256.
-- With bsdiff enabled (default from SDK 57), a launch-asset request carries `A-IM: bsdiff`,
+- With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
+  launch-asset request carries `A-IM: bsdiff`,
   `Expo-Current-Update-ID` (the running update, which can be the embedded one) and `Expo-Requested-Update-ID`.
   It accepts a patch only with `im: bsdiff` or status 226 and `expo-base-update-id` equal to its current ID, applies
   `BSDIFF40`, checks the hash, and refetches the full file on any failure.
