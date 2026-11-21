@@ -161,18 +161,31 @@ export function fakeXcrun(simulators: FakeSimulator[]) {
       writeFileSync(join(dir, "app.log"), lines.map((l) => `${l}\n`).join("")),
     /**
      * Holds the next `command` before it reads or changes state; resolves once it is held, with its PID and a release.
+     * A test that leaves a held command unreleased fails, since Node rejects a FileHandle closed by GC.
      */
     hold(command: string) {
       const fifo = join(dir, `hold-${command}`);
       execFileSync("mkfifo", [fifo]);
-      // Opening the read end frees an open still waiting for a fake that never came.
-      onTestFinished(() => {
-        if (existsSync(fifo)) closeSync(openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK));
+      let state: "waiting" | "held" | "released" = "waiting";
+      const opened = open(fifo, "w");
+      onTestFinished(async () => {
+        const held = state === "held";
+        // Opening the read end frees an open still waiting for a fake that never came.
+        if (state === "waiting")
+          closeSync(openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK));
+        if (state !== "released") await (await opened).close();
+        if (held) throw new Error(`the test never released hold-${command}`);
       });
-      return open(fifo, "w").then((handle) => ({
-        pid: Number(text(`${command}.pid`)),
-        release: () => handle.close(),
-      }));
+      return opened.then((handle) => {
+        state = "held";
+        return {
+          pid: Number(text(`${command}.pid`)),
+          release: () => {
+            state = "released";
+            return handle.close();
+          },
+        };
+      });
     },
     /** The log stream's PID, and whether SIGTERM ended it. */
     stream: () => ({

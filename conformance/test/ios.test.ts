@@ -112,14 +112,17 @@ describe("the iOS device driver", () => {
   test("ends a readiness wait still running on close, then shuts the simulator down", async () => {
     const fake = fakeXcrun([PHONE]);
     const waiting = fake.hold("bootstatus");
-    let pid = 0;
     await withStack(async (stack) => {
       const device = iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined }).catch(
         (e: unknown) => e,
       );
-      ({ pid } = await waiting);
-      await stack.close();
-      expect(alive(pid)).toBe(false);
+      const { pid, release } = await waiting;
+      try {
+        await stack.close();
+        expect(alive(pid)).toBe(false);
+      } finally {
+        await release();
+      }
       expect(await device).toMatchObject({
         message: "xcrun simctl bootstatus A1 failed: was cancelled",
       });
