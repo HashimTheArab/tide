@@ -321,9 +321,10 @@ ${
 
 // ---- Checkout
 // The main checkout of the repository the run starts in; worktrees resolve to it through the shared git dir.
+// `args.repo` names a checkout when the session starts outside one.
 const top = await ok(
   "find checkout",
-  'top=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") && test -f "$top/scripts/gate.mjs" && echo "$top"',
+  `${a.repo ? `cd ${q(a.repo)} && ` : ""}top=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") && test -f "$top/scripts/gate.mjs" && echo "$top"`,
 );
 const REPO = top.trim().split("\n").findLast((l) => l.startsWith("/")) ?? "";
 // Interpolated unquoted into shell commands below, so it must be a plain path; the trim hides trailing spaces.
