@@ -140,20 +140,20 @@ are in [docs/design.md](docs/design.md#cli).
 ## Compared with other servers
 
 Checked on 2026-11-21 against each project's own repository or documentation, at the versions in the sources list.
-"Not documented" means the source does not say. "Does not apply" is for a hosted service.
+? means the source does not say; — is for a hosted service.
 
 | | Tide | EAS Update | xprem | custom-expo-updates-server | self-hosted-expo-updates-server | cloudflare-expo-updates-server | hot-updater | react-native-update |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Client | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Stock `expo-updates` | Own SDK | Own SDK |
-| Runs on Cloudflare Workers | Yes | Does not apply | Not documented | Not documented | Not documented | Yes | Yes | Not documented |
-| Runs as a container | Yes | Does not apply | Yes | Not documented | Yes | Not documented | Yes | Not documented |
-| Where updates are signed | CLI, at publish | EAS CLI, at publish | Server, on each request | Server, on each request | Server, on each request | Not supported | CLI, at deploy (optional) | Not documented |
-| Needs a database | No | Does not apply | PostgreSQL, or none in stateless mode | No | MongoDB | No | Yes | Not documented |
-| Bundle diffing | Yes | Yes | Yes, needs PostgreSQL | Not documented | Yes | Not documented | Yes | Yes |
-| Patch from the embedded bundle | Yes | Yes | Not documented | Not documented | Not documented | Not documented | No | Yes |
-| Roll back to the embedded bundle | Yes | Yes | Yes | Yes | Not documented | Not documented | Yes | SDK call (`resetToPackagedBundle`) |
-| Staged rollouts | No | Yes | Yes, needs PostgreSQL | Not documented | Not documented | Not documented | Yes | Yes |
-| Dashboard | No | Yes | Yes | No | Yes | Not documented | Yes | Yes |
+| Runs on Cloudflare Workers | ✅ | — | ? | ? | ? | ✅ | ✅ | ? |
+| Runs as a container | ✅ | — | ✅ | ? | ✅ | ? | ✅ | ? |
+| Where updates are signed | CLI, at publish | EAS CLI, at publish | Server, on each request | Server, on each request | Server, on each request | Not supported | CLI, at deploy (optional) | ? |
+| Runs without a database | ✅ | — | ✅ stateless mode | ✅ | ❌ MongoDB | ✅ | ❌ | ? |
+| Bundle diffing | ✅ | ✅ | ✅ needs PostgreSQL | ? | ✅ | ? | ✅ | ✅ |
+| Patch from the embedded bundle | ✅ | ✅ | ? | ? | ? | ? | ❌ | ✅ |
+| Roll back to the embedded bundle | ✅ | ✅ | ✅ | ✅ | ? | ? | ✅ | ✅ SDK call (`resetToPackagedBundle`) |
+| Staged rollouts | ❌ | ✅ | ✅ needs PostgreSQL | ? | ? | ? | ✅ | ✅ |
+| Dashboard | ❌ | ✅ | ✅ | ❌ | ✅ | ? | ✅ | ✅ |
 
 A server that signs on each request holds the key, so whoever controls it can sign any code; a server that serves
 manifests signed earlier cannot. "Not supported" means the project's README lists code signing as something to add.
