@@ -87,6 +87,75 @@ describe("the iOS device driver", () => {
     expect(fake.state().simulators[0]?.state).toBe("Shutdown");
   });
 
+  test("waits for a boot still running on close, then shuts the simulator down", async () => {
+    const fake = fakeXcrun([PHONE]);
+    const booting = fake.hold("boot");
+    await withStack(async (stack) => {
+      // Its bootstatus races the shutdown, or the closed stack refuses its log stream.
+      const device = iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined }).catch(
+        (e: unknown) => e,
+      );
+      const { release } = await booting;
+      const closing = stack.close();
+      await release();
+      await closing;
+      expect(await device).toBeInstanceOf(Error);
+    });
+    expect(fake.calls()).toContainEqual(["shutdown", "A1"]);
+    expect(fake.state().simulators[0]?.state).toBe("Shutdown");
+    expect(fake.calls().filter(([c]) => c === "spawn")).toEqual([]);
+  });
+
+  test("shuts down after a killed boot, which CoreSimulator may finish", async () => {
+    const fake = fakeXcrun([PHONE]);
+    const booting = fake.hold("boot");
+    await withStack(async (stack) => {
+      const device = iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined });
+      const { pid, release } = await booting;
+      process.kill(pid, "SIGKILL");
+      await expect(device).rejects.toThrow("simctl boot A1 failed");
+      await release();
+    });
+    // This boot never reached the fake's state, so the shutdown finds it shut down, which is no error.
+    expect(lifecycle(fake.calls())).toEqual([
+      ["boot", "A1"],
+      ["shutdown", "A1"],
+    ]);
+    expect(fake.state().simulators[0]?.state).toBe("Shutdown");
+  });
+
+  test("shuts down nothing after simctl refuses the boot", async () => {
+    const fake = fakeXcrun([{ udid: "A1", name: "NoBoot", state: "Shutdown" }]);
+    await withStack(async (stack) => {
+      await expect(iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined })).rejects.toThrow(
+        "Unable to boot device in current state: Booted",
+      );
+    });
+    expect(lifecycle(fake.calls())).toEqual([["boot", "A1"]]);
+  });
+
+  test("waits for an install still running on close, then removes the app", async () => {
+    const fake = fakeXcrun([{ ...PHONE, state: "Booted" }]);
+    const app = join(fake.dir, "App.app");
+    writeFileSync(app, APP);
+    const installing = fake.hold("install");
+    await withStack(async (stack) => {
+      const device = await iosDevice(stack, { xcrun: fake.xcrun, simulator: undefined });
+      const install = device.install(app, APP);
+      const { release } = await installing;
+      const streamEnded = device.nextReport().catch((e: unknown) => e);
+      const closing = stack.close();
+      // Close ends the log stream before it removes apps, so this install finishes during close.
+      expect(await streamEnded).toEqual(new Error("simctl log stream ended"));
+      await release();
+      await closing;
+      await install;
+      await expect(device.install(app, APP)).rejects.toThrow("the stack is closed");
+    });
+    expect(fake.calls().at(-1)).toEqual(["uninstall", "A1", APP]);
+    expect(fake.state().installed).toEqual({ A1: [] });
+  });
+
   test.each([
     [[PHONE], "Missing", "no available iOS simulator is named Missing; found iPhone"],
     [

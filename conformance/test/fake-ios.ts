@@ -1,7 +1,16 @@
 // Stands in for `xcrun simctl` over a state file in argv[2], the fake's dir. Every call is appended to calls.log;
 // `launch` appends the lines in app.log to log.txt, which `spawn <udid> log stream` follows after printing a header.
-// A log stream that SIGTERM ends writes stream.ended; the simulator named "NoLog" cannot stream.
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// A log stream that SIGTERM ends writes stream.ended; the simulator named "NoLog" cannot stream, and "NoBoot" cannot
+// boot. A FIFO named hold-<command> holds that command, with its PID in <command>.pid, before it reads or changes
+// state, until the test closes the FIFO.
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 interface Simulator {
@@ -33,6 +42,12 @@ const fail = (message: string, code = 1) => {
 };
 
 const [command, udid = "", ...rest] = args;
+const hold = file(`hold-${command}`);
+if (existsSync(hold)) {
+  writeFileSync(file(`${command}.pid`), String(process.pid));
+  readFileSync(hold);
+  rmSync(hold);
+}
 const state = read();
 const sim = state.simulators.find((s) => s.udid === udid);
 const installed = (state.installed[udid] ??= []);
@@ -46,8 +61,11 @@ if (tool !== "simctl") {
 } else if (sim === undefined) {
   fail(`Invalid device: ${udid}`, 164);
 } else if (command === "boot") {
-  if (sim.state !== "Shutdown") {
-    fail(`Unable to boot device in current state: ${sim.state}`, 149);
+  if (sim.state !== "Shutdown" || sim.name === "NoBoot") {
+    fail(
+      `Unable to boot device in current state: ${sim.name === "NoBoot" ? "Booted" : sim.state}`,
+      149,
+    );
   } else {
     sim.state = "Booted";
     write(state);
@@ -55,8 +73,12 @@ if (tool !== "simctl") {
 } else if (command === "bootstatus") {
   if (sim.state !== "Booted") fail("not booting");
 } else if (command === "shutdown") {
-  sim.state = "Shutdown";
-  write(state);
+  if (sim.state === "Shutdown") {
+    fail("Unable to shutdown device in current state: Shutdown", 149);
+  } else {
+    sim.state = "Shutdown";
+    write(state);
+  }
 } else if (sim.state !== "Booted") {
   fail(`Unable to ${command} in current state: ${sim.state}`, 149);
 } else if (command === "install") {

@@ -11,6 +11,7 @@ import {
   INSTALL_MS,
   SHUTDOWN_MS,
   readReports,
+  ToolError,
   settles,
   tool,
 } from "./device.ts";
@@ -50,24 +51,49 @@ export async function iosDevice(stack: Stack, options: IosOptions): Promise<IosD
   let booted = false;
   if (sim.state !== "Booted") {
     if (sim.state !== "Shutdown") throw new Error(`simulator ${sim.name} is ${sim.state}`);
-    await simctl(["boot", sim.udid], BOOT_MS);
+    // True once simctl finished the boot, or a signal killed it while CoreSimulator may carry on; close waits for it.
+    let mayHaveBooted = Promise.resolve(false);
+    stack.onClose(async () => {
+      if (!(await mayHaveBooted)) return;
+      try {
+        await simctl(["shutdown", sim.udid], SHUTDOWN_MS);
+      } catch (e) {
+        // A boot killed before CoreSimulator started it.
+        if (!(e instanceof Error && e.message.includes("current state: Shutdown"))) throw e;
+      }
+    });
+    const boot = simctl(["boot", sim.udid], BOOT_MS);
+    mayHaveBooted = boot.then(
+      () => true,
+      (e: unknown) => e instanceof ToolError && e.killed,
+    );
+    await boot;
     booted = true;
-    stack.onClose(() => simctl(["shutdown", sim.udid], SHUTDOWN_MS).then(() => undefined));
     await simctl(["bootstatus", sim.udid], BOOT_MS);
   }
+  const installs = new Map<string, Promise<unknown>>(); // Each app's latest install, which close waits for.
+  let closed = false;
+  // Registered before the log stream's step, so close ends the stream first, then lets running installs finish.
+  stack.onClose(async () => {
+    closed = true;
+    for (const [bundleId, installing] of installs) {
+      await installing.catch(() => undefined);
+      await simctl(["uninstall", sim.udid, bundleId]);
+    }
+  });
   const reports = await followLog(stack, options.xcrun, sim.udid);
-  const installed = new Set<string>();
   return {
     udid: sim.udid,
     name: sim.name,
     booted,
-    async install(app, bundleId) {
-      await simctl(["uninstall", sim.udid, bundleId]);
-      if (!installed.has(bundleId)) {
-        installed.add(bundleId);
-        stack.onClose(() => simctl(["uninstall", sim.udid, bundleId]).then(() => undefined));
-      }
-      await simctl(["install", sim.udid, app], INSTALL_MS);
+    install(app, bundleId) {
+      if (closed) return Promise.reject(new Error("the stack is closed"));
+      const installing = (async () => {
+        await simctl(["uninstall", sim.udid, bundleId]);
+        await simctl(["install", sim.udid, app], INSTALL_MS);
+      })();
+      installs.set(bundleId, installing);
+      return installing;
     },
     async launch(bundleId) {
       await simctl(["launch", sim.udid, bundleId]);
@@ -126,13 +152,7 @@ function pick(simulators: readonly Simulator[], wanted: string | undefined): Sim
  */
 async function followLog(stack: Stack, xcrun: string, udid: string) {
   const args = ["simctl", "spawn", udid, "log", "stream", "--level", "info", "--style", "compact"];
-  const stream = spawn(xcrun, [...args, "--predicate", JS_LOG], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: hostEnv(),
-  });
-  const exited = new Promise<void>((resolve) => {
-    stream.once("exit", () => resolve()).once("error", () => resolve());
-  });
+  // Registered first, so a stack that has closed starts no stream; it runs only after the spawn below.
   stack.onClose(async () => {
     if (stream.exitCode !== null || stream.signalCode !== null || stream.pid === undefined) return;
     stream.kill("SIGTERM");
@@ -140,6 +160,13 @@ async function followLog(stack: Stack, xcrun: string, udid: string) {
       stream.kill("SIGKILL");
       await exited;
     }
+  });
+  const stream = spawn(xcrun, [...args, "--predicate", JS_LOG], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: hostEnv(),
+  });
+  const exited = new Promise<void>((resolve) => {
+    stream.once("exit", () => resolve()).once("error", () => resolve());
   });
   let stderr = "";
   stream.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));

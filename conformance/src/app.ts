@@ -135,8 +135,9 @@ export async function buildIos(
   udid: string,
   marker: string,
 ): Promise<Build> {
-  // CocoaPods refuses to run without a UTF-8 locale.
-  const step = await prebuild(stack, app, marker, { LANG: "en_US.UTF-8" });
+  // CocoaPods refuses to run without a UTF-8 locale; LC_ALL overrides one the caller set.
+  const utf8 = "en_US.UTF-8";
+  const step = await prebuild(stack, app, marker, { LANG: utf8, LC_ALL: utf8 });
   const ios = join(app.dir, "ios");
   await step("pod", ["install"], ios);
   const workspace = only(ios, ".xcworkspace");

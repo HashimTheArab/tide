@@ -1,15 +1,20 @@
 // Fixtures the harness tests share: what `tide export` writes without running Expo, and fake Android and iOS tools.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,6 +159,21 @@ export function fakeXcrun(simulators: FakeSimulator[]) {
     /** Sets the lines the app logs on each launch. */
     appLogs: (lines: string[]) =>
       writeFileSync(join(dir, "app.log"), lines.map((l) => `${l}\n`).join("")),
+    /**
+     * Holds the next `command` before it reads or changes state; resolves once it is held, with its PID and a release.
+     */
+    hold(command: string) {
+      const fifo = join(dir, `hold-${command}`);
+      execFileSync("mkfifo", [fifo]);
+      // Opening the read end frees an open still waiting for a fake that never came.
+      onTestFinished(() => {
+        if (existsSync(fifo)) closeSync(openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK));
+      });
+      return open(fifo, "w").then((handle) => ({
+        pid: Number(text(`${command}.pid`)),
+        release: () => handle.close(),
+      }));
+    },
     /** The log stream's PID, and whether SIGTERM ended it. */
     stream: () => ({
       pid: Number(text("stream.pid")),

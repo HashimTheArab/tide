@@ -86,6 +86,15 @@ export function readReports(log: Readable, name: string): Pick<Device, "nextRepo
   };
 }
 
+/** A failed tool command; `killed` when a signal ended it, so what it did is unknown. */
+export class ToolError extends Error {
+  readonly killed: boolean;
+  constructor(message: string, killed: boolean) {
+    super(message);
+    this.killed = killed;
+  }
+}
+
 /**
  * Runs a tool command and returns its stdout; a non-zero exit, the deadline or `signal` throws, once the command has
  * exited.
@@ -116,7 +125,12 @@ export function tool(
             ? `took over ${ms} ms`
             : stderr.trim() || stdout.trim() || error.message;
         const failed = () =>
-          reject(new Error(`${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`));
+          reject(
+            new ToolError(
+              `${file.split("/").at(-1)} ${args.join(" ")} failed: ${why}`,
+              child.signalCode !== null,
+            ),
+          );
         // A cancel reports before the killed command exits.
         if (child.exitCode === null && child.signalCode === null) child.once("exit", failed);
         else failed();

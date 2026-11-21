@@ -200,6 +200,7 @@ esac
     const bin = join(fake.dir, "bin");
     const tool = join(fake.dir, "tool");
     const buildLog = join(fake.dir, "xcodebuild.log");
+    const podLog = join(fake.dir, "pod.log");
     // npm ci links in expo, whose prebuild writes a workspace; xcodebuild fails in the 55 app and builds no .app in the
     // 58. All are links to one script, since macOS checks each new executable on its first run, which is slow.
     writeFileSync(
@@ -208,6 +209,7 @@ esac
 case "$(basename "$0")" in
 npm) mkdir -p node_modules/.bin && ln -s '${tool}' node_modules/.bin/expo ;;
 expo) mkdir -p ios/App.xcworkspace ;;
+pod) echo "$LANG $LC_ALL" >> "$POD_LOG" ;;
 xcodebuild) echo "$(pwd) $*" >> "$BUILD_LOG"
   case "$(pwd)" in */app-55) echo "** BUILD FAILED **"; exit 65;; esac
   mkdir -p derived/Build/Products/Release-iphonesimulator ;;
@@ -219,6 +221,8 @@ esac
     const result = await conformance(["--platform", "ios"], {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BUILD_LOG: buildLog,
+      POD_LOG: podLog,
+      LC_ALL: "C",
     });
     expect(result.code).toBe(1);
     const lines = result.stdout.trimEnd().split("\n");
@@ -247,6 +251,8 @@ esac
         ].join(" "),
       ),
     );
+    // CocoaPods fails without a UTF-8 locale, which an inherited LC_ALL would override.
+    expect(readFileSync(podLog, "utf8")).toBe("en_US.UTF-8 en_US.UTF-8\n".repeat(2));
     expect(fake.state().simulators[0]?.state).toBe("Booted");
     expect(fake.calls().filter(([c]) => c === "boot" || c === "shutdown")).toEqual([]);
     expect(fake.stream().ended).toBe(true);
