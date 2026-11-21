@@ -41,8 +41,8 @@ export interface Stack {
   readonly identity: Identity;
   readonly responses: readonly Recorded[]; // In the order their headers were sent.
   /**
-   * Starts `command` with exactly `env` in a process group of its own. `close` kills the group and waits until the
-   * child's stdout and stderr, which its own children inherit unless they redirect them, have closed.
+   * Starts `command` with exactly `env` in a process group of its own. The group is killed once the child's stdout
+   * and stderr close, or on `close`, which waits for those streams; its own children inherit them unless redirected.
    */
   spawn(command: string, args: readonly string[], env: Record<string, string>): Child;
   /** Stops every child and the servers, then removes the temp dir; later calls return the first call's promise. */
@@ -100,6 +100,8 @@ async function startStack(): Promise<Stack> {
       const closed = new Promise<void>((resolve) => {
         child.once("close", () => resolve()).once("error", () => resolve());
       }).then(() => {
+        // A worker that redirected its stdio outlives the streams; once the group empties, its ID may be reused.
+        kill();
         controller.signal.removeEventListener("abort", kill);
         children.delete(closed);
       });

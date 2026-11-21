@@ -40,6 +40,7 @@ const FIXTURE_EXPORT = fileURLToPath(
 );
 const HOLD = fileURLToPath(new URL("hold-stack.ts", import.meta.url));
 const HUNG_EXPORT = fileURLToPath(new URL("hung-export.ts", import.meta.url));
+const LEAVE_WORKER = fileURLToPath(new URL("leave-worker.ts", import.meta.url));
 const ANDROID_BUNDLE = "dist/_expo/static/js/android/index-android.hbc";
 const MAIN = { channel: "main", runtimeVersion: "1.0.0" } as const;
 const ANDROID = { ...MAIN, platform: "android" } as const;
@@ -152,6 +153,17 @@ function child(script: string) {
     },
     exited: once(proc, "exit"),
   };
+}
+
+/** Kills `pid` when the test finishes, in case the stack failed to. */
+function killOnFinish(pid: number) {
+  onTestFinished(() => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  });
 }
 
 /** Sends `socket`'s peer a line: a live peer answers, and a dead one's socket closes. */
@@ -397,22 +409,35 @@ describe("the harness stack shuts down", () => {
       ).rejects.toThrow("tide export was killed by SIGKILL");
       const [socket] = await connected;
       const [line] = (await once(socket, "data")) as [Buffer];
-      return {
-        seen: where(stack),
-        socket,
-        report: JSON.parse(line.toString()) as { pid: number; out: string },
-      };
-    });
-    onTestFinished(() => {
-      try {
-        process.kill(report.pid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
+      const report = JSON.parse(line.toString()) as { pid: number; out: string };
+      killOnFinish(report.pid);
+      return { seen: where(stack), socket, report };
     });
     expect(report.out.startsWith(`${seen.dir}/`)).toBe(true);
     expect(await ask(socket)).toBe("closed");
     await ended;
+    await expectClosed(seen);
+  });
+
+  test("on close, having killed a worker its command left running in its group after the command exited", async () => {
+    const listener = createServer();
+    listener.listen(0, "127.0.0.1");
+    await once(listener, "listening");
+    onTestFinished(() => {
+      listener.close();
+    });
+    const connected = once(listener, "connection") as Promise<[Socket]>;
+    const port = String((listener.address() as AddressInfo).port);
+
+    const { seen, socket } = await withStack(async (stack) => {
+      const leader = stack.spawn(process.execPath, [LEAVE_WORKER, port], {});
+      const [socket] = await connected;
+      const [line] = (await once(socket, "data")) as [Buffer];
+      killOnFinish((JSON.parse(line.toString()) as { pid: number }).pid);
+      expect(await once(leader, "close")).toEqual([0, null]);
+      return { seen: where(stack), socket };
+    });
+    expect(await ask(socket)).toBe("closed");
     await expectClosed(seen);
   });
 
