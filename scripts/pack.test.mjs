@@ -29,7 +29,7 @@ function ok(cmd, args, options) {
 
 const work = mkdtempSync(join(tmpdir(), "tide-pack-"));
 const project = join(work, "consumer");
-/** @typedef {{ name: string, private?: boolean, exports?: Record<string, string>, bin?: Record<string, string> }} Manifest */
+/** @typedef {{ name: string, version: string, private?: boolean, dependencies?: Record<string, string>, exports?: Record<string, string>, bin?: Record<string, string> }} Manifest */
 /** @type {Map<string, { file: string, entries: string[], manifest: Manifest }>} */
 const tarballs = new Map();
 
@@ -96,6 +96,25 @@ await test("tarballs hold only dist, LICENSE, README and a manifest pointing int
     for (const target of targets) {
       assert.match(target, /^\.\/dist\//, `${name} points ${target} outside dist`);
       assert.ok(entries.includes(`package/${target.slice(2)}`), `${name} lacks ${target}`);
+    }
+  }
+});
+
+await test("each tarball depends on the packed version of every @tide-ota package its source does", () => {
+  // Installed side by side, a missing dependency still resolves; installed alone, it would not.
+  for (const [name, { manifest }] of tarballs) {
+    const source = /** @type {Manifest} */ (
+      JSON.parse(readFileSync(join(root, "packages", name.split("/")[1], "package.json"), "utf8"))
+    );
+    const internal = Object.keys(source.dependencies ?? {}).filter((d) =>
+      d.startsWith("@tide-ota/"),
+    );
+    for (const dep of internal) {
+      assert.equal(
+        manifest.dependencies?.[dep],
+        tarballs.get(dep)?.manifest.version,
+        `${name} does not depend on the packed ${dep}`,
+      );
     }
   }
 });
