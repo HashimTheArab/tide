@@ -128,9 +128,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       if (pointer?.kind === "rollout") {
         side = await rolloutSide(pointer, header("eas-client-id"));
         // A device on the new update gets no-update on either side: a reply whose filters it fails would move it back.
-        if (current !== pointer.new.updateId) {
-          candidate = side === "new" ? pointer.new : pointer.earlier;
-        }
+        candidate = current === pointer.new.updateId ? undefined : pointer[side];
       } else {
         candidate = pointer;
       }

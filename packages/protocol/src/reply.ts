@@ -53,13 +53,12 @@ export const MAX_FILTERS_BYTES = 4096;
 const VERSION = 1;
 const ROLLOUT_VERSION = 2;
 const BUCKETS = 10_000; // One per 0.01 percentage point.
-// Fields each kind's record may hold, `version` first; a directive has no update ID or filters.
+// Fields each kind's record may hold; a directive has no update ID or filters.
 const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   manifest: ["version", "kind", "updateId", "contentType", "manifestFilters", "body"],
   rollBackToEmbedded: ["version", "kind", "contentType", "body"],
   noUpdateAvailable: ["version", "kind", "contentType", "body"],
 };
-const ROLLOUT_FIELDS = ["version", "kind", "percent", "new", "earlier"];
 /** A content-addressed bundle or asset key; lowercase, so it is safe on case-insensitive disks. */
 export const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
 // Release record, base record and patch keys, lowercase for the same reason.
@@ -85,8 +84,7 @@ export function encodeStoredReply(reply: StoredReply): Uint8Array<ArrayBuffer> {
 /** Returns the version-2 record bytes for `rollout`, keys in a fixed order and both bodies as strings. */
 export function encodeRollout(rollout: Rollout): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(encoder.encode(serializeRollout(rollout)));
-  const { record, text } = parseRecord(bytes); // Encode never writes what decode refuses.
-  readRollout(record, text);
+  decodePointer(bytes); // Encode never writes what decode refuses.
   return bytes;
 }
 
@@ -94,13 +92,13 @@ export function encodeRollout(rollout: Rollout): Uint8Array<ArrayBuffer> {
 export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   const { record, version } = parseRecord(bytes);
   if (version !== VERSION) throw new ProtocolError("version", "is not supported");
-  return readReply(record, false);
+  return readReply(record);
 }
 
 /** Returns what a pointer key holds: a version-1 reply or a version-2 rollout. */
 export function decodePointer(bytes: Uint8Array): StoredReply | Rollout {
   const { record, text, version } = parseRecord(bytes);
-  if (version === VERSION) return readReply(record, false);
+  if (version === VERSION) return readReply(record);
   if (version === ROLLOUT_VERSION) return readRollout(record, text);
   throw new ProtocolError("version", "is not supported");
 }
@@ -111,11 +109,9 @@ export function rolloutClientId(header: string | undefined): string | undefined 
   return id !== undefined && UUID.test(id) ? id : undefined;
 }
 
-/** Returns the bucket, 0 to 9999, of a client ID (a UUID in any case) in the rollout of `updateId`. */
+/** Returns the bucket, 0 to 9999, of a `rolloutClientId` result in the rollout of `updateId`. */
 export async function rolloutBucket(clientId: string, updateId: string): Promise<number> {
-  const id = rolloutClientId(clientId);
-  if (id === undefined) throw new ProtocolError("clientId", "must be a UUID");
-  const input = encoder.encode(`${checkUpdateId(updateId)}:${id}`);
+  const input = encoder.encode(`${updateId}:${clientId}`);
   const digest = await crypto.subtle.digest("SHA-256", input);
   return new DataView(digest).getUint32(0) % BUCKETS;
 }
@@ -203,12 +199,12 @@ function parseRecord(bytes: Uint8Array): {
   return { record: parsed, text, version: version as number };
 }
 
-/** Reads a version-1 reply, or with `nested` the same fields without `version` inside a rollout. */
-function readReply(r: Record<string, unknown>, nested: boolean): StoredReply {
+/** Reads a version-1 reply, or a reply inside a rollout, whose exact-text check refuses a nested `version`. */
+function readReply(r: Record<string, unknown>): StoredReply {
   const kind = checkKind(present(r, "kind"));
-  const fields = nested ? RECORD_FIELDS[kind].slice(1) : RECORD_FIELDS[kind];
   for (const key of Object.keys(r)) {
-    if (!fields.includes(key)) throw new ProtocolError(key, `is not a field of a ${kind} reply`);
+    if (!RECORD_FIELDS[kind].includes(key))
+      throw new ProtocolError(key, `is not a field of a ${kind} reply`);
   }
   const contentType = present(r, "contentType");
   const boundary =
@@ -234,14 +230,11 @@ function readReply(r: Record<string, unknown>, nested: boolean): StoredReply {
   };
 }
 
-/** Reads a version-2 record, which must be exactly what `serializeRollout` writes for it. */
+/**
+ * Reads a version-2 record, which must be exactly what `serializeRollout` writes for it; that comparison refuses any
+ * other key, kind, order or spelling.
+ */
 function readRollout(r: Record<string, unknown>, text: string): Rollout {
-  for (const key of Object.keys(r)) {
-    if (!ROLLOUT_FIELDS.includes(key)) {
-      throw new ProtocolError(key, "is not a field of a rollout record");
-    }
-  }
-  if (present(r, "kind") !== "rollout") throw new ProtocolError("kind", "must be rollout");
   const percent = present(r, "percent");
   if (
     typeof percent !== "number" ||
@@ -277,7 +270,7 @@ function nestedReply<K extends Kind>(
   if (!isObject(value)) throw new ProtocolError(field, expected);
   let reply: StoredReply;
   try {
-    reply = readReply(value, true);
+    reply = readReply(value);
   } catch (e) {
     throw prefixed(field, e);
   }

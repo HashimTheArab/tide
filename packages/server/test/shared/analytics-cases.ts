@@ -4,7 +4,8 @@ import { NO_UPDATE_KEY, replyKey } from "@tide-ota/protocol";
 
 import type { ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "./server-cases.ts";
-import { CLIENT_HIGH, CLIENT_LOW, fixture } from "./fixtures.ts";
+import { CLIENT_HIGH, CLIENT_LOW } from "../../../protocol/test/fixtures.ts";
+import { fixture } from "./fixtures.ts";
 
 export type Fault = "throw" | "reject" | "hang";
 

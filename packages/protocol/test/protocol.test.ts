@@ -1870,8 +1870,8 @@ describe("rollout record", () => {
     [
       "an unknown outer field",
       () => record((o) => (o.createdAt = "now")),
-      "createdAt",
-      "is not a field of a rollout record",
+      "record",
+      "must be exactly",
     ],
     [
       "an unknown nested field",
@@ -1879,14 +1879,9 @@ describe("rollout record", () => {
       "new.createdAt",
       "is not a field of a manifest reply",
     ],
-    [
-      "a nested version",
-      () => record((o) => (o.earlier.version = 1)),
-      "earlier.version",
-      "is not a field of a manifest reply",
-    ],
+    ["a nested version", () => record((o) => (o.earlier.version = 1)), "record", "must be exactly"],
     ["a missing version", () => record((o) => delete o.version), "version", "is missing"],
-    ["a missing kind", () => record((o) => delete o.kind), "kind", "is missing"],
+    ["a missing kind", () => record((o) => delete o.kind), "record", "must be exactly"],
     ["a missing percent", () => record((o) => delete o.percent), "percent", "is missing"],
     ["a missing new", () => record((o) => Reflect.deleteProperty(o, "new")), "new", "is missing"],
     [
@@ -1896,7 +1891,7 @@ describe("rollout record", () => {
       "is missing",
     ],
     ["a missing nested body", () => record((o) => delete o.new.body), "new.body", "is missing"],
-    ["another kind", () => record((o) => (o.kind = "manifest")), "kind", "must be rollout"],
+    ["another kind", () => record((o) => (o.kind = "manifest")), "record", "must be exactly"],
     ["percent -0.01", () => record((o) => (o.percent = -0.01)), "percent", "from 0 to 100"],
     ["percent 100.01", () => record((o) => (o.percent = 100.01)), "percent", "from 0 to 100"],
     ["percent 12.345", () => record((o) => (o.percent = 12.345)), "percent", "steps of 0.01"],
@@ -2053,12 +2048,6 @@ describe("rollout bucketing", () => {
   ])("the bucket of %s in %s is %i", async (client, update, bucket) => {
     expect(await rolloutBucket(client, update)).toBe(bucket);
     expect(await rolloutBucket(client, update)).toBe(bucket);
-    expect(await rolloutBucket(client.toUpperCase(), update)).toBe(bucket);
-  });
-
-  test("a client ID or update ID that is not a UUID is refused", async () => {
-    await rejects(() => rolloutBucket("not-a-uuid", NEW_ID), "clientId", "must be a UUID");
-    await rejects(() => rolloutBucket(CLIENT_LOW, NEW_ID.toUpperCase()), "updateId");
   });
 
   const clients = fc.sample(fc.uuid(), { numRuns: 100_000, seed });

@@ -106,9 +106,8 @@ golden files are `packages/protocol/test/fixtures/*.reply.json`. Keys in this or
   the old reply or the new one, never a mix.
 
 A pointer may instead hold a version-2 rollout record, encoded by `encodeRollout` and read with `decodePointer`, which
-reads both versions; `decodeStoredReply` reads version 1 only, so `reply/no-update` can never hold a rollout. Servers
-read version 2 from this release; no CLI writes it yet, and none may until those servers are deployed. Keys in this
-order, no whitespace, no trailing newline:
+reads both versions; `decodeStoredReply` reads version 1 only, so `reply/no-update` can never hold a rollout. Keys in
+this order, no whitespace, no trailing newline:
 
 ```json
 {"version":2,"kind":"rollout","percent":12.5,"new":{"kind":"manifest","updateId":"<uuid>","contentType":"…","manifestFilters":"…","body":"…"},"earlier":{"kind":"rollBackToEmbedded","contentType":"…","body":"…"}}
