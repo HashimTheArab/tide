@@ -34,6 +34,8 @@ first, as in [Signing identity](https://github.com/HashimTheArab/tide/blob/main/
 
 | Command                         | What it does                                                |
 | ------------------------------- | ----------------------------------------------------------- |
+| `tide publish --rollout <p>`    | Sends a new update to a share of devices                    |
+| `tide rollout`                  | Raises a rollout's share, sends it to everyone, or stops it |
 | `tide certificate`              | Makes your app's code-signing certificate with your key     |
 | `tide register-build`           | Lets fresh installs get a patch instead of the whole bundle |
 | `tide rollback --embedded`      | Sends apps back to the bundle inside the store build        |

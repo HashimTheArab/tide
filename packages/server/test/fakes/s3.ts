@@ -37,8 +37,10 @@ export interface FakeS3 {
   readonly puts: string[];
   /** Every DELETE key that reached handling, in order. */
   readonly deletes: string[];
-  /** Returns the ETag the fake serves for `key`; tags count up and are never derived from the bytes. */
+  /** Returns the ETag the fake serves for `key`; tags count up and are never derived from the bytes, unless `contentEtags`. */
   etag(key: string): string | undefined;
+  /** From now on, every ETag is the quoted MD5 hex of the bytes, as S3 and R2 give a single-part PUT. */
+  contentEtags(): void;
   behave(key: string, behaviour: Behaviour): void;
   failAll(failure: Failure | undefined): void;
   listFault(fault: ListFault | undefined): void;
@@ -91,7 +93,9 @@ export async function startFakeS3(): Promise<FakeS3> {
   // Keyed by the stored array, so an object a test sets directly gets a fresh tag.
   const etags = new WeakMap<Uint8Array, string>();
   let etagCount = 0;
+  let md5Etags = false;
   const etagOf = (bytes: Uint8Array) => {
+    if (md5Etags) return `"${createHash("md5").update(bytes).digest("hex")}"`;
     let tag = etags.get(bytes);
     if (tag === undefined) etags.set(bytes, (tag = `"fake-${++etagCount}!~/"`));
     return tag;
@@ -402,6 +406,9 @@ export async function startFakeS3(): Promise<FakeS3> {
       const stored = objects.get(key);
       return stored === undefined ? undefined : etagOf(stored);
     },
+    contentEtags: () => {
+      md5Etags = true;
+    },
     behave: (key, behaviour) => {
       behaviours.set(key, behaviour);
     },
@@ -438,6 +445,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       drops.clear();
       holds.clear();
       putHooks.clear();
+      md5Etags = false;
     },
     raceOnPut: (key, bytes) => {
       races.set(key, bytes);

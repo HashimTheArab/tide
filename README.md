@@ -63,14 +63,13 @@ The design behind all of this — storage layout, wire rules, key handling — i
 | Bundle diffing (download only what changed) | ✅ | ✅ | ✅² | ❌ | ✅ |
 | Diffing from the bundle inside the store build | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Web dashboard | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Staged rollouts | ❌³ | ✅ | ✅² | ❌ | ✅ |
+| Staged rollouts | ✅ | ✅ | ✅² | ❌ | ✅ |
 
 ❌ also means the project's own docs do not mention the feature.
 
 1. Only on Expo's Production and Enterprise plans, where `eas update` signs locally.
 2. xprem needs PostgreSQL for bundle diffing and rollouts. Its stateless mode drops PostgreSQL but reads channels
    from Expo's API and has neither feature.
-3. Planned; see P12 in [docs/roadmap.md](docs/roadmap.md).
 
 Sources for every cell: [docs/comparison.md](docs/comparison.md).
 
@@ -172,6 +171,8 @@ tide register-build --platform android --runtime-version 1.0.0 \
 | `tide status` | Lists what each channel serves right now |
 | `tide storage` | Lists files nothing references any more; deletes nothing |
 | `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Checks a live server the way an installed app would |
+| `tide publish --from <dir> --channel <name> --rollout <percent>` | Sends a new update to a share of devices |
+| `tide rollout <percent>\|complete\|revert --channel <name> --runtime-version <version>` | Raises a rollout's share, sends it to every device, or stops it |
 | `tide rollback --embedded --channel <name> --runtime-version <version>` | Sends apps back to the bundle inside the store build |
 | `tide rollback --to <updateId>` | Serves an earlier update again |
 | `tide republish <updateId>... [--channel <name>] [--runtime-version <version>]` | Serves stored updates again, optionally on another channel or runtime |

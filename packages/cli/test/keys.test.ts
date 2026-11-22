@@ -8,7 +8,9 @@ import type { Signer } from "@tide-ota/protocol";
 import {
   certificatePublicKey,
   cryptoKeySigner,
+  decodeStoredReply,
   encodeMultipart,
+  encodeRollout,
   encodeStoredReply,
   expoSignature,
   verifyExpoSignature,
@@ -147,6 +149,25 @@ async function rollbackReply(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
   return encodeStoredReply({
     kind: "rollBackToEmbedded",
     ...encodeMultipart([{ name: "directive", body, signature }], BOUNDARY),
+  });
+}
+
+/** A 50% rollout pointer: manifest-next.json signed by `newKey`, over a rollback signed by `earlierKey`. */
+async function rolloutReply(newKey: CryptoKey, earlierKey: CryptoKey) {
+  const body = fixture("manifest-next.json");
+  const signature = await expoSignature(body, cryptoKeySigner(newKey, "main"));
+  const earlier = decodeStoredReply(await rollbackReply(earlierKey));
+  if (earlier.kind !== "rollBackToEmbedded") throw new Error("not a rollback");
+  return encodeRollout({
+    kind: "rollout",
+    percent: 50,
+    new: {
+      kind: "manifest",
+      updateId: "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14", // manifest-next.json's id
+      manifestFilters: "",
+      ...encodeMultipart([{ name: "manifest", body, signature }], BOUNDARY),
+    },
+    earlier,
   });
 }
 
@@ -628,8 +649,26 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     opened.unchanged(kind === "s3" ? 3 : 0);
   });
 
+  test("opens when both bodies of a rollout verify under the identity", async () => {
+    const opened = await store(kind, {
+      "reply/main/1.0.0/ios": await rolloutReply(main.keys.privateKey, main.keys.privateKey),
+    });
+    expect((await open(opened.env)).noUpdate).toBe(false);
+    opened.unchanged(kind === "s3" ? 3 : 0);
+  });
+
   test.each<[string, () => Promise<Uint8Array<ArrayBuffer>>, string]>([
     ["a pointer signed by key B", () => rollbackReply(other.keys.privateKey), OTHER_IDENTITY],
+    [
+      "a rollout whose new body is signed by key B",
+      () => rolloutReply(other.keys.privateKey, main.keys.privateKey),
+      OTHER_IDENTITY,
+    ],
+    [
+      "a rollout whose earlier body is signed by key B",
+      () => rolloutReply(main.keys.privateKey, other.keys.privateKey),
+      OTHER_IDENTITY,
+    ],
     [
       "an unreadable pointer",
       () => Promise.resolve(utf8("garbage")),

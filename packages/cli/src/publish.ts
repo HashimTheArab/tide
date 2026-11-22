@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
+import type { Rollout } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   ProtocolError,
@@ -41,6 +42,7 @@ import {
   recordKey,
   urlBase,
 } from "./publish-record.ts";
+import { earlierOf, percentOf, rolloutRecord, stagedRollout } from "./rollout.ts";
 
 export interface PublishOptions {
   readonly out: (line: string) => void;
@@ -50,13 +52,16 @@ export interface PublishOptions {
 }
 
 /** A release record before it has an update ID and a time: everything its manifest is built from. */
-type DraftRecord = Omit<ReleaseRecord, "updateId" | "createdAt">;
+export type DraftRecord = Omit<ReleaseRecord, "updateId" | "createdAt">;
 
-/** One pointer's reply, built and signed before anything is written, the state it replaces and its stdout line. */
-interface PointerWrite {
+/**
+ * One pointer's reply, built and signed before anything is written, the state it replaces and its stdout line. An
+ * absent reply was already written by an earlier run of the same publish, so only its line is printed.
+ */
+export interface PointerWrite {
   readonly key: string;
   readonly previous: PointerState;
-  readonly reply: Uint8Array<ArrayBuffer>;
+  readonly reply: Uint8Array<ArrayBuffer> | undefined;
   readonly line: string;
 }
 
@@ -76,7 +81,8 @@ export type WriteStep = () => Promise<void>;
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
 
-export const PUBLISH_USAGE = "usage: tide publish --from <dir> --channel <name>";
+export const PUBLISH_USAGE =
+  "usage: tide publish --from <dir> --channel <name> [--rollout <percent>]";
 const MAX_SKEW_MS = 60_000;
 
 /**
@@ -138,7 +144,7 @@ async function prepare(
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
-  const { channel, from } = parse(args, cwd);
+  const { channel, from, percent } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
 
@@ -168,9 +174,25 @@ async function prepare(
       assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
       extra: { expoClient: artifact.expoClient },
     };
+    let earlier;
+    if (percent !== undefined) {
+      const staged = await stagedRollout(writer, t, draft, percent);
+      if (staged !== undefined) {
+        writes.push(staged);
+        continue;
+      }
+      earlier = await earlierOf(writer.identity, t.key, t.previous);
+    }
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
-    writes.push(c.pointer);
+    if (percent === undefined) {
+      writes.push(c.pointer);
+      continue;
+    }
+    const next: Rollout = { kind: "rollout", percent, new: c.manifest, earlier };
+    // Sized at the longest percentage too, so tide rollout can move it to any goal within the limit.
+    rolloutRecord(t.key, { ...next, percent: 99.99 });
+    writes.push({ ...c.pointer, reply: rolloutRecord(t.key, next) });
   }
   const stored = await storedContent(writer.bucket);
   // Before the plan, so its fresh certificate check also covers the time spent diffing.
@@ -251,9 +273,11 @@ export async function commit(
     if (etag === undefined) throw new PublishError(`${key} already exists`);
   }
   for (const p of pointers) {
-    if (attempted) await checkCertificate();
-    attempted = true;
-    await writePointer(bucket, p.key, p.reply, p.previous);
+    if (p.reply !== undefined) {
+      if (attempted) await checkCertificate();
+      attempted = true;
+      await writePointer(bucket, p.key, p.reply, p.previous);
+    }
     out(p.line);
   }
 }
@@ -262,17 +286,22 @@ function parse(args: readonly string[], cwd: string) {
   const { values } = parsed(PUBLISH_USAGE, () =>
     parseArgs({
       args: [...args],
-      options: { from: { type: "string" }, channel: { type: "string" } },
+      options: {
+        from: { type: "string" },
+        channel: { type: "string" },
+        rollout: { type: "string" },
+      },
       strict: true,
       allowPositionals: false,
     }),
   );
-  const { from, channel } = values;
+  const { from, channel, rollout } = values;
   if (from === undefined || channel === undefined) {
     throw new PublishError(`--from and --channel are required; ${PUBLISH_USAGE}`);
   }
   replyKey(channel, "1", "ios"); // Refuses a bad channel before the export is read.
-  return { channel, from: resolve(cwd, from) };
+  const percent = rollout === undefined ? undefined : percentOf(rollout, "--rollout");
+  return { channel, from: resolve(cwd, from), percent };
 }
 
 /** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
@@ -379,13 +408,13 @@ export function addKey(keys: KeyHashes, key: string, hash: string, source: strin
   }
 }
 
-/** Builds and signs a new update from `draft` under a fresh ID: its records and its write to `target`. */
+/** Builds and signs a new update from `draft` under a fresh ID: its records, its reply and its write to `target`. */
 export async function compose(
   writer: Writer,
   draft: DraftRecord,
   createdAtMs: number,
   { key, previous }: { readonly key: string; readonly previous: PointerState },
-): Promise<{ records: Plan["records"]; pointer: PointerWrite }> {
+): Promise<{ records: Plan["records"]; manifest: Rollout["new"]; pointer: PointerWrite }> {
   const updateId = randomUUID();
   const date = new Date(createdAtMs);
   const createdAt = date.toISOString();
@@ -411,13 +440,13 @@ export async function compose(
   });
   const signature = await expoSignature(manifest, writer.signer);
   const { boundary, body } = encodeMultipart([{ name: "manifest", body: manifest, signature }]);
-  const reply = encodeStoredReply({
+  const stored: Rollout["new"] = {
     kind: "manifest",
     updateId,
     boundary,
     manifestFilters: encodeSfvDictionary({ channel: draft.channel }),
     body,
-  });
+  };
   const base = encodeBaseRecord({
     kind: "update",
     updateId,
@@ -430,7 +459,13 @@ export async function compose(
       [recordKey(updateId), encodeRecord({ ...draft, updateId, createdAt })],
       [baseKey(updateId), base],
     ],
-    pointer: { key, previous, reply, line: `${key} ${updateId} ${createdAt}` },
+    manifest: stored,
+    pointer: {
+      key,
+      previous,
+      reply: encodeStoredReply(stored),
+      line: `${key} ${updateId} ${createdAt}`,
+    },
   };
 }
 

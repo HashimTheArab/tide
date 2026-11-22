@@ -1,7 +1,8 @@
-import type { StoredReply } from "@tide-ota/protocol";
+import type { Rollout, StoredReply } from "@tide-ota/protocol";
 import {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
+  decodePointer,
   decodeStoredReply,
   parseExpoSignature,
   parseMultipart,
@@ -13,16 +14,23 @@ import { BucketError } from "./bucket.ts";
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
+/** One stored reply with its signed part as stored. */
+export interface Side {
+  readonly kind: StoredReply["kind"];
+  readonly updateId?: string;
+  readonly time?: string;
+  readonly signed: { readonly body: Uint8Array<ArrayBuffer>; readonly signature: string };
+}
+
 /**
- * One readable record with its signed part as stored, or why it cannot be served; every reason is fixed text, never
- * stored data.
+ * One readable record, its newest time and its replies (`[reply]`, or a rollout's `[new, earlier?]`), or why it
+ * cannot be served; every reason is fixed text, never stored data.
  */
 export type Verdict =
   | {
-      readonly kind: StoredReply["kind"];
-      readonly updateId?: string;
-      readonly time?: string;
-      readonly signed: { readonly body: Uint8Array<ArrayBuffer>; readonly signature: string };
+      readonly reply: StoredReply | Rollout;
+      readonly time: string | undefined; // Undefined only for `reply/no-update`.
+      readonly sides: readonly Side[];
     }
   | string;
 
@@ -52,13 +60,20 @@ export async function status(
       unreadable = true;
     } else if (key !== NO_UPDATE_KEY) {
       const [, channel, runtime, platform] = key.split("/");
-      out(
-        `${channel} ${runtime} ${platform} ${verdict.kind} ${verdict.updateId ?? "-"} ${verdict.time}`,
-      );
+      out(`${channel} ${runtime} ${platform} ${row(verdict)}`);
     }
   }
   out(`${NO_UPDATE_KEY}: ${noUpdate}`);
   return unreadable ? 1 : 0;
+}
+
+/** A pointer's status columns after its key's: `<kind> <updateId|-> <time>`, or a rollout's percentage and sides. */
+function row({ reply, sides }: Exclude<Verdict, string>): string {
+  const side = (s: Side | undefined) =>
+    s === undefined ? "none" : `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
+  const [first, earlier] = sides;
+  if (reply.kind !== "rollout") return side(first);
+  return `rollout ${reply.percent} new ${reply.new.updateId} ${first?.time} earlier ${side(earlier)}`;
 }
 
 /** Reads and checks the record at `key`; undefined when absent. */
@@ -73,14 +88,31 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
   return bytes === undefined ? undefined : checkRecord(key, bytes);
 }
 
-/** Checks the bytes stored at `key` the way a signing client would receive them. */
+/** Checks the bytes stored at `key` the way a signing client would receive them; a rollout checks both sides. */
 export function checkRecord(key: string, bytes: Uint8Array): Verdict {
-  let reply: StoredReply;
+  let reply: StoredReply | Rollout;
   try {
-    reply = decodeStoredReply(bytes);
+    reply = key === NO_UPDATE_KEY ? decodeStoredReply(bytes) : decodePointer(bytes);
   } catch {
     return "not a stored reply";
   }
+  if (reply.kind !== "rollout") {
+    const side = checkSide(key, reply);
+    return typeof side === "string" ? side : { reply, time: side.time, sides: [side] };
+  }
+  const next = checkSide(key, reply.new);
+  if (typeof next === "string") return `new reply: ${next}`;
+  if (reply.earlier === undefined) return { reply, time: next.time, sides: [next] };
+  const earlier = checkSide(key, reply.earlier);
+  if (typeof earlier === "string") return `earlier reply: ${earlier}`;
+  // Both are valid times: every manifest and rollback has one.
+  const time =
+    Date.parse(earlier.time ?? "") > Date.parse(next.time ?? "") ? earlier.time : next.time;
+  return { reply, time, sides: [next, earlier] };
+}
+
+/** Checks one stored reply at `key`. */
+function checkSide(key: string, reply: StoredReply): Side | string {
   const pointer = key !== NO_UPDATE_KEY;
   if (pointer === (reply.kind === "noUpdateAvailable")) {
     return `holds ${reply.kind}, which does not fit its key`;
