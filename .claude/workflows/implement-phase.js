@@ -736,9 +736,9 @@ Scope: ${S.scope}
 The rules are AGENTS.md, docs/design.md and docs/decisions/. If the simplifying-overgrown-diffs skill is available, apply it.${DECISIONS}
 Ask whether this is the smallest, clearest design and code that meets the scope. Report:
 - P1 "Smaller design": a materially smaller design that removes a component, dependency, option or piece of state. Only this blocks.
-- P2, applied as instructions: duplication or parallel lists kept in sync by hand; a new helper where an existing one would do; code the change replaces but leaves behind; dead code; an abstraction or option with one user; needless indirection; code in a file that does not own what it depends on; comments that restate the code or run past two lines; unclear names; a diff out of proportion to the behaviour.
+- P2, applied as instructions: duplication or parallel lists kept in sync by hand; a new helper where an existing one would do; code the change replaces but leaves behind; dead code; an abstraction or option with one user; needless indirection; code in a file that does not own what it depends on; comments that restate the code or run past two lines; unclear names; a diff out of proportion to the behaviour; a test that proves nothing another test does not already prove (merge it into that test or delete it).
 - P3: a nit.
-Do not report bugs, tests or style the formatter owns; other reviewers cover those. Each finding needs file, line and the concrete simpler replacement in scenario. Report only changes that make the code genuinely smaller or clearer, never churn.`,
+Do not report bugs, missing tests or style the formatter owns; other reviewers cover those. Each finding needs file, line and the concrete simpler replacement in scenario. Report only changes that make the code genuinely smaller or clearer, never churn.`,
         "simplicity review",
         DEEP,
       ),

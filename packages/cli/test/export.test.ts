@@ -9,9 +9,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 
+import type { Issued } from "./chain-fixture.ts";
 import { EXPORT_USAGE } from "../src/export.ts";
+import { generate, root as issueRoot } from "./chain-fixture.ts";
 import { expectNoPem, run, tempRoot } from "./helpers.ts";
 import {
   MAIN,
@@ -256,6 +258,71 @@ test("no writer starts a child process, even from inside a project with Expo ins
   );
   expect(existsSync(marker)).toBe(false);
   expect(readdirSync(app.root)).not.toContain("fake-expo.log");
+});
+
+describe("chain mode", () => {
+  const FLAG = "codeSigningIncludeManifestResponseCertificateChain";
+  let root: Issued;
+  beforeAll(async () => {
+    root = await issueRoot(await generate());
+  });
+  const updates = (flag: unknown) => ({
+    updates: {
+      url: "https://updates.example.com/manifest",
+      codeSigningCertificate: "./keys/certificate.pem",
+      codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha256" },
+      ...(flag !== undefined && { [FLAG]: flag }),
+    },
+  });
+  const exported = (dir: string) => readFileSync(join(dir, "tide-export.json"), "utf8");
+
+  test("an app that includes the certificate chain records chain mode after its metadata, with the root", async () => {
+    const app = project({ cert: root.certificate, overrides: updates(true) });
+    const result = await exportIn(app.root, ["--platform", "ios"], PATH);
+    expect(result).toMatchObject({ code: 0, err: [] });
+    const text = exported(result.dir);
+    expect(text).toContain(
+      `"codeSigningMetadata":{"keyid":"main","alg":"rsa-v1_5-sha256"},"${FLAG}":true,"expoClient":`,
+    );
+    expect((JSON.parse(text) as { certificate: string }).certificate).toBe(root.certificate);
+  });
+
+  test.each([undefined, false])(
+    "with the flag %s the export holds no chain member, in the fields and order of a direct export",
+    async (flag) => {
+      const app = project({ overrides: updates(flag) });
+      const result = await exportIn(app.root, ["--platform", "ios"], PATH);
+      expect(result).toMatchObject({ code: 0, err: [] });
+      const text = exported(result.dir);
+      const { version, certificate, codeSigningMetadata, expoClient, platforms } = JSON.parse(
+        text,
+      ) as Record<string, unknown>;
+      const direct = { version, certificate, codeSigningMetadata, expoClient, platforms };
+      expect(text).toBe(JSON.stringify(direct));
+    },
+  );
+
+  test.each<[string, () => { overrides: object; cert?: string }, string]>([
+    [
+      "a flag that is not a boolean",
+      () => ({ cert: root.certificate, overrides: updates("true") }),
+      `app config updates.${FLAG} must be true or false`,
+    ],
+    [
+      "a direct-signing certificate with the flag",
+      () => ({ overrides: updates(true) }),
+      "updates.codeSigningCertificate: root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "a CA root without the flag",
+      () => ({ cert: root.certificate, overrides: updates(undefined) }),
+      "updates.codeSigningCertificate: certificate must have Key Usage digitalSignature",
+    ],
+  ])("%s is refused before --out is created", async (_, given, message) => {
+    const result = await exportIn(project(given()).root, [], PATH);
+    expect(result).toMatchObject({ code: 2, out: [], err: [`tide: ${message}`] });
+    expect(existsSync(result.dir)).toBe(false);
+  });
 });
 
 describe("refusals", () => {

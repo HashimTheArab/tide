@@ -12,7 +12,7 @@ import { KeyError, openWriter } from "../src/keys.ts";
 const [appPath = "", partPath = ""] = process.argv.slice(2);
 const app = JSON.parse(readFileSync(appPath, "utf8")) as Pick<
   ProjectExport,
-  "certificate" | "codeSigningMetadata"
+  "certificate" | "codeSigningMetadata" | "codeSigningIncludeManifestResponseCertificateChain"
 >;
 try {
   const { signer } = await openWriter(process.env, { app });

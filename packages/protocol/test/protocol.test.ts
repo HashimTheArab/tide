@@ -31,6 +31,7 @@ import {
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
   certificateChain,
+  certificateChainAtIssue,
   certificatePublicKey,
   codeSigningCertificate,
   contentKey,
@@ -42,6 +43,7 @@ import {
   decodeStoredReply,
   diskKey,
   diskPath,
+  identityKey,
   encodeMultipart,
   encodeBaseRecord,
   encodeRollout,
@@ -53,6 +55,7 @@ import {
   parseS3Xml,
   patchKey,
   replyKey,
+  rootCertificate,
   rolloutBucket,
   rolloutClientId,
   rolloutSide,
@@ -2052,6 +2055,117 @@ describe("verifyChainedSignature", () => {
   });
 });
 
+/** The DER SHA-256 of a one-block PEM, in lowercase hex. */
+async function derSha256(pemText: string): Promise<string> {
+  const body = pemText.replace(/-----[A-Z ]+-----|\s/g, "");
+  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", decodeBase64(body)!)));
+}
+
+describe("rootCertificate", () => {
+  test("chain-root.pem passes with its DER SHA-256 in lowercase hex", async () => {
+    const root = text(fixture("chain-root.pem"));
+    expect((await rootCertificate(root, CHAIN_NOW)).sha256).toBe(await derSha256(root));
+  });
+
+  test("the returned key verifies what the root's key signs", async () => {
+    const pair = await rootKeys();
+    const root = await issue(pair, pair, { subject: "Root", issuer: "Root", extensions: CA });
+    const { key } = await rootCertificate(root, CHAIN_NOW);
+    const body = ascii("signed by the root");
+    const header = await expoSignature(body, cryptoKeySigner(pair.privateKey, "root"));
+    await expect(verifyChainedSignature(body, header, key)).resolves.toBeUndefined();
+  });
+
+  test.each([
+    [
+      "a direct-signing certificate",
+      () => Promise.resolve(text(fixture("certificate.pem"))),
+      "root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "two blocks",
+      () => Promise.resolve(text(fixture("chain-root.pem")).repeat(2)),
+      "root must be exactly one PEM CERTIFICATE block",
+    ],
+    [
+      "an expired root",
+      async () => {
+        const root = await rootKeys();
+        return issue(root, root, {
+          subject: "Root",
+          issuer: "Root",
+          extensions: CA,
+          notAfter: new Date("2030-01-01T00:00:00Z"),
+        });
+      },
+      "root has expired",
+    ],
+    [
+      "project information",
+      async () => {
+        const root = await rootKeys();
+        return issue(root, root, {
+          subject: "Root",
+          issuer: "Root",
+          extensions: [...CA, EXTENSION.projectInformation],
+        });
+      },
+      "root must not carry Expo project information",
+    ],
+  ])("refuses %s", async (_, make, message) => {
+    const pemText = await make();
+    await rejects(() => rootCertificate(pemText, CHAIN_NOW), "root", message);
+  });
+});
+
+describe("certificateChainAtIssue", () => {
+  const LEAF_EXPIRED = {
+    notBefore: new Date("2027-01-01T00:00:00Z"),
+    notAfter: new Date("2028-01-01T00:00:00Z"),
+  };
+
+  test("a chain whose leaf expired before now passes, and its key verifies a part the leaf signed", async () => {
+    const { served, root } = await testChain({ leaf: LEAF_EXPIRED });
+    await rejects(
+      () => certificateChain(served, root, CHAIN_NOW),
+      "certificate_chain",
+      "leaf has expired",
+    );
+    const leaf = await certificateChainAtIssue(served, root);
+    const body = ascii('{"type":"noUpdateAvailable"}');
+    const header = await expoSignature(body, cryptoKeySigner((await leafKeys()).privateKey, "any"));
+    await expect(verifyChainedSignature(body, header, leaf)).resolves.toBeUndefined();
+  });
+
+  test("windows that never overlap are refused as expired", async () => {
+    const { served, root } = await testChain({
+      root: { notAfter: new Date("2029-01-01T00:00:00Z") },
+      leaf: { notBefore: new Date("2030-01-01T00:00:00Z") },
+    });
+    await rejects(
+      () => certificateChainAtIssue(served, root),
+      "certificate_chain",
+      "root has expired",
+    );
+  });
+
+  test("a chain to another root is refused", async () => {
+    const { served } = chainGolden("chain.multipart");
+    const twin = await issue(await intermediateKeys(), await intermediateKeys(), {
+      subject: "Tide root",
+      issuer: "Tide root",
+      extensions: CA,
+    });
+    await rejects(
+      () => certificateChainAtIssue(served, twin),
+      "certificate_chain",
+      "intermediate 1 has a signature that does not verify under its issuer's key",
+    );
+    const { root } = await testChain();
+    await rejects(() => certificateChainAtIssue(served, root), "certificate_chain");
+  });
+});
+
 describe(`certificate chain properties (seed ${seed})`, () => {
   test("flipping any byte of a served certificate refuses the chain", async () => {
     const served = ["chain-leaf.pem", "chain-intermediate.pem"].map((f) => derOf(text(fixture(f))));
@@ -2773,8 +2887,17 @@ describe("stored reply", () => {
     ],
     [`bases/${ID}`, `bases/${ID}`],
     [`patches/${PNG_HEX}/${LAUNCH_HEX}`, `patches/${PNG_HEX}/${LAUNCH_HEX}`],
+    [`identities/${PNG_HEX}`, `identities/${PNG_HEX}`],
   ])("diskPath maps %s to %s", (key, path) => {
     expect(diskPath(key)).toBe(path);
+  });
+
+  test("identityKey names a key ID by the SHA-256 of its UTF-8", async () => {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", ascii("main")));
+    expect(await identityKey("main")).toBe(`identities/${hex(digest)}`);
+    expect(diskPath(await identityKey("a key/with ../ spaces"))).toMatch(
+      /^identities\/[0-9a-f]{64}$/,
+    );
   });
 
   test.each([
@@ -2794,6 +2917,9 @@ describe("stored reply", () => {
     "legacy/map",
     "lock",
     "",
+    `identities/${PNG_HEX.toUpperCase()}`,
+    `identities/${PNG_HEX.slice(1)}`,
+    "identities/main",
     ...BAD_PATCH_KEYS,
   ])("diskPath rejects %j", async (key) => {
     await rejects(() => diskPath(key), "key");

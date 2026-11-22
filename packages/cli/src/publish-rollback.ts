@@ -3,9 +3,7 @@ import { parseArgs } from "node:util";
 import {
   buildRollBackToEmbedded,
   contentKey,
-  encodeMultipart,
   encodeStoredReply,
-  expoSignature,
   replyKey,
 } from "@tide-ota/protocol";
 
@@ -148,9 +146,10 @@ function rollingBack(keys: readonly string[]): Prepare {
         throw new PublishError(`${key} does not exist: there is nothing to roll back`);
       }
       const commitTime = new Date(createdAtFloor(local, previous));
-      const body = buildRollBackToEmbedded({ commitTime });
-      const signature = await expoSignature(body, writer.signer);
-      const multipart = encodeMultipart([{ name: "directive", body, signature }]);
+      const multipart = await writer.signedReply(
+        "directive",
+        buildRollBackToEmbedded({ commitTime }),
+      );
       pointers.push({
         key,
         previous,

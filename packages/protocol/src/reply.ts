@@ -1,4 +1,4 @@
-import { ProtocolError } from "./hash.ts";
+import { ProtocolError, sha256Hex } from "./hash.ts";
 import { UUID } from "./manifest.ts";
 import { BOUNDARY } from "./multipart.ts";
 import { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
@@ -65,6 +65,7 @@ export const CONTENT_KEY = /^(?:assets|bundles)\/[0-9a-f]{64}$/;
 const RECORD_KEY = new RegExp(`^updates/${UUID.source.slice(1, -1)}\\.json$`);
 const BASE_KEY = new RegExp(`^bases/${UUID.source.slice(1, -1)}$`);
 const PATCH_KEY = /^patches\/[0-9a-f]{64}\/[0-9a-f]{64}$/;
+const IDENTITY_KEY = /^identities\/[0-9a-f]{64}$/;
 const CONTENT_TYPE = /^multipart\/mixed; boundary=(.*)$/s;
 // Covers every Expo runtime policy: appVersion `2.6.2`, nativeVersion `1.0.0(1)`, sdkVersion `exposdk:57.0.0`.
 const NAME = /^[A-Za-z0-9._+():-]{1,64}$/;
@@ -321,6 +322,11 @@ export function patchKey(fromHex: string, toHex: string): string {
   return key;
 }
 
+/** Returns the key of the CLI's binding for `keyId`, named by the SHA-256 of its UTF-8; no server reads it. */
+export async function identityKey(keyId: string): Promise<string> {
+  return `identities/${await sha256Hex(new Uint8Array(encoder.encode(keyId)))}`;
+}
+
 /**
  * Returns the relative file path that holds `key` on disk. Names are hex-escaped to lowercase without `.` or `-`, so
  * no two keys share a path on a case-insensitive filesystem and no name collides with `reply/no-update`.
@@ -332,7 +338,8 @@ export function diskPath(key: string): string {
     CONTENT_KEY.test(key) ||
     RECORD_KEY.test(key) ||
     BASE_KEY.test(key) ||
-    PATCH_KEY.test(key)
+    PATCH_KEY.test(key) ||
+    IDENTITY_KEY.test(key)
   ) {
     return key;
   }
