@@ -22,12 +22,8 @@ import {
 } from "@tide-ota/protocol";
 
 import type { Issued } from "./chain-fixture.ts";
-import type { Identity } from "./publish-fixture.ts";
+import type { Identity, Store } from "./publish-fixture.ts";
 import { startServer, storeFromEnv } from "../../server/src/node.ts";
-import { republish, rollback } from "../src/publish-rollback.ts";
-import { publish } from "../src/publish.ts";
-import { registerBuild } from "../src/register-build.ts";
-import { rollout } from "../src/rollout.ts";
 import {
   chainEnv,
   chainExport,
@@ -48,16 +44,16 @@ import {
   OTHER_RUNTIME,
   RESTORE,
   artifact,
-  diskObjects,
   env,
   identity,
   main,
   noUpdateBy,
   other,
   s3,
-  s3Env,
   s3Snapshot,
   seededPointer,
+  STORES,
+  cmd,
   useFixture,
 } from "./publish-fixture.ts";
 
@@ -67,32 +63,6 @@ const B_IOS = "reply/main/2.0.0/ios";
 const B_ANDROID = "reply/main/2.0.0/android";
 const CHANGED =
   "reply/no-update was changed by another writer during the publish; it keeps theirs: run again";
-
-const STORES = {
-  disk: () => {
-    const dir = tempRoot();
-    return { env: { TIDE_DISK_DIR: dir }, objects: () => diskObjects(dir) };
-  },
-  s3: () => ({ env: s3Env(), objects: (): ReadonlyMap<string, Uint8Array> => s3.objects }),
-};
-type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
-
-const COMMANDS = { publish, rollback, republish, rollout, registerBuild };
-
-/** Runs a command in process; returns the exit code and output lines. */
-async function cmd(
-  command: keyof typeof COMMANDS,
-  args: string[],
-  environment: Record<string, string>,
-) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await COMMANDS[command](args, environment, {
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-  });
-  return { code, out, err };
-}
 
 /** A signing identity's pins, the export fields its builds carry, and its writer configuration over a store. */
 interface Signing {

@@ -36,6 +36,10 @@ import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { exportProject } from "../src/export.ts";
 import { launchUrl } from "../src/publish-record.ts";
+import { republish, rollback } from "../src/publish-rollback.ts";
+import { publish } from "../src/publish.ts";
+import { registerBuild } from "../src/register-build.ts";
+import { rollout } from "../src/rollout.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
@@ -225,6 +229,35 @@ export const s3Env = () => ({
   TIDE_S3_ACCESS_KEY_ID: FAKE_S3.accessKeyId,
   TIDE_S3_SECRET_ACCESS_KEY: FAKE_S3.secretAccessKey,
 });
+
+/** A disk or S3 store: its configuration and a reader of every object in it. */
+export const STORES = {
+  disk: () => {
+    const root = tempRoot();
+    return { env: { TIDE_DISK_DIR: root }, objects: () => diskObjects(root) };
+  },
+  s3: () => ({ env: s3Env(), objects: (): ReadonlyMap<string, Uint8Array> => s3.objects }),
+};
+export type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
+
+const COMMANDS = { publish, rollback, republish, rollout, registerBuild };
+
+/** Runs a write command in process; returns the exit code and output lines. */
+export async function cmd(
+  command: keyof typeof COMMANDS,
+  args: string[],
+  environment: Record<string, string>,
+  now?: () => number,
+) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await COMMANDS[command](args, environment, {
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+    ...(now && { now }),
+  });
+  return { code, out, err };
+}
 
 /** The public config the fixture project exports in production mode. */
 const EXPO_CLIENT = {

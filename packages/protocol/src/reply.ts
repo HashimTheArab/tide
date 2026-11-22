@@ -228,21 +228,14 @@ function bodyText(body: Uint8Array): string {
   }
 }
 
-interface Bodies {
-  readonly new: string;
-  readonly earlier: string | undefined;
-}
-
-/** The exact version-2 record text for `rollout`; `bodies` as for `rolloutFields`. */
-function serializeRollout(rollout: Rollout, bodies?: Bodies): string {
-  return JSON.stringify({ version: ROLLOUT_VERSION, ...rolloutFields(rollout, bodies) });
-}
-
 /**
- * A rollout's record fields without `version`; an absent reply is written as null. `bodies` are the replies' bodies
+ * The exact version-2 record text for `rollout`; an absent reply is written as null. `bodies` are the replies' bodies
  * as strings when the caller already holds them, so a read does not decode the bytes it just encoded.
  */
-function rolloutFields(rollout: Rollout, bodies?: Bodies): Record<string, unknown> {
+function serializeRollout(
+  rollout: Rollout,
+  bodies?: { new: string; earlier: string | undefined },
+): string {
   // `unknown`: a JavaScript caller may pass null or a missing reply, which decode then refuses.
   const nested = (field: string, reply: unknown, body: string | undefined) => {
     if (typeof reply !== "object" || reply === null) return null;
@@ -252,12 +245,13 @@ function rolloutFields(rollout: Rollout, bodies?: Bodies): Record<string, unknow
       throw prefixed(field, e);
     }
   };
-  return {
+  return JSON.stringify({
+    version: ROLLOUT_VERSION,
     kind: "rollout",
     percent: rollout.percent,
     new: nested("new", rollout.new, bodies?.new),
     earlier: nested("earlier", rollout.earlier, bodies?.earlier),
-  };
+  });
 }
 
 /** One entry of a version-3 record: its keyid and the fields written after it. */
@@ -361,16 +355,6 @@ function readReply(r: Record<string, unknown>): StoredReply {
  * other key, kind, order or spelling.
  */
 function readRollout(r: Record<string, unknown>, text: string): Rollout {
-  const [rollout, bodies] = readRolloutFields(r);
-  // Refuses another key order, whitespace, escape or number spelling.
-  if (serializeRollout(rollout, bodies) !== text) {
-    throw new ProtocolError("record", "must be exactly what encodeRollout writes");
-  }
-  return rollout;
-}
-
-/** Reads a rollout's percent and sides, and both bodies as strings; the caller compares the exact text. */
-function readRolloutFields(r: Record<string, unknown>): [Rollout, Bodies] {
   const percent = present(r, "percent");
   if (
     typeof percent !== "number" ||
@@ -388,10 +372,12 @@ function readRolloutFields(r: Record<string, unknown>): [Rollout, Bodies] {
   if (earlier?.kind === "manifest" && earlier.updateId === next.updateId) {
     throw new ProtocolError("earlier.updateId", "must differ from new.updateId");
   }
-  return [
-    { kind: "rollout", percent, new: next, earlier },
-    { new: newBody, earlier: earlierBody },
-  ];
+  const rollout: Rollout = { kind: "rollout", percent, new: next, earlier };
+  // Refuses another key order, whitespace, escape or number spelling.
+  if (serializeRollout(rollout, { new: newBody, earlier: earlierBody }) !== text) {
+    throw new ProtocolError("record", "must be exactly what encodeRollout writes");
+  }
+  return rollout;
 }
 
 /** Reads a version-3 `reply/no-update`, which must be exactly what encode writes; that refuses any other key. */

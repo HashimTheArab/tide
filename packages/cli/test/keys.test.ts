@@ -665,7 +665,7 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rollbackReply(main.keys.privateKey),
     });
-    expect((await open(opened.env)).fallback).toBeUndefined();
+    expect((await open(opened.env)).noUpdate).toBeUndefined();
     opened.unchanged(kind === "s3" ? 4 : 0);
   });
 
@@ -673,7 +673,7 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rolloutReply(main.keys.privateKey, main.keys.privateKey),
     });
-    expect((await open(opened.env)).fallback).toBeUndefined();
+    expect((await open(opened.env)).noUpdate).toBeUndefined();
     opened.unchanged(kind === "s3" ? 4 : 0);
   });
 
@@ -767,8 +767,8 @@ describe.each(["disk", "s3"] as const)("several keyids in reply/no-update on %s"
     await expect(check(opened.env, main)).resolves.toBeUndefined();
     await expect(check(opened.env, other, "root")).resolves.toBeUndefined();
     const writer = await openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env });
-    expect(writer.fallback?.version).toBe(3);
-    expect([...(writer.fallback?.entries.keys() ?? [])]).toEqual(["main", "root"]);
+    expect(writer.noUpdate?.version).toBe(3);
+    expect([...(writer.noUpdate?.entries.keys() ?? [])]).toEqual(["main", "root"]);
     // Each: the binding key and reply/no-update.
     opened.unchanged(kind === "s3" ? 6 : 0);
   });
@@ -788,7 +788,7 @@ describe.each(["disk", "s3"] as const)("several keyids in reply/no-update on %s"
     const env = { ...pins(main), ...keyFile(main.pkcs8), ...opened.env };
     await refusal(openWriter(env), NOT_ADDED("main"));
     const writer = await openWriter(env, { addIdentity: true });
-    expect([...(writer.fallback?.entries.keys() ?? [])]).toEqual(["root"]);
+    expect([...(writer.noUpdate?.entries.keys() ?? [])]).toEqual(["root"]);
     opened.unchanged(kind === "s3" ? 6 : 0);
   });
 

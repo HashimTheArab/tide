@@ -2,7 +2,7 @@ import type { Rollout, StoredReply } from "@tide-ota/protocol";
 import { MAX_REPLY_BYTES, NO_UPDATE_KEY } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
-import type { Side } from "./status.ts";
+import type { Entry, Side } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { PublishError } from "./publish-record.ts";
 import { checkPointer, readRecord } from "./status.ts";
@@ -30,9 +30,27 @@ export async function readPointer(bucket: Bucket, key: string): Promise<PointerS
 export const runtimeOf = (key: string) => key.split("/").slice(2).join("/");
 
 /**
- * Refuses when a pointer of any of `runtimes` (`<runtime>/<platform>`), on any channel, is signed under another keyid
- * than `keyId`. The pointers in `read` are judged as read, whatever a later listing shows; every other listed pointer
- * of those runtimes is read once. It reads, it does not fence: a write landing after the listing is not seen.
+ * Yields each pointer under `reply/` that `want` accepts, as checkPointer reads it and undefined when absent; a name
+ * outside the key grammar yields no key.
+ */
+export async function* pointers(
+  bucket: Bucket,
+  want: (key: string) => boolean = () => true,
+): AsyncGenerator<{ readonly key?: string; readonly entry?: Entry | string | undefined }> {
+  for (const listed of await bucket.list("reply/")) {
+    if (!("key" in listed)) {
+      yield {};
+      continue;
+    }
+    const { key } = listed;
+    if (key === NO_UPDATE_KEY || !want(key)) continue;
+    yield { key, entry: await readRecord(bucket, key, checkPointer) };
+  }
+}
+
+/**
+ * Refuses a pointer of `runtimes` on any channel signed under another keyid; `read` pointers are judged as read.
+ * Reads only, never fences.
  */
 export async function ownRuntimes(
   bucket: Bucket,
@@ -49,15 +67,13 @@ export async function ownRuntimes(
   };
   for (const { key, previous } of read) refuse(key, previous.sides);
   const seen = new Set(read.map((t) => t.key));
-  for (const entry of await bucket.list("reply/")) {
+  const listed = pointers(bucket, (key) => !seen.has(key) && runtimes.has(runtimeOf(key)));
+  for await (const { key, entry } of listed) {
     // A name outside the key grammar names no runtime.
-    if (!("key" in entry)) continue;
-    const { key } = entry;
-    if (key === NO_UPDATE_KEY || seen.has(key) || !runtimes.has(runtimeOf(key))) continue;
-    const pointer = await readRecord(bucket, key, (bytes) => checkPointer(key, bytes));
+    if (key === undefined) continue;
     // Its owner is unknown, as for an unreadable target.
-    if (typeof pointer === "string") throw new PublishError(`${key} is unreadable: ${pointer}`);
-    refuse(key, pointer?.sides);
+    if (typeof entry === "string") throw new PublishError(`${key} is unreadable: ${entry}`);
+    refuse(key, entry?.sides);
   }
 }
 

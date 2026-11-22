@@ -61,26 +61,32 @@ export async function status(
       continue;
     }
     const { key } = entry;
-    const isNoUpdate = key === NO_UPDATE_KEY;
-    const verdict =
-      (isNoUpdate
-        ? await readRecord(bucket, key, checkNoUpdate)
-        : await readRecord(bucket, key, (bytes) => checkPointer(key, bytes))) ?? "absent when read";
-    if (typeof verdict === "string") {
-      err(`${key}: unreadable: ${verdict}`);
+    const fail = (reason: string) => {
+      err(`${key}: unreadable: ${reason}`);
       unreadable = true;
-      if (isNoUpdate) noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
-    } else if ("version" in verdict) {
-      noUpdate =
-        verdict.version === 1
-          ? [`${NO_UPDATE_KEY}: present`]
-          : [...verdict.entries.keys()].map(
-              (k) => `${NO_UPDATE_KEY} keyid ${JSON.stringify(k)}: present`,
-            );
-    } else {
-      const [, channel, runtime, platform] = key.split("/");
-      out(`${channel} ${runtime} ${platform} ${row(verdict)}`);
+    };
+    if (key === NO_UPDATE_KEY) {
+      const record = (await readRecord(bucket, key, checkNoUpdate)) ?? "absent when read";
+      if (typeof record === "string") {
+        fail(record);
+        noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
+      } else {
+        noUpdate =
+          record.version === 1
+            ? [`${NO_UPDATE_KEY}: present`]
+            : [...record.entries.keys()].map(
+                (k) => `${NO_UPDATE_KEY} keyid ${JSON.stringify(k)}: present`,
+              );
+      }
+      continue;
     }
+    const pointer = (await readRecord(bucket, key, checkPointer)) ?? "absent when read";
+    if (typeof pointer === "string") {
+      fail(pointer);
+      continue;
+    }
+    const [, channel, runtime, platform] = key.split("/");
+    out(`${channel} ${runtime} ${platform} ${row(pointer)}`);
   }
   for (const line of noUpdate) out(line);
   return unreadable ? 1 : 0;
@@ -102,7 +108,7 @@ function row({ reply, sides }: Entry): string {
 export async function readRecord<T>(
   bucket: Bucket,
   key: string,
-  check: (bytes: Uint8Array) => T | string,
+  check: (key: string, bytes: Uint8Array) => T | string,
 ): Promise<T | string | undefined> {
   let bytes;
   try {
@@ -111,7 +117,7 @@ export async function readRecord<T>(
     // The listing succeeded, so one failed read is this record's problem; later records are still read.
     return e instanceof BucketError ? e.message : "read failed";
   }
-  return bytes === undefined ? undefined : check(bytes);
+  return bytes === undefined ? undefined : check(key, bytes);
 }
 
 /** Checks a pointer's bytes the way a signing client would receive them; a rollout checks both sides. */
@@ -125,8 +131,8 @@ export function checkPointer(key: string, bytes: Uint8Array): Entry | string {
   return checkEntry(key, decoded);
 }
 
-/** Checks `reply/no-update`'s bytes; every side of a version-3 entry must be signed under that entry's keyid. */
-export function checkNoUpdate(bytes: Uint8Array): NoUpdateRecord | string {
+/** Checks the bytes of `reply/no-update` at `key`; every side of a version-3 entry must be signed under that entry's keyid. */
+export function checkNoUpdate(key: string, bytes: Uint8Array): NoUpdateRecord | string {
   let decoded;
   try {
     // Version 1 first, so a misplaced reply keeps its reason.
@@ -139,14 +145,14 @@ export function checkNoUpdate(bytes: Uint8Array): NoUpdateRecord | string {
     }
   }
   if (decoded.kind !== "identities") {
-    const side = checkSide(NO_UPDATE_KEY, decoded);
+    const side = checkSide(key, decoded);
     if (typeof side === "string") return side;
     const entry = { reply: decoded, time: side.time, sides: [side] };
     return { version: 1, entries: new Map([[side.keyId, entry]]) };
   }
   const entries = new Map<string, Entry>();
   for (const [keyId, reply] of decoded.entries) {
-    const entry = checkEntry(NO_UPDATE_KEY, reply);
+    const entry = checkEntry(key, reply);
     if (typeof entry === "string") return `an entry's ${entry}`;
     if (entry.sides.some((s) => s.keyId !== keyId)) return "an entry is signed under another keyid";
     entries.set(keyId, entry);

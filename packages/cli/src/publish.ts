@@ -19,7 +19,7 @@ import {
 } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
-import type { Env, Fallback, Writer } from "./keys.ts";
+import type { Env, StoredNoUpdate, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
@@ -247,7 +247,7 @@ export async function readTargets<T extends { readonly key: string }>(
 }
 
 /**
- * Ends a plan once everything is signed: builds `reply/no-update` when `noUpdateChange` says so, then checks the
+ * Ends a plan once everything is signed: builds `reply/no-update` when `needsNoUpdate` says so, then checks the
  * certificate afresh, so an expiry before the first write is a refusal.
  */
 export async function plan(
@@ -256,47 +256,40 @@ export async function plan(
   records: Plan["records"],
   pointers: Plan["pointers"],
 ): Promise<Plan> {
-  const { fallback, identity } = writer;
-  const noUpdate =
-    noUpdateChange(writer, fallback) === undefined
-      ? undefined
-      : noUpdateRecord(fallback, identity.keyId, await noUpdateReply(writer));
+  const { noUpdate: stored, identity } = writer;
+  const noUpdate = needsNoUpdate(writer, stored)
+    ? noUpdateRecord(stored, identity.keyId, await noUpdateReply(writer))
+    : undefined;
   await checkCertificate();
   return { writer, noUpdate, records, pointers, checkCertificate };
 }
 
 /**
- * Returns why a write must replace `fallback`, signing nothing: it is absent, it holds no entry for this keyid, or in
- * chain mode this keyid's entry serves another chain than the configured one. Undefined when it stays.
+ * Whether a write must replace `stored`, signing nothing: it is absent, has no entry for this keyid, or in chain mode
+ * this keyid's entry serves another chain than the configured one.
  */
-function noUpdateChange(
-  { identity, chain }: Writer,
-  fallback: Fallback | undefined,
-): "create" | "add" | "renew" | undefined {
-  if (fallback === undefined) return "create";
-  const own = fallback.entries.get(identity.keyId);
-  if (own === undefined) return "add";
+function needsNoUpdate({ identity, chain }: Writer, stored: StoredNoUpdate | undefined): boolean {
+  if (stored === undefined) return true;
+  const own = stored.entries.get(identity.keyId);
+  if (own === undefined) return true;
   // The identity check has verified it, so in chain mode it carries a chain.
-  const stored = own.sides[0]?.signed.chain;
-  return chain !== undefined && stored !== undefined && !sameBytes(stored, chain)
-    ? "renew"
-    : undefined;
+  const served = own.sides[0]?.signed.chain;
+  return chain !== undefined && served !== undefined && !sameBytes(served, chain);
 }
 
 /**
- * Returns `reply/no-update` with `reply` as `keyId`'s entry over `fallback`, and the ETag it replaces. A version-1
- * record of this keyid stays version 1; any other keyid's entry is copied as stored, so adding one makes version 3.
- * Over the size limit, 16 identities or a keyid version 3 cannot hold, it refuses naming the key.
+ * Returns `reply/no-update` with `reply` as `keyId`'s entry over `stored`, and the ETag it replaces; a version-1 record
+ * of this keyid stays version 1, and any other keyid's entry is copied as stored.
  */
 function noUpdateRecord(
-  fallback: Fallback | undefined,
+  stored: StoredNoUpdate | undefined,
   keyId: string,
   reply: NoUpdateReply,
 ): NonNullable<Plan["noUpdate"]> {
   try {
-    if (fallback === undefined) return { bytes: encodeStoredReply(reply) };
-    const { entries, etag } = fallback;
-    if (fallback.version === 1 && entries.has(keyId)) {
+    if (stored === undefined) return { bytes: encodeStoredReply(reply) };
+    const { entries, etag } = stored;
+    if (stored.version === 1 && entries.has(keyId)) {
       return { bytes: encodeStoredReply(reply), etag };
     }
     // checkNoUpdate has refused any other kind at reply/no-update.
@@ -541,9 +534,8 @@ async function noUpdateReply(writer: Writer): Promise<NoUpdateReply> {
 }
 
 /**
- * Writes `reply/no-update` from `bytes` over the ETag read, or only if still absent. A lost race succeeds only when
- * the winner needs no change from this writer, judged as `plan` judged it and signing nothing; otherwise the rerun
- * merges onto the winner.
+ * Writes `reply/no-update` over the ETag read, or only if still absent. A lost race succeeds only when the winner needs
+ * nothing from this writer; otherwise the rerun merges onto it.
  */
 async function ensureNoUpdate(
   writer: Writer,
@@ -555,11 +547,11 @@ async function ensureNoUpdate(
       ? await bucket.putIfAbsent(NO_UPDATE_KEY, bytes)
       : await bucket.putIfMatch(NO_UPDATE_KEY, bytes, etag);
   if (written !== undefined) return;
-  const winner = await writer.readFallback();
+  const winner = await writer.readNoUpdate();
   if (winner === undefined) {
     throw new PublishError(`${NO_UPDATE_KEY} was removed by another writer during the publish`);
   }
-  if (noUpdateChange(writer, winner) !== undefined) {
+  if (needsNoUpdate(writer, winner)) {
     throw new PublishError(
       `${NO_UPDATE_KEY} was changed by another writer during the publish; it keeps theirs: run again`,
     );

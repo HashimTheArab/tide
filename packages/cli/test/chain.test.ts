@@ -20,12 +20,10 @@ import {
 
 import type { Issued } from "./chain-fixture.ts";
 import type { FakeKms } from "./fake-kms.ts";
+import type { Store } from "./publish-fixture.ts";
 import { startServer, storeFromEnv } from "../../server/src/node.ts";
 import { probe } from "../src/probe.ts";
-import { republish, rollback } from "../src/publish-rollback.ts";
 import { publish } from "../src/publish.ts";
-import { registerBuild } from "../src/register-build.ts";
-import { rollout } from "../src/rollout.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import {
   chainEnv,
@@ -57,6 +55,8 @@ import {
   s3Env,
   s3Snapshot,
   useFixture,
+  STORES,
+  cmd,
 } from "./publish-fixture.ts";
 
 useFixture();
@@ -127,34 +127,7 @@ afterAll(async () => {
   await kms.close();
 });
 
-const STORES = {
-  disk: () => {
-    const root = tempRoot();
-    return { env: { TIDE_DISK_DIR: root }, objects: () => diskObjects(root) };
-  },
-  s3: () => ({ env: s3Env(), objects: (): ReadonlyMap<string, Uint8Array> => s3.objects }),
-};
-type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
 const s3Store = (): Store => STORES.s3();
-
-const COMMANDS = { publish, rollback, republish, rollout, registerBuild };
-
-/** Runs a command in process; returns the exit code and output lines. */
-async function cmd(
-  command: keyof typeof COMMANDS,
-  args: string[],
-  environment: Record<string, string>,
-  now?: () => number,
-) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await COMMANDS[command](args, environment, {
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-    ...(now && { now }),
-  });
-  return { code, out, err };
-}
 
 /** A chain-mode writer configuration: the root's pins, the served chain, and the first member's key. */
 interface Config {
