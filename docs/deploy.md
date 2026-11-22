@@ -124,7 +124,8 @@ separate jobs of one workflow:
     version written in the workflow file and kept equal to the app's (never one the export job chose), into a fresh
     directory under `${{ runner.temp }}`, and runs them on a Node version the CLI's `engines` allows, from
     `actions/setup-node`. `gh attestation verify` checks that each tarball was signed by a GitHub Actions certificate
-    for Tide's `release.yml` on a GitHub-hosted runner, and fails when a package has no attestation. npm then installs
+    for Tide's `release.yml` at that version's tag on a GitHub-hosted runner, and fails when a package has no
+    attestation. Use `--cert-identity`, an exact match: `--signer-workflow` only matches a prefix. npm then installs
     those two checked files and nothing else: `--offline` fails rather than fetch anything. The app is never checked
     out; it is present only as artifact data. Give the step `GH_TOKEN: ${{ github.token }}`:
 
@@ -132,8 +133,8 @@ separate jobs of one workflow:
     mkdir "$RUNNER_TEMP/tide-pkgs" && cd "$RUNNER_TEMP/tide-pkgs"
     for p in cli protocol; do
       npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-      gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide \
-        --signer-workflow HashimTheArab/tide/.github/workflows/release.yml --deny-self-hosted-runners
+      gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+        --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
     done
     npm install --prefix "$RUNNER_TEMP/tide" --offline --ignore-scripts --no-fund \
       ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz

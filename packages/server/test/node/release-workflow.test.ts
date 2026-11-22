@@ -690,14 +690,19 @@ describe("checking a release", () => {
         .matchAll(new RegExp(`${name} ([^\\n]*)`, "g")),
     ].map((m) => m[1]!);
 
-  // A payload names any repository its signer likes; only the certificate's identity proves the signer.
-  test("every documented check pins the signer to this workflow on a hosted runner", () => {
-    const verify = `--repo ${repo} --signer-workflow ${repo}/${WORKFLOW_PATH} --deny-self-hosted-runners`;
+  // --signer-workflow is a prefix match, so it also accepts any ref and any workflow named release.yml<suffix>.
+  test("every documented check pins the signer to this workflow at the version's tag, on a hosted runner", () => {
     for (const doc of ["docs/deploy.md", "docs/release.md"]) {
       const checks = commands(doc, "gh attestation verify");
       expect([doc, checks.length > 0]).toEqual([doc, true]);
-      for (const args of checks)
-        expect([doc, args]).toEqual([doc, expect.stringContaining(verify)]);
+      for (const args of checks) {
+        const version = /^"tide-ota-\$p-(\S+)\.tgz"/.exec(args)?.[1];
+        expect([doc, args]).toEqual([
+          doc,
+          `"tide-ota-$p-${version}.tgz" --repo ${repo} --deny-self-hosted-runners ` +
+            `--cert-identity https://github.com/${repo}/${WORKFLOW_PATH}@refs/tags/v${version}`,
+        ]);
+      }
     }
   });
 

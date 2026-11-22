@@ -76,13 +76,14 @@ with the same bytes.
 - **npmjs.com:** each package's page for the new version shows a Provenance section. It must name
   `HashimTheArab/tide`, the tag's commit and a `release.yml` run.
 - **GitHub attestations:** in an empty directory, fetch each package from npm and check it was signed by
-  `release.yml` in `HashimTheArab/tide` on a GitHub-hosted runner. Each must print a verified result:
+  `release.yml` in `HashimTheArab/tide` at the release tag on a GitHub-hosted runner. Each must print a verified
+  result:
 
   ```sh
   for p in protocol server cli; do
     npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-    gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide \
-      --signer-workflow HashimTheArab/tide/.github/workflows/release.yml --deny-self-hosted-runners
+    gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+      --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
   done
   ```
 
@@ -106,8 +107,8 @@ package's `repository.url`. Before the next release:
 - Replace each package's trusted publisher: `npm trust list` gives its id for `npm trust revoke`, then run
   `npm trust github` as above with the new `--repo`.
 - Update every reference to the old owner (`git grep HashimTheArab`): `repository`, `homepage` and `bugs` in the
-  root and package `package.json` files, the links in the docs, and `--repo` and `--signer-workflow` here and in
+  root and package `package.json` files, the links in the docs, and `--repo` and `--cert-identity` here and in
   [deploy.md](deploy.md#publishing).
 
 Attestation certificates keep the name the repository had when it signed, so a version released before the change
-still verifies only with the old `--signer-workflow`.
+still verifies only with the old `--cert-identity`.
