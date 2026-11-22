@@ -5,12 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
-import type { Rollout, StoredReply } from "@tide-ota/protocol";
+import type { NoUpdateReply, PointerEntry, Rollout, StoredReply } from "@tide-ota/protocol";
 import {
+  MAX_IDENTITIES_BYTES,
   MAX_REPLY_BYTES,
   decodePointer,
   decodeStoredReply,
   diskPath,
+  encodeIdentityNoUpdate,
+  encodeIdentityPointer,
   encodeRollout,
   encodeStoredReply,
 } from "@tide-ota/protocol";
@@ -68,6 +71,22 @@ const noUpdateWith = (edit: (multipart: string) => string) =>
     boundary: BOUNDARY,
     body: utf8(edit(ascii(fixture("no-update.multipart")))),
   });
+
+/** A version-3 pointer holding each version-1 or version-2 record under its keyid. */
+const pointerOf = (records: Record<string, Uint8Array>) =>
+  encodeIdentityPointer(
+    new Map(Object.entries(records).map(([k, r]) => [k, decodePointer(r) as PointerEntry])),
+  );
+/** The golden manifest's multipart with `pad` characters in its signed JSON; signatures are not status's concern. */
+const paddedManifest = (pad: number) =>
+  utf8(ascii(fixture("manifest.multipart")).replace('{"id"', `{"pad":"${"a".repeat(pad)}","id"`));
+const paddedNoUpdate = (pad: number) =>
+  utf8(
+    ascii(fixture("no-update.multipart")).replace('{"type"', `{"pad":"${"a".repeat(pad)}","type"`),
+  );
+/** A record of `size` bytes from `record(pad)`, whose length grows one byte per pad character. */
+const sized = (size: number, record: (pad: number) => Uint8Array<ArrayBuffer>) =>
+  record(size - record(0).length);
 
 /** Runs the `tide` bin as an executable, with `node` first on PATH, and only `env` besides. */
 async function tide(env: Record<string, string>) {
@@ -164,18 +183,29 @@ describe.each(stores)("tide status on %s", (_, open) => {
   test.each<[string, string, Uint8Array<ArrayBuffer>, string]>([
     ["a garbage record", "reply/a/1.0.0/ios", utf8("garbage"), "not a stored reply"],
     [
-      "a version-3 pointer",
+      "a version-3 entry with a bad body",
       "reply/a/1.0.0/ios",
-      fixture("identities-manifest.reply.json"),
-      "not a stored reply",
+      pointerOf({ main: manifestWith((m) => m.replace(/expo-signature: [^\r]*\r\n/, "")) }),
+      "an entry's manifest part has no expo-signature",
     ],
     [
-      "a version-3 reply/no-update",
+      "a version-3 entry signed under another keyid",
+      "reply/a/1.0.0/ios",
+      pointerOf({ main: MANIFEST, other: MANIFEST }),
+      "an entry is signed under another keyid",
+    ],
+    [
+      "a version-3 reply/no-update entry signed under another keyid",
       "reply/no-update",
-      fixture("identities-no-update.reply.json"),
+      encodeIdentityNoUpdate(new Map([["root", decodeStoredReply(NO_UPDATE) as NoUpdateReply]])),
+      "an entry is signed under another keyid",
+    ],
+    [
+      "a version-1 record over MAX_REPLY_BYTES",
+      "reply/a/1.0.0/ios",
+      sized(MAX_REPLY_BYTES + 1, (n) => utf8(`{"version":1,"pad":"${"a".repeat(n)}"}`)),
       "not a stored reply",
     ],
-    ["a record over the size limit", "reply/a/1.0.0/ios", new Uint8Array(MAX_REPLY_BYTES + 1), ""],
     [
       "a pointer holding noUpdateAvailable",
       "reply/a/1.0.0/ios",
@@ -246,6 +276,72 @@ describe.each(stores)("tide status on %s", (_, open) => {
     expect(stderr).toContain(`${key}: unreadable: ${reason}`);
     const noUpdate = key === "reply/no-update" ? "unreadable" : "missing";
     expect(stdout.endsWith(`reply/no-update: ${noUpdate}\n`)).toBe(true);
+  });
+
+  test("a version-3 record prints one line per keyid, quoted", async () => {
+    const { bucket, env } = open();
+    await bucket.put("reply/a/1.0.0/ios", fixture("identities-manifest.reply.json"));
+    await bucket.put("reply/b/1.0.0/ios", fixture("identities-rollout.reply.json"));
+    // Status reads the keyid a signature names and checks no signature.
+    const quoted = ascii(NO_UPDATE).replace('keyid=\\"main\\"', 'keyid=\\"x\\\\\\"y\\"');
+    const noUpdate = new Map([
+      ["main", decodeStoredReply(NO_UPDATE) as NoUpdateReply],
+      ['x"y', decodeStoredReply(utf8(quoted)) as NoUpdateReply],
+    ]);
+    await bucket.put("reply/no-update", encodeIdentityNoUpdate(noUpdate));
+    expect(await tide(env)).toEqual({
+      code: 0,
+      stdout: lines(
+        `a 1.0.0 ios keyid "main" manifest ${UPDATE_ID} ${CREATED_AT}`,
+        `a 1.0.0 ios keyid "root" manifest ${NEXT_ID} ${NEXT_AT}`,
+        `b 1.0.0 ios keyid "main" rollout 12.5 new ${NEXT_ID} ${NEXT_AT} earlier manifest ${UPDATE_ID} ${CREATED_AT}`,
+        `b 1.0.0 ios keyid "root" rollBackToEmbedded - ${COMMIT_TIME}`,
+        'reply/no-update keyid "main": present',
+        'reply/no-update keyid "x\\"y": present',
+      ),
+      stderr: "",
+    });
+  });
+
+  test("version-3 records over MAX_REPLY_BYTES, within their limit, are read", async () => {
+    const { bucket, env } = open();
+    const manifest = decodeStoredReply(MANIFEST);
+    const pointer = sized(MAX_REPLY_BYTES + 1000, (n) =>
+      encodeIdentityPointer(
+        new Map([["main", { ...manifest, body: paddedManifest(n) } as PointerEntry]]),
+      ),
+    );
+    const noUpdate = sized(MAX_REPLY_BYTES + 1000, (n) =>
+      encodeIdentityNoUpdate(
+        new Map([
+          ["main", { kind: "noUpdateAvailable", boundary: BOUNDARY, body: paddedNoUpdate(n) }],
+        ]),
+      ),
+    );
+    await bucket.put("reply/a/1.0.0/ios", pointer);
+    await bucket.put("reply/no-update", noUpdate);
+    expect(await tide(env)).toEqual({
+      code: 0,
+      stdout: lines(
+        `a 1.0.0 ios keyid "main" manifest ${UPDATE_ID} ${CREATED_AT}`,
+        'reply/no-update keyid "main": present',
+      ),
+      stderr: "",
+    });
+  });
+
+  test("a record over the version-3 limit is refused by the read, which never buffers it", async () => {
+    const { bucket, env } = open();
+    await bucket.put("reply/a/1.0.0/ios", new Uint8Array(MAX_IDENTITIES_BYTES + 1));
+    const reason =
+      env.TIDE_DISK_DIR === undefined
+        ? "S3 GetObject returned 200 with a content-length over the caller's limit"
+        : `disk bucket ${env.TIDE_DISK_DIR} object over ${MAX_IDENTITIES_BYTES} bytes`;
+    expect(await tide(env)).toEqual({
+      code: 1,
+      stdout: lines("reply/no-update: missing"),
+      stderr: `reply/a/1.0.0/ios: unreadable: ${reason}\n`,
+    });
   });
 
   test("a rollout prints its percentage and both sides, its earlier one a manifest, a rollback or none", async () => {

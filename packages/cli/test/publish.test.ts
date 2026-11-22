@@ -48,6 +48,7 @@ import {
   identity,
   installFakeExpo,
   main,
+  identitiesNoUpdate,
   noUpdateBy,
   other,
   pins,
@@ -866,6 +867,19 @@ describe("publish to S3", () => {
         ],
       });
       expect(s3.puts.filter((k) => k.startsWith("reply/main/"))).toEqual([]);
+    });
+
+    test("a reply/no-update created for several keyids fails the publish before any record or pointer", async () => {
+      s3.raceOnPut(NO_UPDATE_KEY, await identitiesNoUpdate({ main, root: other }));
+      const result = await publishIn(artifact(), env(s3Env()));
+      expect(result).toMatchObject({
+        code: 1,
+        err: [
+          "tide: reply/no-update holds replies for several keyids, which tide publish, rollback and republish do not write",
+        ],
+      });
+      const after = s3.puts.slice(s3.puts.indexOf(NO_UPDATE_KEY) + 1);
+      expect(after.filter((k) => k.startsWith("reply/") || k.startsWith("updates/"))).toEqual([]);
     });
 
     test("each update's release and base records are written before its pointer", async () => {

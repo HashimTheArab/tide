@@ -24,7 +24,7 @@ import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
-import { KeyError, openWriter } from "./keys.ts";
+import { KeyError, openWriter, severalKeyIds } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
 import { readProjectExport } from "./publish-export.ts";
 import { preparePatches, uploadPatches } from "./publish-patch.ts";
@@ -207,8 +207,9 @@ async function prepare(
 }
 
 /**
- * Reads each item's pointer, then the bucket's time, refusing a local clock more than a minute from it or a
- * certificate invalid by either clock. Returns the pointers and the one local sample every new time comes from.
+ * Reads each item's pointer, refusing a version-3 one, then the bucket's time, refusing a local clock more than a
+ * minute from it or a certificate invalid by either clock. Returns the pointers and the one local sample every new
+ * time comes from.
  */
 export async function readTargets<T extends { readonly key: string }>(
   writer: Writer,
@@ -217,7 +218,11 @@ export async function readTargets<T extends { readonly key: string }>(
 ) {
   const { bucket } = writer;
   const targets: (T & { readonly previous: PointerState })[] = [];
-  for (const t of items) targets.push({ ...t, previous: await readPointer(bucket, t.key) });
+  for (const t of items) {
+    const previous = await readPointer(bucket, t.key, writer.identity.keyId);
+    if (previous.others !== undefined) throw new PublishError(severalKeyIds(t.key));
+    targets.push({ ...t, previous });
+  }
   const bucketTime = await bucket.time();
   const local = now();
   if (Math.abs(local - bucketTime) > MAX_SKEW_MS) {

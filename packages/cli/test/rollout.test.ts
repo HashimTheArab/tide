@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 
-import type { Rollout } from "@tide-ota/protocol";
+import type { PointerEntry, Rollout } from "@tide-ota/protocol";
 import {
+  MAX_IDENTITIES_BYTES,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   buildManifest,
   cryptoKeySigner,
   decodePointer,
   decodeStoredReply,
+  encodeIdentityPointer,
   encodeMultipart,
   encodeRollout,
   encodeStoredReply,
@@ -19,6 +21,7 @@ import {
 
 import type { Identity } from "./publish-fixture.ts";
 import { runEntry } from "../../server/test/node/entry.ts";
+import { readPointer } from "../src/pointer.ts";
 import { launchUrl } from "../src/publish-record.ts";
 import { republish, rollback } from "../src/publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "../src/publish.ts";
@@ -30,9 +33,13 @@ import {
   IOS,
   MAIN,
   SERVER_URL,
+  T,
   artifact,
+  directBinding,
   diskObjects,
+  entryOf,
   env,
+  identitiesNoUpdate,
   main,
   noUpdateBy,
   other,
@@ -838,6 +845,263 @@ describe("on s3", () => {
     }
   });
 });
+
+describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("several keyids on %s", (kind) => {
+  const open = () => STORES[kind]();
+  const SEVERAL = `${IOS} holds replies for several keyids, which tide publish, rollback and republish do not write`;
+  const rootEnv = (store: Store) => ({
+    PATH: process.env.PATH ?? "",
+    TIDE_BUILD_KEYID: "root",
+    TIDE_BUILD_CERTIFICATE: other.certificate,
+    ...store.env,
+  });
+  /** The version-3 pointer holding `entries`, in keyid order. */
+  const pointerOf = (entries: Record<string, PointerEntry>) =>
+    encodeIdentityPointer(new Map(Object.entries(entries)));
+
+  /** The record text from `root`'s entry on, which a rollout of main must leave as it was. */
+  const rootText = (record: Uint8Array) =>
+    text(record).slice(text(record).indexOf('{"keyid":"root"'));
+
+  test("rollout and complete rewrite only main's entry; revert too", async () => {
+    const store = open();
+    const { main10, root } = await seedTwo(store);
+    const before = rootText(stored(store, IOS));
+    for (const [goal, percent] of [
+      ["20", 20],
+      ["complete", 100],
+    ] as const) {
+      expect(await rolloutTo(store, goal, ONLY_IOS)).toEqual({
+        code: 0,
+        out: [`${IOS} ${ID_A} ${percent}`],
+        err: [],
+      });
+      expect(text(stored(store, IOS))).toBe(
+        text(pointerOf({ main: { ...main10, percent }, root })),
+      );
+      expect(rootText(stored(store, IOS))).toBe(before);
+    }
+    const again = open();
+    const seeded = await seedTwo(again);
+    expect((await rolloutTo(again, "revert", ONLY_IOS)).code).toBe(0);
+    expect(text(stored(again, IOS))).toBe(
+      text(pointerOf({ main: { ...seeded.main10, percent: 0 }, root: seeded.root })),
+    );
+  });
+
+  test("a pointer or reply/no-update without main's entry, or a version-1 reply/no-update, refuses", async () => {
+    const store = open();
+    const { root } = await seedTwo(store);
+    const refused = async (message: string) => {
+      const before = store.snapshot();
+      expect(await rolloutTo(store, "20", ONLY_IOS)).toEqual({
+        code: 2,
+        out: [],
+        err: [`tide: ${message}`],
+      });
+      expect(store.snapshot()).toEqual(before);
+    };
+    const both = new Uint8Array(stored(store, IOS));
+    await bucketPut(store, IOS, pointerOf({ root }));
+    await refused(`${IOS} holds no rollout`);
+    await bucketPut(store, IOS, both);
+    // The server answers 503 wherever a version-3 pointer falls back to a version-1 reply/no-update.
+    await bucketPut(store, NO_UPDATE_KEY, await noUpdateBy(main));
+    await refused(
+      `${IOS} holds replies for several keyids, but reply/no-update holds one reply for every keyid`,
+    );
+    await bucketPut(store, NO_UPDATE_KEY, await identitiesNoUpdate({ root: other }));
+    await refused(
+      'reply/no-update holds no reply for keyid "main": tide publish, republish or rollback writes it',
+    );
+  });
+
+  test("publish, rollback and republish refuse a version-3 target beside a version-1 reply/no-update", async () => {
+    const store = open();
+    const published = await publishTo(store, iosExport());
+    const updateId = published.out[0]?.split(" ")[1] ?? "";
+    const { main10, root } = await seedTwo(store);
+    await bucketPut(store, NO_UPDATE_KEY, await noUpdateBy(main));
+    const before = store.snapshot();
+    for (const [command, args] of [
+      ["publish", ["--channel", "main", "--from", iosExport(1)]],
+      ["rollback", ["--embedded", ...TARGET, ...ONLY_IOS]],
+      ["rollback", ["--to", updateId]],
+      ["republish", [updateId]],
+    ] as const) {
+      const result = await cmd(command, [...args], env(store.env));
+      expect([command, result.code, result.err]).toEqual([command, 2, [`tide: ${SEVERAL}`]]);
+    }
+    expect(store.snapshot()).toEqual(before);
+    expect(text(stored(store, IOS))).toBe(text(pointerOf({ main: main10, root })));
+  });
+
+  test("a legacy rollout beside a version-3 reply/no-update is main's: main moves it, root is refused", async () => {
+    const store = open();
+    const legacy: Rollout = {
+      kind: "rollout",
+      percent: 10,
+      new: await manifestReply(ID_A, T),
+      earlier: undefined,
+    };
+    await seedTwo(store);
+    await bucketPut(store, IOS, encodeRollout(legacy));
+    const before = store.snapshot();
+    expect(await cmd("rollout", ["20", ...TARGET, ...ONLY_IOS], rootEnv(store))).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        `tide: ${IOS} still serves another keyid's reply to every keyid: keyid "root" is served only once tide publish has converted every pointer`,
+      ],
+    });
+    expect(store.snapshot()).toEqual(before);
+    expect((await rolloutTo(store, "20", ONLY_IOS)).code).toBe(0);
+    expect(stored(store, IOS)).toEqual(encodeRollout({ ...legacy, percent: 20 }));
+  });
+
+  test("a version-3 pointer over MAX_REPLY_BYTES, within its limit, is rolled out", async () => {
+    const store = open();
+    const rolloutOf = async (pad: number): Promise<Rollout> => ({
+      kind: "rollout",
+      percent: 10,
+      new: await manifestReply(ID_A, T, { extra: { pad: "a".repeat(pad) } }),
+      earlier: undefined,
+    });
+    // Every reply's boundary is random, but not its length.
+    await seedTwo(store, await rolloutOf(0));
+    const padded = await rolloutOf(MAX_REPLY_BYTES + 1000 - stored(store, IOS).length);
+    const { root } = await seedTwo(store, padded);
+    expect(stored(store, IOS).length).toBe(MAX_REPLY_BYTES + 1000);
+    expect(stored(store, IOS).length).toBeLessThan(MAX_IDENTITIES_BYTES);
+    expect((await rolloutTo(store, "20", ONLY_IOS)).code).toBe(0);
+    expect(text(stored(store, IOS))).toBe(
+      text(pointerOf({ main: { ...padded, percent: 20 }, root })),
+    );
+  });
+});
+
+describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("readPointer on %s", (kind) => {
+  test("a version-3 pointer gives one keyid its entry and time, and every other entry as stored", async () => {
+    const store = STORES[kind]();
+    const mine = await manifestReply(ID_A, T);
+    const theirs = entryOf(await seededPointer("rollback", T + 5000, other, "root"));
+    await bucketPut(
+      store,
+      IOS,
+      encodeIdentityPointer(
+        new Map([
+          ["main", mine],
+          ["root", theirs],
+        ]),
+      ),
+    );
+    const bucket = bucketFromEnv(store.env);
+    const state = await readPointer(bucket, IOS, "main", "identities");
+    expect(state).toMatchObject({ time: T, reply: mine, others: new Map([["root", theirs]]) });
+    expect(state.sides?.map((s) => [s.kind, s.updateId, s.keyId])).toEqual([
+      ["manifest", ID_A, "main"],
+    ]);
+    expect(await readPointer(bucket, IOS, "next", "identities")).toEqual({
+      etag: state.etag,
+      others: new Map<string, PointerEntry>([
+        ["main", mine],
+        ["root", theirs],
+      ]),
+    });
+  });
+
+  test("a legacy pointer reads as before, but beside a version-3 reply/no-update only for its own keyid", async () => {
+    const store = STORES[kind]();
+    const legacy = await seededPointer("manifest", T, main);
+    await bucketPut(store, IOS, legacy);
+    const bucket = bucketFromEnv(store.env);
+    const asMain = await readPointer(bucket, IOS, "main", "identities");
+    expect(asMain).toMatchObject({ time: T, reply: decodePointer(legacy) });
+    expect(asMain.others).toBeUndefined();
+    for (const fallback of [undefined, "legacy"] as const) {
+      expect(await readPointer(bucket, IOS, "root", fallback)).toEqual(asMain);
+    }
+    await expect(readPointer(bucket, IOS, "root", "identities")).rejects.toThrow(
+      `${IOS} still serves another keyid's reply to every keyid: keyid "root" is served only once tide publish has converted every pointer`,
+    );
+  });
+});
+
+describe("several keyids on s3", () => {
+  const store = STORES.s3;
+
+  test("a write of root's entry after main's read fails the rollout, and the rerun keeps it", async () => {
+    const s = store();
+    const { main10 } = await seedTwo(s);
+    const rootLater = entryOf(await seededPointer("rollback", T + 1000, other, "root"));
+    const theirs = encodeIdentityPointer(
+      new Map([
+        ["main", main10],
+        ["root", rootLater],
+      ]),
+    );
+    s3.raceOnPut(IOS, theirs);
+    const lost = await rolloutTo(s, "20", ONLY_IOS);
+    expect([lost.code, lost.err]).toEqual([1, [`tide: ${STALE(IOS)}`]]);
+    expect(stored(s, IOS)).toEqual(theirs);
+    expect((await rolloutTo(s, "20", ONLY_IOS)).code).toBe(0);
+    const expected = new Map<string, PointerEntry>([
+      ["main", { ...main10, percent: 20 }],
+      ["root", rootLater],
+    ]);
+    expect(stored(s, IOS)).toEqual(encodeIdentityPointer(expected));
+  });
+
+  test("a committed write whose response was lost is not repeated: the rerun finds main at its goal", async () => {
+    const s = store();
+    const { main10, root } = await seedTwo(s);
+    s3.dropAfterPut(IOS);
+    const lost = await rolloutTo(s, "20", ONLY_IOS);
+    expect(lost.code).toBe(1);
+    expect(lost.err.at(-1)).toMatch(/outcome unknown; check with tide status$/);
+    s3.puts.length = 0;
+    expect(await rolloutTo(s, "20", ONLY_IOS)).toEqual({
+      code: 0,
+      out: [`${IOS} ${ID_A} 20`],
+      err: [],
+    });
+    expect(s3.puts).toEqual([]);
+    const expected = new Map<string, PointerEntry>([
+      ["main", { ...main10, percent: 20 }],
+      ["root", root],
+    ]);
+    expect(stored(s, IOS)).toEqual(encodeIdentityPointer(expected));
+  });
+});
+
+/**
+ * Seeds main's rollout (10% by default) and root's rollback at IOS, both keyids' reply/no-update and both direct
+ * bindings.
+ */
+async function seedTwo(store: Store, rollout?: Rollout) {
+  const main10: Rollout = rollout ?? {
+    kind: "rollout",
+    percent: 10,
+    new: await manifestReply(ID_A, T),
+    earlier: await manifestReply(ID_B, T - 1000),
+  };
+  const root = entryOf(await seededPointer("rollback", T, other, "root"));
+  await bucketPut(store, NO_UPDATE_KEY, await identitiesNoUpdate({ main, root: other }));
+  await bucketPut(
+    store,
+    IOS,
+    encodeIdentityPointer(
+      new Map([
+        ["main", main10],
+        ["root", root],
+      ]),
+    ),
+  );
+  for (const [key, bytes] of [await directBinding(main), await directBinding(other, "root")]) {
+    await bucketPut(store, key, bytes);
+  }
+  return { main10, root };
+}
 
 /** The writer configuration over `store`, without the URLs only publish needs. */
 function writerEnv(store: Store): Record<string, string> {

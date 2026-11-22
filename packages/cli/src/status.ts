@@ -1,7 +1,8 @@
 import type { Rollout, StoredReply } from "@tide-ota/protocol";
 import {
-  MAX_REPLY_BYTES,
+  MAX_IDENTITIES_BYTES,
   NO_UPDATE_KEY,
+  decodeNoUpdate,
   decodePointer,
   decodeStoredReply,
   parseExpoSignature,
@@ -19,6 +20,7 @@ export interface Side {
   readonly kind: StoredReply["kind"];
   readonly updateId?: string;
   readonly time?: string;
+  readonly keyId: string; // The keyid its expo-signature names, `root` when it names none.
   readonly signed: {
     readonly body: Uint8Array<ArrayBuffer>;
     readonly signature: string;
@@ -26,21 +28,26 @@ export interface Side {
   };
 }
 
+/** One identity's replies (`[reply]`, or a rollout's `[new, earlier?]`) and the newest time they hold. */
+export interface Entry {
+  readonly reply: StoredReply | Rollout;
+  readonly time: string | undefined; // Undefined only for `reply/no-update`.
+  readonly sides: readonly Side[];
+}
+
 /**
- * One readable record, its newest time and its replies (`[reply]`, or a rollout's `[new, earlier?]`), or why it
- * cannot be served; every reason is fixed text, never stored data.
+ * One readable record: a version-1 or version-2 record's one entry, or a version-3 record's entries by keyid, in keyid
+ * order. Otherwise why it cannot be served; every reason is fixed text, never stored data.
  */
 export type Verdict =
-  | {
-      readonly reply: StoredReply | Rollout;
-      readonly time: string | undefined; // Undefined only for `reply/no-update`.
-      readonly sides: readonly Side[];
-    }
+  | { readonly layout: "legacy"; readonly entry: Entry }
+  | { readonly layout: "identities"; readonly entries: ReadonlyMap<string, Entry> }
   | string;
 
 /**
- * Prints one line per pointer under `reply/` and whether `reply/no-update` exists, reading each record's signed part
- * as stored. Returns 1 when any listed record is unreadable, else 0; a listing failure rejects.
+ * Prints one line per pointer under `reply/`, and per keyid in a version-3 pointer, and whether `reply/no-update`
+ * exists, reading each record's signed parts as stored. Returns 1 when any listed record is unreadable, else 0; a
+ * listing failure rejects.
  */
 export async function status(
   bucket: Bucket,
@@ -48,7 +55,7 @@ export async function status(
   err: (line: string) => void,
 ): Promise<0 | 1> {
   let unreadable = false;
-  let noUpdate: "present" | "unreadable" | "missing" = "missing";
+  let noUpdate = [`${NO_UPDATE_KEY}: missing`];
   for (const entry of await bucket.list("reply/")) {
     if (!("key" in entry)) {
       // The name is stored data, so it is not printed.
@@ -58,21 +65,31 @@ export async function status(
     }
     const { key } = entry;
     const verdict = (await readRecord(bucket, key)) ?? "absent when read";
-    if (key === NO_UPDATE_KEY) noUpdate = typeof verdict === "string" ? "unreadable" : "present";
     if (typeof verdict === "string") {
       err(`${key}: unreadable: ${verdict}`);
       unreadable = true;
-    } else if (key !== NO_UPDATE_KEY) {
+      if (key === NO_UPDATE_KEY) noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
+    } else if (key === NO_UPDATE_KEY) {
+      noUpdate =
+        verdict.layout === "legacy"
+          ? [`${NO_UPDATE_KEY}: present`]
+          : [...verdict.entries.keys()].map((k) => `${NO_UPDATE_KEY} keyid ${quoted(k)}: present`);
+    } else {
       const [, channel, runtime, platform] = key.split("/");
-      out(`${channel} ${runtime} ${platform} ${row(verdict)}`);
+      const columns = `${channel} ${runtime} ${platform}`;
+      if (verdict.layout === "legacy") out(`${columns} ${row(verdict.entry)}`);
+      else for (const [k, e] of verdict.entries) out(`${columns} keyid ${quoted(k)} ${row(e)}`);
     }
   }
-  out(`${NO_UPDATE_KEY}: ${noUpdate}`);
+  for (const line of noUpdate) out(line);
   return unreadable ? 1 : 0;
 }
 
+/** A keyid as status prints it: a JSON string, which for printable ASCII escapes only `"` and `\`. */
+const quoted = (keyId: string) => JSON.stringify(keyId);
+
 /** A pointer's status columns after its key's: `<kind> <updateId|-> <time>`, or a rollout's percentage and sides. */
-function row({ reply, sides }: Exclude<Verdict, string>): string {
+function row({ reply, sides }: Entry): string {
   const side = (s: Side | undefined) =>
     s === undefined ? "none" : `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
   const [first, earlier] = sides;
@@ -84,7 +101,7 @@ function row({ reply, sides }: Exclude<Verdict, string>): string {
 export async function readRecord(bucket: Bucket, key: string): Promise<Verdict | undefined> {
   let bytes;
   try {
-    bytes = (await bucket.get(key, MAX_REPLY_BYTES))?.bytes;
+    bytes = (await bucket.get(key, MAX_IDENTITIES_BYTES))?.bytes;
   } catch (e) {
     // The listing succeeded, so one failed read is this record's problem; later records are still read.
     return e instanceof BucketError ? e.message : "read failed";
@@ -92,17 +109,43 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
   return bytes === undefined ? undefined : checkRecord(key, bytes);
 }
 
-/** Checks the bytes stored at `key` the way a signing client would receive them; a rollout checks both sides. */
+/**
+ * Checks the bytes stored at `key` the way a signing client would receive them; a rollout checks both sides. Every
+ * side of a version-3 entry must be signed under that entry's keyid.
+ */
 export function checkRecord(key: string, bytes: Uint8Array): Verdict {
-  let decoded;
-  try {
-    decoded = key === NO_UPDATE_KEY ? decodeStoredReply(bytes) : decodePointer(bytes);
-  } catch {
-    return "not a stored reply";
+  const decoded = decode(key, bytes);
+  if (decoded === undefined) return "not a stored reply";
+  if (decoded.kind !== "identities") {
+    const entry = checkEntry(key, decoded);
+    return typeof entry === "string" ? entry : { layout: "legacy", entry };
   }
-  // The CLI does not read version-3 records yet.
-  if (decoded.kind === "identities") return "not a stored reply";
-  const reply: StoredReply | Rollout = decoded;
+  const entries = new Map<string, Entry>();
+  for (const [keyId, reply] of decoded.entries) {
+    const entry = checkEntry(key, reply);
+    if (typeof entry === "string") return `an entry's ${entry}`;
+    if (entry.sides.some((s) => s.keyId !== keyId)) return "an entry is signed under another keyid";
+    entries.set(keyId, entry);
+  }
+  return { layout: "identities", entries };
+}
+
+/** Decodes a record of `key`'s kind, or undefined. Version 1 first at `reply/no-update`, so a misplaced reply keeps its reason. */
+function decode(key: string, bytes: Uint8Array) {
+  try {
+    if (key !== NO_UPDATE_KEY) return decodePointer(bytes);
+    try {
+      return decodeStoredReply(bytes);
+    } catch {
+      return decodeNoUpdate(bytes);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Checks one identity's reply or rollout at `key`. */
+function checkEntry(key: string, reply: StoredReply | Rollout): Entry | string {
   if (reply.kind !== "rollout") {
     const side = checkSide(key, reply);
     return typeof side === "string" ? side : { reply, time: side.time, sides: [side] };
@@ -138,8 +181,9 @@ function checkSide(key: string, reply: StoredReply): Side | string {
   if (signature === undefined) return `${partName} part has no expo-signature`;
   const chain = parts.find((p) => p.name === "certificate_chain")?.body;
   const signed = chain === undefined ? { body, signature } : { body, signature, chain };
+  let keyId;
   try {
-    parseExpoSignature(signature);
+    ({ keyId } = parseExpoSignature(signature));
   } catch {
     return `${partName} part has a malformed expo-signature`;
   }
@@ -165,13 +209,13 @@ function checkSide(key: string, reply: StoredReply): Side | string {
     }
     const createdAt = field("createdAt");
     if (!isTime(createdAt)) return "manifest createdAt is not a valid time";
-    return { kind: reply.kind, updateId: reply.updateId, time: createdAt, signed };
+    return { kind: reply.kind, updateId: reply.updateId, time: createdAt, keyId, signed };
   }
   if (field("type") !== reply.kind) return `directive type is not ${reply.kind}`;
-  if (reply.kind === "noUpdateAvailable") return { kind: reply.kind, signed };
+  if (reply.kind === "noUpdateAvailable") return { kind: reply.kind, keyId, signed };
   const commitTime = field("parameters", "commitTime");
   if (!isTime(commitTime)) return "directive commitTime is not a valid time";
-  return { kind: reply.kind, time: commitTime, signed };
+  return { kind: reply.kind, time: commitTime, keyId, signed };
 }
 
 /** Exactly the form the publisher writes: an ISO 8601 UTC time with milliseconds that names a real instant. */

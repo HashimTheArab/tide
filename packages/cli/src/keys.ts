@@ -4,13 +4,15 @@ import type { KeyObject } from "node:crypto";
 
 import type { Signer } from "@tide-ota/protocol";
 import {
-  MAX_REPLY_BYTES,
+  MAX_IDENTITIES_BYTES,
+  MAX_KEYID_BYTES,
   NO_UPDATE_KEY,
   ProtocolError,
   certificateChain,
   certificateChainAtIssue,
   checkKeyId,
   codeSigningCertificate,
+  decodePointer,
   encodeMultipart,
   expoSignature,
   identityKey,
@@ -22,10 +24,10 @@ import {
 
 import type { Bucket } from "./bucket.ts";
 import type { ProjectExport } from "./publish-export.ts";
-import type { Side, Verdict } from "./status.ts";
+import type { Entry, Side } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { KMS_VARIABLES, kmsSource } from "./keys-kms.ts";
-import { writing } from "./pointer.ts";
+import { servedToEvery, writing } from "./pointer.ts";
 import { CHAIN_FLAG } from "./publish-export.ts";
 import { checkRecord, readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
@@ -57,7 +59,7 @@ export interface Identity {
   readonly chain: boolean; // The builds include the reply's certificate_chain.
 }
 
-/** A stored `reply/no-update` of this identity, with the ETag it was read under. */
+/** This identity's side of a stored `reply/no-update`, with the ETag the record was read under. */
 interface NoUpdate {
   readonly etag: string;
   readonly side: Side;
@@ -68,13 +70,13 @@ export interface Writer {
   readonly signer: Signer;
   readonly identity: Identity;
   readonly bucket: Bucket;
-  /** `reply/no-update` as opened, undefined when absent. */
+  /** `reply/no-update` as opened, a version-1 record; undefined when absent. */
   readonly noUpdate: NoUpdate | undefined;
   /** Whether a write must replace `noUpdate`: in chain mode, when it serves another chain than the configured one. */
   readonly renewNoUpdate: boolean;
   /** Creates the chain-mode binding, accepting another writer's of this root; undefined once bound, or direct. */
   readonly bind: (() => Promise<void>) | undefined;
-  /** Re-reads `reply/no-update`, refusing one under another identity. */
+  /** Re-reads `reply/no-update`, refusing one under another identity or holding several keyids. */
   readNoUpdate(): Promise<NoUpdate | undefined>;
   /** Refuses unless the certificate, and in chain mode every served certificate, is valid at epoch ms `at`. */
   checkCertificate(at: number): Promise<void>;
@@ -104,7 +106,9 @@ const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
 const BUILD_CHAIN = "TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN";
 const CHAIN_FILE = "TIDE_CERTIFICATE_CHAIN_FILE";
 const CHAIN_PEM = "TIDE_CERTIFICATE_CHAIN";
-const BINDING_LIMIT = 4096;
+// The longest binding: the keyid limit plus the direct form's fixed text, longer than the chain form's.
+const BINDING_LIMIT =
+  MAX_KEYID_BYTES + JSON.stringify({ version: 1, keyid: "", certificate: "0".repeat(64) }).length;
 const OTHER_IDENTITY =
   "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
 
@@ -130,15 +134,19 @@ export async function openWriter(
   const signer = verifying({ keyId: identity.keyId, sign: source.sign }, identity, leaf);
   await signer.sign(PROBE);
   const bucket = bucketFromEnv(env);
-  const { noUpdate, bound } = await checkBucket(bucket, identity);
+  const { noUpdate, bound, identities } = await checkBucket(bucket, identity);
+  if (identities !== undefined) throw new KeyError(severalKeyIds(identities));
   const chained = noUpdate?.side.signed.chain;
+  const renewNoUpdate =
+    served !== undefined && chained !== undefined && !sameBytes(chained, served.bytes);
+  // A version-1 reply/no-update stopped the pointer scan; a renewal must not keep one under a version-3 pointer.
+  if (renewNoUpdate) await refuseIdentities(bucket);
   return {
     signer,
     identity,
     bucket,
     noUpdate,
-    renewNoUpdate:
-      served !== undefined && chained !== undefined && !sameBytes(chained, served.bytes),
+    renewNoUpdate,
     bind: bound ? undefined : () => bind(bucket, identity),
     readNoUpdate: () => readNoUpdate(bucket, identity),
     checkCertificate: async (at) => {
@@ -373,56 +381,144 @@ function verifying(inner: Signer, { key, keyId }: Identity, leaf: CryptoKey | un
   };
 }
 
+/** The refusal of a record that tide publish, rollback and republish would overwrite with a single identity's. */
+export const severalKeyIds = (key: string) =>
+  `${key} holds replies for several keyids, which tide publish, rollback and republish do not write`;
+
+/** What the identity check found: this keyid's no-update side, the binding, and the layout of version-3 records. */
+interface BucketState {
+  readonly noUpdate: NoUpdate | undefined;
+  readonly bound: boolean; // In chain mode, whether the binding exists; true in direct mode.
+  readonly identities: string | undefined; // The key of the first version-3 record seen.
+  readonly fallback: "legacy" | "identities" | undefined; // The layout of `reply/no-update`; undefined when absent.
+}
+
 /**
- * Refuses a bucket whose binding, `reply/no-update` or, without that, any pointer is unreadable or another
- * identity's: every build the bucket serves gets that one reply. `bound` says whether the chain-mode binding exists.
+ * Refuses a bucket where this keyid has a body that is not this identity's, or any record it reads is unreadable. A
+ * version-1 `reply/no-update` serves every build, so it must be this identity's and stops the scan. Otherwise every
+ * pointer is read: this keyid's version-3 entries must be its own, other keyids' only readable, and a legacy pointer
+ * (which serves every keyid) this identity's. The binding then names this keyid's certificate or root.
  */
-async function checkBucket(
-  bucket: Bucket,
-  identity: Identity,
-): Promise<{ readonly noUpdate: NoUpdate | undefined; readonly bound: boolean }> {
-  const bound = await checkBinding(bucket, identity);
-  const noUpdate = await readNoUpdate(bucket, identity);
-  let replies = noUpdate !== undefined;
-  if (!replies) {
-    for (const entry of await bucket.list("reply/")) {
-      if (!("key" in entry))
-        throw new KeyError("reply/ is unreadable: an object name outside the key grammar");
-      const record = (await readRecord(bucket, entry.key)) ?? "absent when read";
-      await checkSigned(entry.key, record, identity);
-      replies = true;
+async function checkBucket(bucket: Bucket, identity: Identity): Promise<BucketState> {
+  const { keyId, chain } = identity;
+  const bound = chain ? await checkBinding(bucket, identity) : true;
+  const object = await stored(bucket, NO_UPDATE_KEY, MAX_IDENTITIES_BYTES);
+  const fallback = object && { etag: object.etag, record: readable(NO_UPDATE_KEY, object.bytes) };
+  const theirs = (key: string, entry: Entry) => belongs(key, entry, identity, OTHER_IDENTITY);
+  const own = (key: string, entry: Entry) => belongs(key, entry, identity, ownKeyId(key, keyId));
+  let noUpdate: NoUpdate | undefined;
+  let identities: string | undefined;
+  let legacy = false; // This keyid has a body in a version-1 or version-2 record.
+  let entries = false; // This keyid has a body in a version-3 record.
+  if (fallback?.record.layout === "legacy") {
+    noUpdate = { etag: fallback.etag, side: await theirs(NO_UPDATE_KEY, fallback.record.entry) };
+    legacy = true;
+  } else {
+    const entry = fallback?.record.entries.get(keyId);
+    if (fallback !== undefined) identities = NO_UPDATE_KEY;
+    if (fallback !== undefined && entry !== undefined) {
+      noUpdate = { etag: fallback.etag, side: await own(NO_UPDATE_KEY, entry) };
+      entries = true;
+    }
+    for (const key of await pointerKeys(bucket)) {
+      const record = (await readRecord(bucket, key)) ?? "absent when read";
+      if (typeof record === "string") throw new KeyError(`${key} is unreadable: ${record}`);
+      if (record.layout === "identities") {
+        identities ??= key;
+        const mine = record.entries.get(keyId);
+        if (mine !== undefined) await own(key, mine);
+        entries ||= mine !== undefined;
+      } else if (fallback === undefined) {
+        await theirs(key, record.entry);
+        legacy = true;
+      } else {
+        if (record.entry.sides.some((s) => s.keyId !== keyId)) {
+          throw new KeyError(servedToEvery(key, keyId));
+        }
+        await own(key, record.entry);
+        legacy = true;
+      }
     }
   }
   // Writers bind before any chained reply, and replies chain by subject and key, so re-binding could take another root.
-  if (!bound && replies) {
+  if (chain && !bound && (legacy || entries)) {
     throw new KeyError(
-      `${await identityKey(identity.keyId)} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`,
+      `${await identityKey(keyId)} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`,
     );
   }
-  return { noUpdate, bound };
+  // A direct keyid with only legacy bodies is its key, as before bindings named direct certificates.
+  if (!chain && (entries || !legacy)) await checkDirectBinding(bucket, identity, entries);
+  return { noUpdate, bound, identities, fallback: fallback?.record.layout };
 }
 
-/** For a writer that signs nothing, also refuses an absent `reply/no-update`; `absent` says why. */
+/** Returns every key under `reply/` but `reply/no-update`; a name outside the key grammar refuses. */
+async function pointerKeys(bucket: Bucket): Promise<string[]> {
+  return (await bucket.list("reply/")).flatMap((entry) => {
+    if (!("key" in entry)) {
+      throw new KeyError("reply/ is unreadable: an object name outside the key grammar");
+    }
+    return entry.key === NO_UPDATE_KEY ? [] : [entry.key];
+  });
+}
+
+/** Refuses when any pointer is a version-3 record. */
+async function refuseIdentities(bucket: Bucket): Promise<void> {
+  for (const key of await pointerKeys(bucket)) {
+    const object = await stored(bucket, key, MAX_IDENTITIES_BYTES);
+    let layout;
+    try {
+      layout = object && decodePointer(object.bytes).kind;
+    } catch {
+      continue; // A writer replaces an unreadable pointer it targets; it holds no identity to keep.
+    }
+    if (layout === "identities") throw new KeyError(severalKeyIds(key));
+  }
+}
+
+/**
+ * For a writer that signs nothing, also refuses a bucket without this keyid's `reply/no-update`; `absent` says why
+ * when it is absent. Returns its layout.
+ */
 export async function servingBucket(
   bucket: Bucket,
   identity: Identity,
   absent: string,
-): Promise<void> {
-  if ((await checkBucket(bucket, identity)).noUpdate === undefined) throw new KeyError(absent);
+): Promise<"legacy" | "identities"> {
+  const { noUpdate, fallback } = await checkBucket(bucket, identity);
+  if (fallback === undefined) throw new KeyError(absent);
+  if (noUpdate === undefined) {
+    throw new KeyError(
+      `${NO_UPDATE_KEY} holds no reply for keyid ${JSON.stringify(identity.keyId)}: tide publish, republish or rollback writes it`,
+    );
+  }
+  return fallback;
 }
 
-/** Reads `reply/no-update`, refusing it unreadable or under another identity; undefined when absent. */
+/**
+ * Reads `reply/no-update`, refusing it unreadable, under another identity or holding several keyids; undefined when
+ * absent.
+ */
 async function readNoUpdate(bucket: Bucket, identity: Identity): Promise<NoUpdate | undefined> {
-  const object = await stored(bucket, NO_UPDATE_KEY, MAX_REPLY_BYTES);
+  const object = await stored(bucket, NO_UPDATE_KEY, MAX_IDENTITIES_BYTES);
   if (object === undefined) return undefined;
-  const verdict = checkRecord(NO_UPDATE_KEY, object.bytes);
-  const side = await checkSigned(NO_UPDATE_KEY, verdict, identity);
-  return { etag: object.etag, side };
+  const record = readable(NO_UPDATE_KEY, object.bytes);
+  if (record.layout === "identities") throw new KeyError(severalKeyIds(NO_UPDATE_KEY));
+  return {
+    etag: object.etag,
+    side: await belongs(NO_UPDATE_KEY, record.entry, identity, OTHER_IDENTITY),
+  };
 }
 
-/** Returns the binding of `keyId` to the root whose DER SHA-256 is `root`, and its key. */
-async function binding(keyId: string, root: string) {
-  const json = JSON.stringify({ version: 1, keyid: keyId, root });
+/**
+ * Returns the binding of the keyid to its certificate's exact DER SHA-256, and its key: `root` in chain mode,
+ * `certificate` in direct mode, so the field also records the mode.
+ */
+async function binding({ keyId, chain, sha256 }: Identity) {
+  const json = JSON.stringify({
+    version: 1,
+    keyid: keyId,
+    [chain ? "root" : "certificate"]: sha256,
+  });
   return { key: await identityKey(keyId), bytes: new TextEncoder().encode(json) };
 }
 
@@ -430,9 +526,9 @@ async function binding(keyId: string, root: string) {
  * In chain mode, refuses any binding of the key ID but this root's; true when it binds this root, false when absent.
  * Direct mode reads nothing and returns true.
  */
-async function checkBinding(bucket: Bucket, { chain, keyId, sha256 }: Identity): Promise<boolean> {
-  if (!chain) return true;
-  const { key, bytes } = await binding(keyId, sha256);
+async function checkBinding(bucket: Bucket, identity: Identity): Promise<boolean> {
+  if (!identity.chain) return true;
+  const { key, bytes } = await binding(identity);
   const object = await stored(bucket, key, BINDING_LIMIT);
   if (object === undefined) return false;
   if (sameBytes(object.bytes, bytes)) return true;
@@ -441,9 +537,33 @@ async function checkBinding(bucket: Bucket, { chain, keyId, sha256 }: Identity):
   );
 }
 
+/**
+ * In direct mode, refuses a binding of the keyid to anything but this certificate, and with `required` (the keyid has
+ * version-3 bodies) an absent one.
+ */
+async function checkDirectBinding(
+  bucket: Bucket,
+  identity: Identity,
+  required: boolean,
+): Promise<void> {
+  const { key, bytes } = await binding(identity);
+  const object = await stored(bucket, key, BINDING_LIMIT);
+  if (object === undefined) {
+    if (!required) return;
+    throw new KeyError(
+      `${key} is absent but the bucket holds version-3 replies under this keyid: restore it; it binds the certificate they were published under`,
+    );
+  }
+  if (!sameBytes(object.bytes, bytes)) {
+    throw new KeyError(
+      `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`,
+    );
+  }
+}
+
 /** Creates this root's binding; another writer's counts only when it is this root's too. */
 async function bind(bucket: Bucket, identity: Identity): Promise<void> {
-  const { key, bytes } = await binding(identity.keyId, identity.sha256);
+  const { key, bytes } = await binding(identity);
   if ((await writing(key, () => bucket.putIfAbsent(key, bytes))) !== undefined) return;
   if (!(await checkBinding(bucket, identity))) {
     throw new KeyError(`${key} was removed by another writer during the publish`);
@@ -461,16 +581,26 @@ async function stored(bucket: Bucket, key: string, limit: number) {
   }
 }
 
-/**
- * Refuses a record that is unreadable or any of whose signed parts does not belong to `identity`; returns its first
- * side.
- */
-async function checkSigned(key: string, record: Verdict, identity: Identity): Promise<Side> {
+/** Returns the record `bytes` stored at `key`, refusing it unreadable. */
+function readable(key: string, bytes: Uint8Array) {
+  const record = checkRecord(key, bytes);
   if (typeof record === "string") throw new KeyError(`${key} is unreadable: ${record}`);
-  for (const side of record.sides) {
-    if (!(await verifies(side, identity))) throw new KeyError(OTHER_IDENTITY);
-  }
-  const [first] = record.sides;
+  return record;
+}
+
+/** The refusal of a body of `keyId` at `key` that is not this identity's. */
+const ownKeyId = (key: string, keyId: string) =>
+  `${key}: keyid ${JSON.stringify(keyId)} already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid`;
+
+/** Returns the entry's first side, refused with `refusal` unless every side is this identity's. */
+async function belongs(
+  key: string,
+  { sides }: Entry,
+  identity: Identity,
+  refusal: string,
+): Promise<Side> {
+  for (const side of sides) if (!(await verifies(side, identity))) throw new KeyError(refusal);
+  const [first] = sides;
   if (first === undefined) throw new KeyError(`${key} is unreadable: it holds no reply`);
   return first;
 }

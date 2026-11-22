@@ -1,21 +1,25 @@
 // Identities, projects, stores and readers shared by the write-command tests. Keys and certificates are generated
 // per run; nothing here is a committed secret.
-import { createHash, KeyObject } from "node:crypto";
+import { createHash, KeyObject, X509Certificate } from "node:crypto";
 import { chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
+import type { NoUpdateReply, PointerEntry } from "@tide-ota/protocol";
 import {
   buildManifest,
   buildRollBackToEmbedded,
   certificatePublicKey,
   cryptoKeySigner,
+  decodePointer,
   decodeStoredReply,
   diskKey,
+  encodeIdentityNoUpdate,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
+  identityKey,
   parseMultipart,
   sha256Base64Url,
   verifyExpoSignature,
@@ -297,9 +301,14 @@ export async function signedManifest(objects: Objects, key: string) {
   return { reply, manifest };
 }
 
-/** A pointer reply signed by `by`'s key: a manifest created at `time`, or a rollback committed then. */
-export async function seededPointer(kind: "manifest" | "rollback", time: number, by = main) {
-  const signer = cryptoKeySigner(by.keys.privateKey, "main");
+/** A pointer reply signed by `by`'s key under `keyid`: a manifest created at `time`, or a rollback committed then. */
+export async function seededPointer(
+  kind: "manifest" | "rollback",
+  time: number,
+  by = main,
+  keyid = "main",
+) {
+  const signer = cryptoKeySigner(by.keys.privateKey, keyid);
   if (kind === "rollback") {
     const body = buildRollBackToEmbedded({ commitTime: new Date(time) });
     const multipart = encodeMultipart([
@@ -329,10 +338,12 @@ export async function seededPointer(kind: "manifest" | "rollback", time: number,
   return encodeStoredReply({ kind: "manifest", updateId: id, manifestFilters: "", ...multipart });
 }
 
-/** A stored `reply/no-update` signed by `id`'s key. */
-export async function noUpdateBy(id: Identity) {
-  const body = utf8('{"type":"noUpdateAvailable"}');
-  const signature = await expoSignature(body, cryptoKeySigner(id.keys.privateKey, "main"));
+/** A stored `reply/no-update` signed by `id`'s key under `keyid`; `pad` characters lengthen its directive. */
+export async function noUpdateBy(id: Identity, keyid = "main", pad = 0) {
+  const body = utf8(
+    JSON.stringify({ type: "noUpdateAvailable", ...(pad > 0 && { pad: "a".repeat(pad) }) }),
+  );
+  const signature = await expoSignature(body, cryptoKeySigner(id.keys.privateKey, keyid));
   return encodeStoredReply({
     kind: "noUpdateAvailable",
     ...encodeMultipart([{ name: "directive", body, signature }]),
@@ -342,4 +353,26 @@ export async function noUpdateBy(id: Identity) {
 /** Makes the bucket over `store` serve the main identity, as a first publish does, so register-build accepts it. */
 export async function serveMain(store: Record<string, string>): Promise<void> {
   await bucketFromEnv(store).put("reply/no-update", await noUpdateBy(main));
+}
+
+/** The entry a version-1 or version-2 pointer record holds, for a version-3 record. */
+export const entryOf = (record: Uint8Array) => decodePointer(record) as PointerEntry;
+
+/** A version-3 `reply/no-update` holding, per keyid, a directive signed by that identity. */
+export async function identitiesNoUpdate(signers: Readonly<Record<string, Identity>>) {
+  const entries = new Map<string, NoUpdateReply>();
+  for (const [keyid, id] of Object.entries(signers)) {
+    entries.set(keyid, decodeStoredReply(await noUpdateBy(id, keyid)) as NoUpdateReply);
+  }
+  return encodeIdentityNoUpdate(entries);
+}
+
+/** The direct-mode binding of `keyid` to `id`'s exact certificate, as the bucket stores it beside version-3 bodies. */
+export async function directBinding(
+  id: Pick<Identity, "certificate">,
+  keyid = "main",
+): Promise<[string, Uint8Array<ArrayBuffer>]> {
+  const sha256 = createHash("sha256").update(new X509Certificate(id.certificate).raw).digest("hex");
+  const json = `{"version":1,"keyid":${JSON.stringify(keyid)},"certificate":"${sha256}"}`;
+  return [await identityKey(keyid), utf8(json)];
 }

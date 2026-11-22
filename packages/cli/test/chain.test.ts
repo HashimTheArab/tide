@@ -4,10 +4,15 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
+import type { NoUpdateReply } from "@tide-ota/protocol";
 import {
+  MAX_KEYID_BYTES,
   NO_UPDATE_KEY,
   buildNoUpdateAvailable,
   cryptoKeySigner,
+  decodeStoredReply,
+  encodeIdentityNoUpdate,
+  encodeIdentityPointer,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
@@ -43,6 +48,7 @@ import {
   T,
   artifact,
   diskObjects,
+  entryOf,
   env,
   main,
   s3,
@@ -215,12 +221,12 @@ function bindingBytes(rootPem: string): string {
   return JSON.stringify({ version: 1, keyid: "main", root: sha });
 }
 
-/** A stored `reply/no-update` signed by `config`'s leaf and serving its chain. */
-async function chainedNoUpdate(config: Config): Promise<Uint8Array<ArrayBuffer>> {
+/** A stored `reply/no-update` signed by `config`'s leaf under `keyid` and serving its chain. */
+async function chainedNoUpdate(config: Config, keyid = "main"): Promise<Uint8Array<ArrayBuffer>> {
   const body = buildNoUpdateAvailable();
   const signature = await expoSignature(
     body,
-    cryptoKeySigner(config.chain[0]!.keys.privateKey, "main"),
+    cryptoKeySigner(config.chain[0]!.keys.privateKey, keyid),
   );
   return encodeStoredReply({
     kind: "noUpdateAvailable",
@@ -595,6 +601,74 @@ describe("another identity's bucket", () => {
       out: [],
       err: [`tide: ${OTHER_IDENTITY}`],
     });
+  });
+});
+
+describe("several keyids in chain mode", () => {
+  const ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed";
+  const OTHER_ROOT = (): Config => ({ root: w.root2, chain: [w.leaf2] });
+  /** A version-3 reply/no-update holding, by keyid, a directive chained to each config's root. */
+  const noUpdateOf = async (configs: Readonly<Record<string, Config>>) => {
+    const entries = new Map<string, NoUpdateReply>();
+    for (const [keyid, config] of Object.entries(configs)) {
+      entries.set(keyid, decodeStoredReply(await chainedNoUpdate(config, keyid)) as NoUpdateReply);
+    }
+    return encodeIdentityNoUpdate(entries);
+  };
+
+  test("main's entry is judged by main's root alone; root's may chain to another", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B(), { fields: ANDROID_ONLY })).toMatchObject({ code: 0 });
+    s3.objects.delete(ANDROID);
+    s3.objects.set(NO_UPDATE_KEY, await noUpdateOf({ main: B(), root: OTHER_ROOT() }));
+    expect(await registerWith(store, w.root, ID)).toMatchObject({ code: 0, err: [] });
+
+    s3.objects.set(NO_UPDATE_KEY, await noUpdateOf({ main: OTHER_ROOT(), root: B() }));
+    const before = s3Snapshot();
+    expect(await registerWith(store, w.root, "6f9619ff-8b86-4d01-b42d-00cf4fc964ff")).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        'tide: reply/no-update: keyid "main" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid',
+      ],
+    });
+    expect(s3Snapshot()).toEqual(before);
+  });
+
+  test("a renewal of a version-1 reply/no-update refuses before any PUT while a version-3 pointer exists", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, A())).toMatchObject({ code: 0 });
+    const untargeted = "reply/other/1.0.0/ios";
+    const ios = store.objects().get(IOS);
+    if (ios === undefined) throw new Error(`${IOS} is absent`);
+    s3.objects.set(untargeted, encodeIdentityPointer(new Map([["main", entryOf(ios)]])));
+    s3.puts.length = 0;
+    expect(await publishWith(store, B())).toEqual({
+      code: 2,
+      out: [],
+      err: [
+        `tide: ${untargeted} holds replies for several keyids, which tide publish, rollback and republish do not write`,
+      ],
+    });
+    expect(s3.puts).toEqual([]);
+  });
+
+  test("the longest keyid binds, and the next publish reads its binding", async () => {
+    const store = s3Store();
+    // `"` and `\` each take two bytes escaped.
+    const keyid = `"\\${"k".repeat(MAX_KEYID_BYTES - 4)}`;
+    const keyed = { ...configEnv(store, B()), TIDE_BUILD_KEYID: keyid };
+    const fields = {
+      ...chainExport(w.root.certificate),
+      ...IOS_ONLY,
+      codeSigningMetadata: { keyid, alg: "rsa-v1_5-sha256" },
+    };
+    const publishOnce = () =>
+      cmd("publish", ["--channel", "main", "--from", artifact({ fields })], keyed);
+    expect(await publishOnce()).toMatchObject({ code: 0, err: [] });
+    const binding = store.objects().get(await identityKey(keyid));
+    expect(binding?.length).toBeGreaterThan(MAX_KEYID_BYTES);
+    expect(await publishOnce()).toMatchObject({ code: 0, err: [] });
   });
 });
 
