@@ -48,6 +48,12 @@ simulator and a native build per version. `pnpm conformance --help` lists the op
   runner, with an AVD created in the run and a KVM-accelerated emulator. **iOS** runs on a Mac before each release
   ([release checklist](release.md)).
 
+## Packages
+
+`pnpm test:pack` installs each packed tarball alone into a fresh npm project, with the `@tide-ota` registry
+unreachable, and runs the `tide` bin, the Node server and a TypeScript consumer from them, so an internal dependency a
+manifest leaves out fails the run. It runs as its own CI job.
+
 ## Reviewers reject
 
 Snapshots, sleeps, raised timeouts, retries, `.only` or skips; mocks of our own code; a fix without a test that fails

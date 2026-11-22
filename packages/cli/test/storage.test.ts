@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide/protocol";
+import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import { FAKE_S3 } from "../../server/test/fakes/s3.ts";
 import { byteOrder } from "../src/bucket.ts";

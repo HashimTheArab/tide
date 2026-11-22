@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
-import { NO_UPDATE_KEY, contentKey, diskPath, replyKey, sha256Base64Url } from "@tide/protocol";
+import { NO_UPDATE_KEY, contentKey, diskPath, replyKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import type { AnalyticsSink, ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "../shared/server-cases.ts";

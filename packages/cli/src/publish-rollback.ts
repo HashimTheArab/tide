@@ -7,7 +7,7 @@ import {
   encodeStoredReply,
   expoSignature,
   replyKey,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Env, Writer } from "./keys.ts";
 import type { Plan, PublishOptions } from "./publish.ts";

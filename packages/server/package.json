@@ -1,7 +1,6 @@
 {
-  "name": "@tide/server",
+  "name": "@tide-ota/server",
   "version": "0.0.0",
-  "private": true,
   "description": "Read-only Expo Updates server for Cloudflare Workers with R2, or Node with S3-compatible or disk storage.",
   "keywords": [
     "expo",
@@ -25,14 +24,26 @@
     "directory": "packages/server"
   },
   "files": [
-    "src"
+    "dist",
+    "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
   "exports": {
     "./workers": "./src/workers.ts",
     "./node": "./src/node.ts"
   },
+  "publishConfig": {
+    "exports": {
+      "./workers": "./dist/workers.js",
+      "./node": "./dist/node.js"
+    }
+  },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.workers.json && tsc -p tsconfig.build.node.json",
+    "prepack": "pnpm run build",
     "wrangler": "WRANGLER_SEND_METRICS=false WRANGLER_SEND_ERROR_REPORTS=false wrangler",
     "dev:workers": "pnpm run wrangler dev",
     "dev:node": "node src/node.ts",
@@ -42,7 +53,7 @@
   },
   "dependencies": {
     "@hono/node-server": "catalog:",
-    "@tide/protocol": "workspace:*",
+    "@tide-ota/protocol": "workspace:*",
     "hono": "catalog:"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 {
-  "name": "@tide/conformance",
+  "name": "@tide-ota/conformance",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,8 +8,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tide/protocol": "workspace:*",
-    "@tide/server": "workspace:*"
+    "@tide-ota/protocol": "workspace:*",
+    "@tide-ota/server": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

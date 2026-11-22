@@ -226,10 +226,10 @@ importers:
 
   conformance:
     dependencies:
-      '@tide/protocol':
+      '@tide-ota/protocol':
         specifier: workspace:*
         version: link:../packages/protocol
-      '@tide/server':
+      '@tide-ota/server':
         specifier: workspace:*
         version: link:../packages/server
     devDependencies:
@@ -245,7 +245,7 @@ importers:
 
   examples/operator:
     dependencies:
-      '@tide/server':
+      '@tide-ota/server':
         specifier: workspace:*
         version: link:../../packages/server
     devDependencies:
@@ -264,7 +264,7 @@ importers:
 
   packages/cli:
     dependencies:
-      '@tide/protocol':
+      '@tide-ota/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
@@ -304,7 +304,7 @@ importers:
       '@hono/node-server':
         specifier: 'catalog:'
         version: 2.1.8(hono@4.13.19)
-      '@tide/protocol':
+      '@tide-ota/protocol':
         specifier: workspace:*
         version: link:../protocol
       hono:

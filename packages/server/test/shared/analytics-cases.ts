@@ -1,6 +1,6 @@
 import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
-import { NO_UPDATE_KEY, replyKey } from "@tide/protocol";
+import { NO_UPDATE_KEY, replyKey } from "@tide-ota/protocol";
 
 import type { ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "./server-cases.ts";

@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import type { BaseRecord, StoredReply } from "@tide/protocol";
+import type { BaseRecord, StoredReply } from "@tide-ota/protocol";
 import {
   HEADER_VALUE,
   MAX_BASE_BYTES,
@@ -16,7 +16,7 @@ import {
   decodeStoredReply,
   patchKey,
   replyKey,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { AnalyticsSink } from "./analytics.ts";
 import type { Store, StoredObject } from "./store.ts";

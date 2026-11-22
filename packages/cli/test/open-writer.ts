@@ -3,7 +3,7 @@
 // A refusal prints `tide: <message>` and exits 2.
 import { readFileSync } from "node:fs";
 
-import { expoSignature } from "@tide/protocol";
+import { expoSignature } from "@tide-ota/protocol";
 
 import type { ProjectExport } from "../src/publish-export.ts";
 import { BucketError } from "../src/bucket.ts";

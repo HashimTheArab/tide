@@ -2,7 +2,7 @@ import { once } from "node:events";
 import { connect } from "node:net";
 import { expect, inject, test } from "vitest";
 
-import { contentKey, s3Fetch, s3Target, sha256Base64Url } from "@tide/protocol";
+import { contentKey, s3Fetch, s3Target, sha256Base64Url } from "@tide-ota/protocol";
 
 import { FAKE_S3, fakeS3Control } from "../shared/fake-s3.ts";
 import { runEntry } from "./entry.ts";

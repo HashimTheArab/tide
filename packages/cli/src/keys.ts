@@ -2,7 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import type { KeyObject } from "node:crypto";
 
-import type { Signer } from "@tide/protocol";
+import type { Signer } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   ProtocolError,
@@ -10,7 +10,7 @@ import {
   cryptoKeySigner,
   expoSignature,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import type { ProjectExport } from "./publish-export.ts";

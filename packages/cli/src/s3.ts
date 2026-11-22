@@ -1,4 +1,4 @@
-import type { S3Config, S3Operation, S3Request } from "@tide/protocol";
+import type { S3Config, S3Operation, S3Request } from "@tide-ota/protocol";
 import {
   S3Error,
   childElements,
@@ -10,7 +10,7 @@ import {
   s3Fetch,
   s3Target,
   textOf,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError, STRONG_ETAG, byteOrder, checkEtag, checkKey, isKey } from "./bucket.ts";

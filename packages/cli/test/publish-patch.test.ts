@@ -11,7 +11,7 @@ import {
   encodeBaseRecord,
   patchKey,
   sha256Base64Url,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "../src/bucket.ts";
 import type { Platform } from "../src/publish-record.ts";

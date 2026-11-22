@@ -14,9 +14,9 @@ are placeholders.
 [`examples/operator/`](../examples/operator/) is the reference, built with `wrangler deploy --dry-run` and tested on
 workerd in Tide's gate:
 
-- `package.json` depends on `@tide/server`. Until it is on npm, the project lives in a checkout of Tide's workspace
+- `package.json` depends on `@tide-ota/server`. Until it is on npm, the project lives in a checkout of Tide's workspace
   like the example.
-- `worker.ts` is one line: `export { default } from "@tide/server/workers";`. The Worker is configured only by its
+- `worker.ts` is one line: `export { default } from "@tide-ota/server/workers";`. The Worker is configured only by its
   bindings and vars.
 - `wrangler.jsonc` has a top-level `name`, `main` and `compatibility_date`, and one block per environment under
   `env`. Wrangler does not inherit bindings or vars into a named environment, so `staging` and `production` each
@@ -123,7 +123,7 @@ separate jobs of one workflow:
   - **Trusted CLI.** It checks out only Tide, at a commit SHA written in the workflow file (never one the export job
     chose), with `persist-credentials: false`. Node comes from that checkout's `.nvmrc` and pnpm from its
     `package.json` (`pnpm/action-setup` with `package_json_file`; Node 26 does not bundle Corepack). From that
-    checkout it runs `pnpm install --frozen-lockfile --prod --ignore-scripts --filter "@tide/cli..."`, then
+    checkout it runs `pnpm install --frozen-lockfile --prod --ignore-scripts --filter "@tide-ota/cli..."`, then
     `node packages/cli/src/main.ts publish --from <path> --channel <name>`. The app is never checked out; it is
     present only as artifact data.
   - **Binding.** A step fails when the export job's `artifact-id` is empty. `actions/download-artifact` takes it as

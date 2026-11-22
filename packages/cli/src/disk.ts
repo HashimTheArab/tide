@@ -17,7 +17,7 @@ import {
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { diskKey, diskPath, unescapeDiskPath } from "@tide/protocol";
+import { diskKey, diskPath, unescapeDiskPath } from "@tide-ota/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError, byteOrder, checkEtag, checkKey } from "./bucket.ts";

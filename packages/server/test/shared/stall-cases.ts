@@ -9,7 +9,7 @@ import {
   s3Fetch,
   s3Target,
   sha256Base64Url,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Store, StoredObject } from "../../src/core/store.ts";
 import type { Behaviour } from "./fake-s3.ts";

@@ -1,5 +1,5 @@
 {
-  "name": "@tide/example-operator",
+  "name": "@tide-ota/example-operator",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tide/server": "workspace:*"
+    "@tide-ota/server": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "catalog:",

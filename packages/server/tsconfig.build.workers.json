@@ -1,0 +1,8 @@
+{
+  // Only Workers types: the vitest pool's types stay out of the published declarations.
+  "extends": ["./tsconfig.workers.json", "../../tsconfig.emit.json"],
+  "compilerOptions": {
+    "types": ["./worker-configuration.d.ts"]
+  },
+  "include": ["src/workers.ts"]
+}

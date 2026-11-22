@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import type { JsonObject } from "@tide/protocol";
-import { replyKey } from "@tide/protocol";
+import type { JsonObject } from "@tide-ota/protocol";
+import { replyKey } from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import type { ProjectExport } from "./publish-export.ts";

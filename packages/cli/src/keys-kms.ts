@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 
-import type { Signer } from "@tide/protocol";
+import type { Signer } from "@tide-ota/protocol";
 import {
   ProtocolError,
   awsFetch,
   decodeBase64,
   readS3Text,
   sigV4Credentials,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import { KeyError, read } from "./keys.ts";

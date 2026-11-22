@@ -31,15 +31,19 @@ AI agents write most of the code.
 | `packages/protocol` | Manifest, multipart, signature and patch contract, shared by server and CLI |
 | `packages/cli` | `export` (the only command that runs project code), `publish --from`, `register-build`, `rollback`, `republish`, `status`, `storage`, `probe` (P4 onward) |
 | `conformance` | `pnpm conformance`: stock `expo-updates` release apps against a local Tide (Node entry, disk store) with a signing identity generated per run; not part of the gate. `apps/shared` is the one app source; `apps/sdk-<n>` pin each version with an npm lockfile outside the pnpm workspace |
-| `examples/operator` | A minimal operator Worker re-exporting `@tide/server/workers`; dry-run built and tested in the gate |
+| `examples/operator` | A minimal operator Worker re-exporting `@tide-ota/server/workers`; dry-run built and tested in the gate |
 | `docs/` | Design, roadmap, testing standard, delivery loop and decision records; index in `docs/README.md` |
 | `scripts/gate.mjs` | The one gate CI and the delivery loop run |
+| `scripts/pack.test.mjs` | `pnpm test:pack`: packs protocol, server and cli (or takes prebuilt tarballs) and uses them from a fresh npm project; a CI job, not part of the gate |
 
 ## Runtimes
 
 - Core and protocol code uses only web-standard APIs: `Request`, `Response`, streams, `Uint8Array`, Web Crypto.
   Lint rejects `node:*`, `cloudflare:*`, `bun`, `process` and `Buffer` there.
 - Each runtime has one entry point and one test project. A behaviour test that matters runs on both.
+- The workspace runs packages from `src`. `pnpm build` emits JS and declarations to each package's untracked `dist`,
+  and `publishConfig` points the packed `exports` and `bin` there (each `.d.ts` sits beside its `.js`); Node will not
+  strip types under `node_modules`.
 - `packages/server` typechecks core twice: against Node types (`tsconfig.node.json`) and Workers types
   (`tsconfig.workers.json`, generated `worker-configuration.d.ts`).
 
@@ -51,7 +55,7 @@ AI agents write most of the code.
   shape must keep working forever.
 - **Putting a key on a server.** Signing happens in the CLI only. The server's storage credentials are read-only,
   except the R2 binding, which cannot be; never call anything but `get` on it.
-- **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide/server types`; the gate fails
+- **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide-ota/server types`; the gate fails
   when it is stale.
 - **Committing secrets.** Never commit `.env`, keys or credentials.
 - **Formatting by hand.** Run `pnpm format:fix`; oxfmt orders imports.

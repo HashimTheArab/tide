@@ -10,8 +10,8 @@ import {
 } from "node:fs";
 import { join, sep } from "node:path";
 
-import type { JsonObject } from "@tide/protocol";
-import { replyKey, sha256Base64Url } from "@tide/protocol";
+import type { JsonObject } from "@tide-ota/protocol";
+import { replyKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import type { SigningMetadata } from "./keys.ts";
 import type { Platform } from "./publish-record.ts";

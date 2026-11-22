@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
-import type { StoredReply } from "@tide/protocol";
-import { MAX_REPLY_BYTES, diskPath, encodeStoredReply } from "@tide/protocol";
+import type { StoredReply } from "@tide-ota/protocol";
+import { MAX_REPLY_BYTES, diskPath, encodeStoredReply } from "@tide-ota/protocol";
 
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";

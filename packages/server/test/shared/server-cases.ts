@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
-import type { StoredReply } from "@tide/protocol";
+import type { StoredReply } from "@tide-ota/protocol";
 import {
   MAX_BASE_BYTES,
   MAX_REPLY_BYTES,
@@ -18,7 +18,7 @@ import {
   replyKey,
   sha256Base64Url,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import { fixture } from "./fixtures.ts";
 

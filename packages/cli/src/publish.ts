@@ -16,7 +16,7 @@ import {
   encodeStoredReply,
   expoSignature,
   replyKey,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import type { Env, Writer } from "./keys.ts";

@@ -13,7 +13,7 @@ import {
   parseMultipart,
   sha256Base64Url,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Manifest } from "../publish-fixture.ts";
 import { run, tempRoot } from "../helpers.ts";

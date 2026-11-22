@@ -23,7 +23,8 @@ pnpm format:fix  # oxfmt formats and orders imports
 pnpm gate        # every check CI runs, as JSON; commit first, it refuses a dirty tree
 ```
 
-A pull request is ready when `pnpm gate` reports `"allChecksPassed": true`. `pnpm test:container` (needs Docker) and
-`pnpm conformance` are not part of the gate; run them when you change the image or what clients see.
+A pull request is ready when `pnpm gate` reports `"allChecksPassed": true`. `pnpm test:container` (needs Docker),
+`pnpm test:pack` and `pnpm conformance` are not part of the gate; run them when you change the image, the packages'
+build or manifests, or what clients see.
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE).

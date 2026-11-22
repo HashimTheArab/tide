@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
-import { diskPath } from "@tide/protocol";
+import { diskPath } from "@tide-ota/protocol";
 
 import { BucketError } from "../src/bucket.ts";
 import { diskBucket } from "../src/disk.ts";

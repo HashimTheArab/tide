@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import type { StoredReply } from "@tide/protocol";
+import type { StoredReply } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   baseKey,
@@ -18,7 +18,7 @@ import {
   patchKey,
   replyKey,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { App, Build } from "./app.ts";
 import type { Device, Report } from "./device.ts";

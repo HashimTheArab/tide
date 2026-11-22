@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
 
-import type { Part, StoredReply } from "@tide/protocol";
+import type { Part, StoredReply } from "@tide-ota/protocol";
 import {
   HEADER_VALUE,
   MAX_REPLY_BYTES,
@@ -14,7 +14,7 @@ import {
   readLimited,
   replyKey,
   verifyExpoSignature,
-} from "@tide/protocol";
+} from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import { BUILD_KEYID, KeyError, buildIdentity, isObject, member } from "./keys.ts";
