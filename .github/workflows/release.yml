@@ -193,7 +193,9 @@ jobs:
             const name = `@tide-ota/${p}`;
             const file = `${RUNNER_TEMP}/tarballs/tide-ota-${p}.tgz`;
             const integrity = `sha512-${createHash("sha512").update(readFileSync(file)).digest("base64")}`;
-            const res = await fetch(new URL(name.replace("/", "%2f"), registry), { headers: { accept: "application/json" } });
+            // ?write=true bypasses the CDN, whose cached packument can predate a release published minutes ago.
+            const url = new URL(`${name.replace("/", "%2f")}?write=true`, registry);
+            const res = await fetch(url, { headers: { accept: "application/json" } });
             if (!res.ok) fail(`${name}: the registry answered ${res.status}`);
             const doc = await res.json();
             const existing = doc.versions?.[VERSION];
@@ -218,6 +220,11 @@ jobs:
       GH_REPO: ${{ github.repository }}
       PRERELEASE: ${{ needs.build.outputs.dist-tag == 'next' }}
     steps:
+      - id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ needs.build.outputs.node }}
+
       - id: download
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -230,23 +237,32 @@ jobs:
       - id: assets
         name: GitHub Release
         run: |
-          tag="$GITHUB_REF_NAME"
-          if ! gh release view "$tag" > /dev/null 2>&1; then
-            gh release create "$tag" --verify-tag --generate-notes --draft
-          fi
-          attached=$(gh release view "$tag" --json assets)
-          upload=()
-          for f in "$RUNNER_TEMP"/tarballs/*.tgz; do
-            name=$(basename "$f")
-            digest="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
-            found=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | "\(.state) \(.digest)"' <<< "$attached")
-            case "$found" in
-              "uploaded $digest") echo "$name is already attached" ;;
-              uploaded\ *) echo "::error::$name is attached with other bytes"; exit 1 ;;
-              *) upload+=("$f") ;;
-            esac
-          done
-          if [ "${#upload[@]}" -gt 0 ]; then
-            gh release upload "$tag" "${upload[@]}" --clobber
-          fi
-          gh release edit "$tag" --draft=false --prerelease="$PRERELEASE"
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readdirSync, readFileSync } from "node:fs";
+          const { GITHUB_REF_NAME: tag, RUNNER_TEMP, PRERELEASE } = process.env;
+          const gh = (command, ...args) =>
+            execFileSync("gh", ["release", command, tag, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+          try {
+            execFileSync("gh", ["release", "view", tag], { stdio: "ignore" });
+          } catch {
+            gh("create", "--verify-tag", "--generate-notes", "--draft");
+          }
+          const attached = new Map(JSON.parse(gh("view", "--json", "assets")).assets.map((a) => [a.name, a]));
+          const upload = [];
+          const dir = `${RUNNER_TEMP}/tarballs`;
+          for (const name of readdirSync(dir).filter((n) => n.endsWith(".tgz")).sort()) {
+            const file = `${dir}/${name}`;
+            const digest = `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+            const found = attached.get(name);
+            if (found?.state !== "uploaded") upload.push(file);
+            else if (found.digest === digest) console.log(`${name} is already attached`);
+            else {
+              console.error(`::error::${name} is attached with other bytes`);
+              process.exit(1);
+            }
+          }
+          if (upload.length > 0) gh("upload", ...upload, "--clobber");
+          gh("edit", "--draft=false", `--prerelease=${PRERELEASE}`);
+          JS

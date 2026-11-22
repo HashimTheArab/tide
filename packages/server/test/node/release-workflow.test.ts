@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -70,13 +71,14 @@ const executable = (path: string, body: string) => {
   writeFileSync(path, body);
   chmodSync(path, 0o755);
 };
+const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
 
 interface StepRun {
   code: number | null;
   log: string;
   outputs: Record<string, string>;
 }
-/** Runs a step's script as `shell: bash` does, with RUNNER_TEMP and HOME in `dir` and `dir/bin` first on PATH. */
+/** Runs a step's script as `shell: bash` does, with RUNNER_TEMP and HOME in `dir` and `dir/bin` first on PATH; env may replace PATH. */
 async function runStep(
   jobName: string,
   id: string,
@@ -88,7 +90,7 @@ async function runStep(
   const output = join(dir, `${id}.output`);
   writeFileSync(script, step(jobName, id).run!);
   writeFileSync(output, "");
-  const child = spawn("bash", ["--noprofile", "--norc", "-eo", "pipefail", script], {
+  const child = spawn(BASH, ["--noprofile", "--norc", "-eo", "pipefail", script], {
     cwd,
     env: {
       PATH: `${join(dir, "bin")}:${process.env.PATH}`,
@@ -347,14 +349,18 @@ describe("publish", () => {
   describe("against a local registry", () => {
     // Per package: each version on npm with the tarball body it was published from, and the dist-tags.
     type OnNpm = Record<string, { versions: Record<string, string>; tags: Record<string, string> }>;
-    // Each run reads its own scenario under /<run>/, so runs can overlap.
-    const scenarios = new Map<string, OnNpm>();
+    // Each run reads its own scenario under /<run>/, so runs can overlap. Like npm's CDN, a plain read may get an
+    // older cached view; ?write=true always reads the current one.
+    const scenarios = new Map<string, { current: OnNpm; cached: OnNpm }>();
     let registry = "";
     const integrity = (body: string) =>
       `sha512-${createHash("sha512").update(body).digest("base64")}`;
     const server = createServer((req, res) => {
-      const [, run, p] = /^\/(\d+)\/@tide-ota%2f(\w+)$/.exec(req.url ?? "") ?? [];
-      const pkg = run && p ? scenarios.get(run)?.[p] : undefined;
+      const url = new URL(req.url ?? "", "http://registry");
+      const [, run, p] = /^\/(\d+)\/@tide-ota%2f(\w+)$/.exec(url.pathname) ?? [];
+      const scenario = run ? scenarios.get(run) : undefined;
+      const view = url.searchParams.get("write") === "true" ? scenario?.current : scenario?.cached;
+      const pkg = p ? view?.[p] : undefined;
       if (!pkg) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -388,9 +394,9 @@ describe("publish", () => {
     const each = (entry: OnNpm[string]): OnNpm => Object.fromEntries(names.map((p) => [p, entry]));
 
     let runs = 0;
-    async function publish(onNpm: OnNpm, version: string, distTag: string) {
+    async function publish(onNpm: OnNpm, version: string, distTag: string, cached = onNpm) {
       const run = String(runs++);
-      scenarios.set(run, onNpm);
+      scenarios.set(run, { current: onNpm, cached });
       const dir = scratch();
       const log = join(dir, "npm.log");
       executable(
@@ -484,6 +490,20 @@ describe("publish", () => {
       };
       const r = await publish({ protocol, server: later, cli: later }, "1.2.3", "latest");
       expect([r.code, r.calls]).toEqual([1, []]);
+    });
+
+    // npm's CDN serves a packument up to five minutes old, which can predate a release published seconds earlier.
+    test("a stale cached packument neither moves a dist-tag back nor republishes a version", async () => {
+      const later = each({ versions: { "1.2.4": "later" }, tags: { latest: "1.2.4" } });
+      const behind = await publish(later, "1.2.3", "latest", placeholders);
+      const done = Object.fromEntries(
+        names.map((p) => [p, { versions: { "1.2.3": tarball(p) }, tags: { latest: "1.2.3" } }]),
+      );
+      const rerun = await publish(done, "1.2.3", "latest", placeholders);
+      expect([behind, rerun].map((r) => [r.code, r.calls])).toEqual([
+        [1, []],
+        [0, []],
+      ]);
     });
 
     const ordering = [
@@ -584,6 +604,12 @@ save();
   const attached = Object.fromEntries(
     Object.entries(tarballs).map(([name, body]) => [name, uploaded(body)]),
   );
+  // Only node and gh on PATH: the gate runs this step on contributors' machines, which need nothing beyond Node.
+  const nodeOnly = join(work, "node-only");
+  beforeAll(() => {
+    mkdirSync(nodeOnly);
+    symlinkSync(process.execPath, join(nodeOnly, "node"));
+  });
   async function assets(releases: Release[], env: Record<string, string> = {}) {
     const dir = scratch();
     executable(join(dir, "bin/gh"), FAKE_GH);
@@ -597,6 +623,7 @@ save();
       GH_REPO: "example/tide",
       PRERELEASE: "true",
       FAKE_GH_STATE: stateFile,
+      PATH: `${join(dir, "bin")}:${nodeOnly}`,
       ...env,
     });
     const state = JSON.parse(readFileSync(stateFile, "utf8")) as { releases: Release[] };
