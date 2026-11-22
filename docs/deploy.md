@@ -59,21 +59,25 @@ Once per environment, in this order.
    `https://assets.example.com/assets/<hex>` then serves the object `assets/<hex>`. Every object in the bucket
    becomes public; Tide stores nothing secret there. Connect it before the first publish.
 5. **Signing identity.** A self-signed certificate per environment with its `keyid` (`design.md`, Keys). Tide
-   rejects unsigned apps. From the app's directory, write the certificate where the app config reads it, one of two
-   ways:
+   rejects unsigned apps. Put the certificate where the app config reads it (here `keys/certificate.pem`), made one
+   of two ways:
 
    - **`tide certificate`**, signed by the key the writers will use: a KMS key created in KMS (`design.md`, KMS
-     provisioning) or a file key kept outside every checkout. With that source's variables set; for KMS, also
-     `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY` and `TIDE_KMS_SESSION_TOKEN` from a session allowed
-     `kms:GetPublicKey` and `kms:Sign`:
+     provisioning) or a file key kept outside every checkout. It holds that key or a `kms:Sign` session, so never run
+     the app's own `npx tide`: install Tide into `~/tide-cli` with the writer job's checked commands (Publishing,
+     Trusted CLI), a fresh directory in place of `$RUNNER_TEMP/tide`, and run it outside the app checkout. With that
+     source's variables set; for KMS, also `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY` and
+     `TIDE_KMS_SESSION_TOKEN` from a session allowed `kms:GetPublicKey` and `kms:Sign`. Then copy only the printed
+     certificate into the app:
 
      ```sh
      TIDE_KMS_KEY_ID=alias/tide-main TIDE_KMS_REGION=us-east-1 \
-       npx tide certificate --common-name "Example App" --validity-years 10 > keys/certificate.pem
+       ~/tide-cli/node_modules/.bin/tide certificate --common-name "Example App" --validity-years 10 \
+       > ~/tide-signing/main/certificate.pem
      ```
 
-   - **`expo-updates codesigning:generate`**, writing the key outside every checkout, never inside a repository;
-     for KMS, import that key afterwards (`design.md`, Key import):
+   - **`expo-updates codesigning:generate`**, from the app's directory, writing the key outside every checkout, never
+     inside a repository; for KMS, import that key afterwards (`design.md`, Key import):
 
      ```sh
      npx expo-updates codesigning:generate \

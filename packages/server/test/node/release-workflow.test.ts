@@ -715,6 +715,19 @@ describe("checking a release", () => {
       ),
     ]);
   });
+
+  // The certificate step holds the signing key or a kms:Sign session, so the app checkout must not pick the executable.
+  test("the deploy guide runs tide certificate from the checked install, outside the app checkout", () => {
+    const runs = read("docs/deploy.md")
+      .replaceAll(/\s*\\\n\s*/g, " ")
+      .split("\n")
+      .filter((line) => /\btide certificate --/.test(line));
+    expect(runs.length).toBeGreaterThan(0);
+    for (const run of runs)
+      expect(run).toMatch(
+        /^\s*(\w+=\S+ )*~\/tide-cli\/node_modules\/\.bin\/tide certificate .* > ~\/tide-signing\//,
+      );
+  });
 });
 
 describe("artifact flow, pins and secrets", () => {

@@ -534,7 +534,8 @@ write. No writer runs project code (CLI).
    with an alias.
 2. The identity that runs `tide certificate` needs `kms:GetPublicKey` and `kms:Sign` on the key; writers need only
    `kms:Sign`.
-3. `tide certificate` with the `TIDE_KMS_*` variables writes the app's certificate (`deploy.md`, Signing identity).
+3. `tide certificate` with the `TIDE_KMS_*` variables, run from a checked Tide install outside the app checkout,
+   writes the app's certificate (`deploy.md`, Signing identity).
 
 Such a key cannot be exported, so there is no recovery copy. Disabling it stops every publish until `enable-key`, and
 a pending deletion can be cancelled with `cancel-key-deletion`, then `enable-key`. Once it is deleted, or left
