@@ -17,10 +17,11 @@ import {
   RSA,
   readSmallFile,
   rsaKeyBits,
+  sameBytes,
   signingKey,
   validCertificate,
 } from "./keys.ts";
-import { PublishError, sameBytes } from "./publish-record.ts";
+import { PublishError } from "./publish-record.ts";
 import { once, parsed, report, requiredOnce } from "./publish.ts";
 
 export const CERTIFICATE_USAGE =

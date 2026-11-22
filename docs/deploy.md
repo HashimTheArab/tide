@@ -110,9 +110,8 @@ Once per environment, in this order.
    `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, taken from a shipped binary.
 
    **Chain path.** Instead of one self-signed certificate, the app can embed a CA root and trust any leaf the root
-   issues, so the writer's key can change without an app release. Writers do not serve a chain yet (roadmap P11),
-   so do not ship a chain-mode build until they do. Each step runs the same trusted `tide` install, with only the
-   named key source set:
+   issues, so the writer's key can change without an app release or a new bucket. Each step runs the same trusted
+   `tide` install, with only the named key source set:
 
    | Step | Key source set | Command | Output |
    | --- | --- | --- | --- |
@@ -127,6 +126,11 @@ Once per environment, in this order.
 
    - **Keys.** The root and intermediate keys, and any credential allowed to `Sign` with them, never go to the
      writer job. The writer gets only the leaf key (`kms:Sign` on that key alone).
+   - **The writer.** It gets `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN=true`, `root.pem` as the build certificate, and the
+     served chain in `TIDE_CERTIFICATE_CHAIN_FILE` (or `TIDE_CERTIFICATE_CHAIN`): `leaf.pem`, or
+     `cat leaf.pem intermediate.pem`, never the root. `tide probe` takes the same two pins. The app config sets
+     `updates.codeSigningIncludeManifestResponseCertificateChain: true` beside `codeSigningCertificate: "./keys/root.pem"`,
+     for `tide export` to record and for the app's config plugin to read.
    - **The app.** It embeds `root.pem` as its certificate and must opt in to chains: Android meta-data
      `expo.modules.updates.CODE_SIGNING_INCLUDE_MANIFEST_RESPONSE_CERTIFICATE_CHAIN` set to `true`, and the iOS
      `Expo.plist` key `EXUpdatesCodeSigningIncludeManifestResponseCertificateChain` set to `true`. Expo's config
@@ -136,8 +140,14 @@ Once per environment, in this order.
      trusting the root still accept replies signed by the leaked key, served with its old chain, until that leaf
      or a certificate above it expires. Keep leaf lifetimes short. A leaked intermediate key can issue leaves until
      the intermediate expires; a leaked root key needs a new app build with a new root.
+   - **Leaf rotation.** Issue the next leaf before the current one expires and switch the writer's key and served
+     chain together; the bucket keeps serving bodies the old leaf signed, and the next publish, republish or rollback
+     re-signs `reply/no-update`. Before the old leaf expires, publish or republish each live channel and finish or
+     replace each rollout, since a stored reply keeps the chain it was signed with.
    - **Renewal.** An expired root or intermediate breaks every build that embeds or is served it. A new certificate
-     never outlives one above it, so in an ancestor's last year issue leaves with `--validity-days`.
+     never outlives one above it, so in an ancestor's last year issue leaves with `--validity-days`. The bucket binds
+     its `keyid` to the root's exact certificate, so a reissued root, even with the same key, ships with a new
+     `keyid` and bucket.
 6. **Publisher credential.** An R2 Object Read & Write token scoped to the bucket, given to the publish workflow as
    the five `TIDE_S3_*` variables in a protected CI secret (`design.md`, Bucket configuration). The publisher's
    `TIDE_SERVER_URL` is the server origin and `TIDE_ASSET_URL` the asset origin.
@@ -232,8 +242,8 @@ separate jobs of one workflow:
     exit 1
     ```
 
-The writer job also reads `TIDE_BUILD_KEYID` and the build certificate, and refuses an export whose certificate or
-`keyid` is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
+The writer job also reads `TIDE_BUILD_KEYID`, `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN` and the build certificate, and
+refuses an export whose certificate, `keyid` or chain mode is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
 binding above.
 
 **One concurrency group.** Every writer for a bucket (`publish`, `rollout`, `rollback`, `republish` and

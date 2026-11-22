@@ -438,7 +438,7 @@ describe("publish to disk", () => {
       [
         "an unknown field",
         fields({ key: "x" }),
-        "tide-export.json must hold only version, certificate, codeSigningMetadata, expoClient, platforms",
+        "tide-export.json must hold only version, certificate, codeSigningMetadata, codeSigningIncludeManifestResponseCertificateChain, expoClient, platforms",
       ],
       [
         "a certificate that is not a string",

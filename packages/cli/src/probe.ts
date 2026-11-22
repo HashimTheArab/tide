@@ -8,11 +8,13 @@ import {
   ProtocolError,
   UUID,
   assetHash,
+  certificateChain,
   encodeSfvDictionary,
   parseMultipart,
   parseSfvDictionary,
   readLimited,
   replyKey,
+  verifyChainedSignature,
   verifyExpoSignature,
 } from "@tide-ota/protocol";
 
@@ -61,6 +63,7 @@ interface Probe {
   readonly runtimeVersion: string;
   readonly key: CryptoKey;
   readonly keyId: string;
+  readonly root: string | undefined; // Chain mode: the root the builds embed.
 }
 
 /**
@@ -137,7 +140,7 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
     if (!(e instanceof KeyError)) throw e;
     throw usage(e.message);
   }
-  const { key, keyId } = identity;
+  const { key, keyId, chain, pem } = identity;
 
   return {
     manifestUrl: `${base}/manifest`,
@@ -153,6 +156,7 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
     runtimeVersion: runtime,
     key,
     keyId,
+    root: chain ? pem : undefined,
   };
 }
 
@@ -190,7 +194,8 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   if (part === undefined || signed.length > 1) {
     throw new ProbeFailure("unparseable", "the reply must hold one manifest or directive part");
   }
-  await verify(part, probe);
+  const chain = parts.find((p) => p.name === "certificate_chain");
+  await verify(part, chain, probe);
   let json: unknown;
   try {
     json = JSON.parse(utf8.decode(part.body));
@@ -241,11 +246,40 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   return [`manifest ${id}: signature verified`, `launch asset ${hash}: SHA-256 verified`];
 }
 
-/** Verifies the part's expo-signature over its exact bytes, as a client configured for code signing does. */
-async function verify(part: Part, { key, keyId }: Probe): Promise<void> {
+/**
+ * Verifies the part's expo-signature over its exact bytes, as a client configured for code signing does; in chain
+ * mode under the leaf of the served `chain` over the pinned root, now, with the keyid ignored.
+ */
+async function verify(part: Part, chain: Part | undefined, { key, keyId, root }: Probe) {
   const fail = (message: string) =>
     new ProbeFailure("signature", `the ${part.name} part ${message}`);
   if (part.signature === undefined) throw fail("has no expo-signature");
+  if (root !== undefined) {
+    if (chain === undefined)
+      throw new ProbeFailure("signature", "the reply has no certificate_chain part");
+    let leaf;
+    try {
+      leaf = await certificateChain(chain.body, root, new Date());
+    } catch (e) {
+      if (!(e instanceof ProtocolError)) throw e;
+      // The message names roles and rules only, never reply data.
+      throw new ProbeFailure(
+        "signature",
+        `the reply's certificate chain fails the client's rules: ${e.message}`,
+      );
+    }
+    try {
+      await verifyChainedSignature(part.body, part.signature, leaf);
+    } catch (e) {
+      if (!(e instanceof ProtocolError)) throw e;
+      throw fail(
+        e.field === "signature.sig"
+          ? "does not verify under the served leaf"
+          : "has a malformed expo-signature",
+      );
+    }
+    return;
+  }
   try {
     await verifyExpoSignature(part.body, part.signature, key, keyId);
   } catch (e) {
