@@ -120,13 +120,14 @@ jobs:
           path: ${{ runner.temp }}/tarballs/*.tgz
           if-no-files-found: error
 
-  # The only job that can mint an npm provenance token; it runs no repository code.
+  # The only job with an OIDC token, for npm provenance and GitHub attestations; it runs no repository code.
   publish:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       id-token: write
+      attestations: write
     # Runs for one dist-tag queue in order, so the check below and the publishes after it never interleave.
     concurrency:
       group: release-publish-${{ needs.build.outputs.dist-tag }}
@@ -208,6 +209,13 @@ jobs:
           for (const file of planned)
             execFileSync("npm", ["publish", file, "--provenance", "--access", "public", "--tag", DIST_TAG], { stdio: "inherit" });
           JS
+
+      # npm serves these bytes unchanged, so writers can check a downloaded package with gh attestation verify, which
+      # pins the signing certificate to this workflow. A rerun attests again; duplicates are harmless.
+      - id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/tarballs/*.tgz
 
   release:
     needs: [build, publish]

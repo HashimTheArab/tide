@@ -10,9 +10,6 @@ Tide sends over-the-air (OTA) updates to React Native apps that use Expo's own
 no database to run, and no signing key on the server. You publish from your machine or CI; Tide stores each signed
 update in a single bucket and serves it from Cloudflare Workers or from a container on any host.
 
-> [!NOTE]
-> **Pre-release.** Nothing is on npm yet, so Tide runs from a checkout of this repository. See [Status](#status).
-
 ## Why Tide
 
 - **Signed at publish time, never by the server.** Only the CLI signs, so the server holds no key. Whoever takes
@@ -79,24 +76,24 @@ Sources for every cell: [docs/comparison.md](docs/comparison.md).
 
 ## Quick start
 
-You need the Node and pnpm versions listed under `engines` in [package.json](package.json). Packages are not on
-npm yet, so everything runs from this checkout:
-
-```sh
-pnpm install
-alias tide="node $PWD/packages/cli/src/main.ts"   # the CLI, run from source
-```
+Tide's packages need Node 24.11 or later.
 
 ### Run the server on Cloudflare Workers
 
-[`examples/operator/`](examples/operator/) is a ready-made operator project with a `staging` and a `production`
-environment, each with its own R2 bucket. Set the Worker names, bucket names and `TIDE_APP_ID` in its
-`wrangler.jsonc`, then:
+In your Worker project:
 
 ```sh
-cd examples/operator
-pnpm run wrangler r2 bucket create <bucket>
-pnpm run wrangler deploy --env staging
+npm install @tide-ota/server
+npm install --save-dev wrangler
+```
+
+Copy `worker.ts` and `wrangler.jsonc` from [`examples/operator/`](examples/operator/): a one-line Worker with a
+`staging` and a `production` environment, each with its own R2 bucket. Set the Worker names, bucket names and
+`TIDE_APP_ID` in `wrangler.jsonc`, then:
+
+```sh
+npx wrangler r2 bucket create <bucket>
+npx wrangler deploy --env staging
 ```
 
 Always pass `--env`. Before the first publish, give the Worker and the bucket each a domain you own: those
@@ -105,15 +102,17 @@ installed. [docs/deploy.md](docs/deploy.md) walks through the full setup, accoun
 
 ### Or run it in a container
 
+In the container's project:
+
 ```sh
-docker build -f packages/server/Dockerfile -t tide .
-docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_DIR=/bucket tide
+npm install @tide-ota/server
+TIDE_DISK_DIR=/srv/tide-bucket node node_modules/@tide-ota/server/dist/node.js
 ```
 
-This serves a local folder. To serve an S3-compatible bucket instead, set the `TIDE_S3_*` variables with read-only
-credentials. The container does not serve images and fonts, so give the bucket's assets a public address of their
-own, and set `TIDE_SERVER_URL` and `TIDE_ASSET_URL` before the first publish.
-[docs/deploy.md](docs/deploy.md#the-container) lists every variable.
+This serves a local folder on port 8787. To serve an S3-compatible bucket instead, set the `TIDE_S3_*` variables
+with read-only credentials. The Node server does not serve images and fonts, so give the bucket's assets a public
+address of their own, and set `TIDE_SERVER_URL` and `TIDE_ASSET_URL` before the first publish.
+[docs/deploy.md](docs/deploy.md#the-container) lists every variable and has a reference image.
 
 ### Point your app at it
 
@@ -137,11 +136,12 @@ nothing published answers with a signed "no update available" rather than an err
 
 ## Publishing
 
+Install the CLI where you publish, with `npm install --save-dev @tide-ota/cli`, and run it as `npx tide`.
 Publishing is two steps, designed to run as two separate CI jobs:
 
 ```sh
-tide export --project-root <app> --out <dir>      # builds the app; needs no secrets
-tide publish --from <dir> --channel main          # signs and uploads; runs no app code
+npx tide export --project-root <app> --out <dir>    # builds the app; needs no secrets
+npx tide publish --from <dir> --channel main        # signs and uploads; runs no app code
 ```
 
 The signing key can come from a file, an environment variable, or AWS KMS — through KMS the private key never
@@ -208,19 +208,21 @@ and exit codes.
 
 ## Status
 
-Pre-release. The server, the CLI, bundle diffing, the operations commands and the container image are built and
+Early (0.x). The server, the CLI, bundle diffing, the operations commands and the container image are built and
 covered by tests on both Workers and Node. Real `expo-updates` apps check updates, patches and rollbacks against a
 local Tide (`pnpm conformance`, run separately from the gate): nightly on an Android emulator, and on an iOS simulator
-before each release. npm
-releases come later; [docs/roadmap.md](docs/roadmap.md) lists every phase and what remains.
+before each release. Releases are published to npm from CI ([docs/release.md](docs/release.md));
+[docs/roadmap.md](docs/roadmap.md) lists every phase.
 
 ## Development
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the rules and the reasoning behind them.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rules and the reasoning behind them. A checkout needs the Node and pnpm
+versions under `engines` in [package.json](package.json), and runs everything from source:
 
 ```sh
 pnpm install
-pnpm gate        # every check CI runs
+pnpm gate                                         # every check CI runs
+alias tide="node $PWD/packages/cli/src/main.ts"   # the CLI, run from source
 ```
 
 Documentation starts at [docs/README.md](docs/README.md): the [design](docs/design.md) for how Tide works and

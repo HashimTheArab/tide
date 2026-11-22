@@ -18,4 +18,4 @@ each plans as one PR. P2 to P5 are risky: each gets a design note and the deep r
 | P6 | Operations: analytics data point per manifest request, `tide probe`, a published Workers entry with an example deploy setup and `wrangler deploy --dry-run` in the gate (Tide never deploys anything live), container image with a smoke test, and publishing split into a secret-free `tide export` and a sign-and-upload step | done |
 | P7 | Conformance: nightly Android emulator apps on expo-updates 55 and 58 (update, patch from OTA and embedded, rollback, corrupt patch); iOS simulator before each release | pending |
 | P8 | Public repository: a README for first-time visitors with a verified comparison table, LICENSE, SECURITY.md, CONTRIBUTING.md, issue and PR templates, and package metadata (nothing published) | pending |
-| P9 | npm releases with provenance | pending |
+| P9 | npm releases with provenance | done |
