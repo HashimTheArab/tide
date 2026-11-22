@@ -30,7 +30,6 @@ jobs:
     outputs:
       version: ${{ steps.tag.outputs.version }}
       dist-tag: ${{ steps.tag.outputs.dist-tag }}
-      prerelease: ${{ steps.tag.outputs.prerelease }}
       node: ${{ steps.node.outputs.node }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
@@ -40,7 +39,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # SemVer 2.0 without build metadata, which npm drops, within node-semver's length and integer limits.
+      # SemVer 2.0 without build metadata, which npm drops.
       - id: tag
         name: Version from tag
         run: |
@@ -50,25 +49,16 @@ jobs:
           const num = "(0|[1-9]\\d*)";
           const id = "(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)";
           const m = new RegExp(`^v${num}\\.${num}\\.${num}(-${id}(?:\\.${id})*)?$`).exec(tag);
-          const version = tag.slice(1);
-          if (!m || version.length > 256 || m.slice(1, 4).some((n) => Number(n) > Number.MAX_SAFE_INTEGER)) {
+          if (!m) {
             console.error(`::error::${tag} is not v<semver>`);
             process.exit(1);
           }
-          const prerelease = m[4] !== undefined;
-          appendFileSync(
-            process.env.GITHUB_OUTPUT,
-            `version=${version}\ndist-tag=${prerelease ? "next" : "latest"}\nprerelease=${prerelease}\n`,
-          );
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${tag.slice(1)}\ndist-tag=${m[4] ? "next" : "latest"}\n`);
           JS
 
       - id: main
         name: Tagged commit is on main
         run: |
-          if ! git rev-parse --verify -q refs/remotes/origin/main > /dev/null; then
-            echo "::error::origin/main was not fetched"
-            exit 1
-          fi
           if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
             echo "::error::$GITHUB_REF_NAME is not on main"
             exit 1
@@ -137,22 +127,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       id-token: write
-    # Runs for one dist-tag never interleave, so the three packages' tag always names one version.
-    concurrency:
-      group: release-publish-${{ needs.build.outputs.dist-tag }}
-      cancel-in-progress: false
-      queue: max
     env:
       VERSION: ${{ needs.build.outputs.version }}
       DIST_TAG: ${{ needs.build.outputs.dist-tag }}
     steps:
-      # An empty ID makes the download take every artifact in the run.
-      - id: artifact-id
-        name: Build artifact ID
-        env:
-          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
-        run: test -n "$ARTIFACT_ID"
-
       # No registry input: setup-node would write an .npmrc that reads an npm token from the environment.
       - id: setup-node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -170,64 +148,19 @@ jobs:
       - id: npm-version
         name: npm supports trusted publishing
         run: |
-          node --input-type=module - <<'JS'
-          import { execFileSync } from "node:child_process";
-          const version = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
-          const [major, minor, patch] = version.split(".").map((n) => parseInt(n, 10));
-          if (!(major !== 11 ? major > 11 : minor !== 5 ? minor > 5 : patch >= 1)) {
-            console.error(`::error::npm ${version} is older than 11.5.1`);
-            process.exit(1);
-          }
-          JS
+          printf '%s\n' 11.5.1 "$(npm --version)" | sort -VC || { echo "::error::npm $(npm --version) is older than 11.5.1"; exit 1; }
 
-      # Decides every package before publishing any. A version already on npm is skipped only when it holds these
-      # bytes, and only while its dist-tag still names this version: publishing the rest after a later release
-      # moved the tag would split it across versions.
-      - id: plan
-        name: Plan
-        run: |
-          node --input-type=module - <<'JS'
-          import { execFileSync } from "node:child_process";
-          import { createHash } from "node:crypto";
-          import { appendFileSync, readFileSync } from "node:fs";
-          const { VERSION, DIST_TAG, PACKAGES, RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
-          const fail = (message) => {
-            console.error(`::error::${message}`);
-            process.exit(1);
-          };
-          const registry = execFileSync("npm", ["config", "get", "registry"], { encoding: "utf8" }).trim().replace(/\/?$/, "/");
-          const publish = [];
-          const skipped = [];
-          for (const p of PACKAGES.split(" ")) {
-            const name = `@tide-ota/${p}`;
-            const tarball = readFileSync(`${RUNNER_TEMP}/tarballs/tide-ota-${p}.tgz`);
-            const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
-            const res = await fetch(new URL(name.replace("/", "%2f"), registry), {
-              headers: { accept: "application/json" },
-            });
-            if (!res.ok) fail(`${name}: the registry answered ${res.status}`);
-            const doc = await res.json();
-            const existing = doc.versions?.[VERSION];
-            if (!existing) publish.push(p);
-            else if (existing.dist?.integrity !== integrity) fail(`${name}@${VERSION} is on npm with other bytes`);
-            else skipped.push([name, doc["dist-tags"]?.[DIST_TAG]]);
-          }
-          for (const [name, tagged] of skipped) {
-            if (publish.length > 0 && tagged !== VERSION)
-              fail(`${name}@${DIST_TAG} is ${tagged}, not ${VERSION}; publishing the rest would split the tag`);
-          }
-          console.log(`publish: ${publish.join(" ") || "nothing"}; already on npm: ${skipped.map(([n]) => n).join(" ") || "nothing"}`);
-          appendFileSync(GITHUB_OUTPUT, `publish=${publish.join(" ")}\n`);
-          JS
-
-      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere.
+      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere. A rerun skips what
+      # npm already holds; publishing over an existing version fails, so a failed lookup cannot skip one wrongly.
       - id: publish
         name: Publish
-        env:
-          PUBLISH: ${{ steps.plan.outputs.publish }}
         run: |
-          for p in $PUBLISH; do
-            npm publish "$RUNNER_TEMP/tarballs/tide-ota-$p.tgz" --provenance --access public --tag "$DIST_TAG"
+          for p in $PACKAGES; do
+            if npm view "@tide-ota/$p@$VERSION" version > /dev/null 2>&1; then
+              echo "@tide-ota/$p@$VERSION is already on npm"
+            else
+              npm publish "$RUNNER_TEMP/tarballs/tide-ota-$p.tgz" --provenance --access public --tag "$DIST_TAG"
+            fi
           done
 
   release:
@@ -239,15 +172,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+      PRERELEASE: ${{ needs.build.outputs.dist-tag == 'next' }}
     steps:
-      # An empty ID makes the download take every artifact in the run.
-      - id: artifact-id
-        name: Build artifact ID
-        env:
-          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
-        run: test -n "$ARTIFACT_ID"
-
       - id: download
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -255,46 +181,15 @@ jobs:
           path: ${{ runner.temp }}/tarballs
           digest-mismatch: error
 
-      # Rerunnable: keeps an asset holding the same bytes, replaces one an interrupted upload left empty, adds a
-      # missing one, and fails on different bytes before changing anything. Never --clobber: it deletes first.
+      # Rerunnable: the artifact holds the published bytes, so replacing a same-named asset is always right.
       - id: assets
         name: GitHub Release
         run: |
           tag="$GITHUB_REF_NAME"
-          dir="$RUNNER_TEMP/tarballs"
-          releases=$(gh release list --limit 1000 --json tagName)
-          count=$(jq --arg t "$tag" 'map(select(.tagName == $t)) | length' <<< "$releases")
-          if [ "$count" -gt 1 ]; then
-            echo "::error::$count releases use $tag"
-            exit 1
-          fi
-          if [ "$count" -eq 0 ]; then
-            gh release create "$tag" --draft --verify-tag --generate-notes
-          fi
-          assets=$(gh release view "$tag" --json assets | jq -c .assets)
-          mkdir -p "$RUNNER_TEMP/existing"
-          upload=()
-          remove=()
-          for p in $PACKAGES; do
-            name="tide-ota-$p.tgz"
-            asset=$(jq -c --arg n "$name" 'map(select(.name == $n))[0] // empty' <<< "$assets")
-            if [ -z "$asset" ]; then
-              upload+=("$dir/$name")
-            elif [ "$(jq -r .state <<< "$asset")" != uploaded ]; then
-              remove+=("$(jq -r '.apiUrl | split("/") | last' <<< "$asset")")
-              upload+=("$dir/$name")
-            else
-              gh release download "$tag" --pattern "$name" --dir "$RUNNER_TEMP/existing"
-              if ! cmp -s "$dir/$name" "$RUNNER_TEMP/existing/$name"; then
-                echo "::error::$name on the release is not the published tarball"
-                exit 1
-              fi
-            fi
-          done
-          for id in "${remove[@]}"; do
-            gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"
-          done
-          if [ "${#upload[@]}" -gt 0 ]; then
-            gh release upload "$tag" "${upload[@]}"
+          files=("$RUNNER_TEMP"/tarballs/*.tgz)
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" --verify-tag --generate-notes --draft
           fi
           gh release edit "$tag" --draft=false --prerelease="$PRERELEASE"

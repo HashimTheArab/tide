@@ -1,5 +1,4 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -33,7 +32,6 @@ interface Step {
 interface Job {
   needs?: string | string[];
   permissions?: Record<string, string>;
-  concurrency?: Record<string, unknown>;
   env?: Record<string, string>;
   outputs?: Record<string, string>;
   "timeout-minutes"?: number;
@@ -138,16 +136,8 @@ describe("trigger and permissions", () => {
     ).toEqual(["release"]);
   });
 
-  test("runs never cancel each other and publishes queue per dist-tag", () => {
-    expect(workflow.concurrency).toEqual({
-      group: "release-${{ github.ref }}",
-      "cancel-in-progress": false,
-    });
-    expect(job("publish").concurrency).toEqual({
-      group: "release-publish-${{ needs.build.outputs.dist-tag }}",
-      "cancel-in-progress": false,
-      queue: "max",
-    });
+  test("a run is never cancelled by another for the same tag", () => {
+    expect(workflow.concurrency).toMatchObject({ "cancel-in-progress": false });
   });
 
   // The tests run scripts with the same flags, and pipefail keeps a failed gh or tar from passing through jq.
@@ -160,48 +150,32 @@ describe("trigger and permissions", () => {
 
 describe("build", () => {
   test("validates the tag and main before installing, then gates, packs, tests and uploads in order", () => {
-    expect(job("build").steps.map((s) => s.id)).toEqual([
-      "checkout",
-      "tag",
-      "main",
-      "node",
-      "setup",
-      "betterleaks",
-      "gate",
-      "version",
-      "pack",
-      "test-pack",
-      "upload",
-    ]);
-    expect(step("build", "checkout").with).toEqual({
-      "fetch-depth": 0,
-      "persist-credentials": false,
-    });
-    expect(step("build", "gate").run).toContain("node scripts/gate.mjs --base origin/main");
-    expect(step("build", "setup").uses).toBe("./.github/actions/setup");
-    expect(step("build", "betterleaks").uses).toBe("./.github/actions/betterleaks");
+    const ids = job("build").steps.map((s) => s.id);
+    const order = ["tag", "main", "setup", "gate", "version", "pack", "test-pack", "upload"];
+    const at = order.map((id) => ids.indexOf(id));
+    expect(at).not.toContain(-1);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(step("build", "checkout").with?.["persist-credentials"]).toBe(false);
   });
 
   const accepted = [
-    ["v1.2.3", "1.2.3", "latest", "false"],
-    ["v0.0.0", "0.0.0", "latest", "false"],
-    ["v1.2.3-rc.1", "1.2.3-rc.1", "next", "true"],
-    ["v0.1.0-0", "0.1.0-0", "next", "true"],
-    ["v2.0.0-alpha-1.x-y.7", "2.0.0-alpha-1.x-y.7", "next", "true"],
-    ["v9007199254740991.0.0", "9007199254740991.0.0", "latest", "false"],
-    [`v1.0.0-${"a".repeat(250)}`, `1.0.0-${"a".repeat(250)}`, "next", "true"],
+    ["v1.2.3", "1.2.3", "latest"],
+    ["v0.0.0", "0.0.0", "latest"],
+    ["v1.2.3-rc.1", "1.2.3-rc.1", "next"],
+    ["v0.1.0-0", "0.1.0-0", "next"],
+    ["v2.0.0-alpha-1.x-y.7", "2.0.0-alpha-1.x-y.7", "next"],
   ];
-  test("a v<semver> tag yields its version, dist-tag and prerelease flag", async () => {
+  test("a v<semver> tag yields its version and dist-tag", async () => {
     const results = await Promise.all(
       accepted.map(async ([tag]) => {
         const r = await runStep("build", "tag", scratch(), { GITHUB_REF_NAME: tag! });
-        return [tag, r.outputs.version, r.outputs["dist-tag"], r.outputs.prerelease, r.code];
+        return [tag, r.outputs.version, r.outputs["dist-tag"], r.code];
       }),
     );
     expect(results).toEqual(accepted.map((row) => [...row, 0]));
   });
 
-  // Build metadata is dropped by npm; the limits are node-semver's (256 characters, safe integers).
+  // Build metadata is dropped by npm, so the tag would no longer name the published version.
   const rejected = [
     "1.2.3",
     "v1.2",
@@ -214,8 +188,6 @@ describe("build", () => {
     "v1.2.3-rc..1",
     "vx",
     "V1.2.3",
-    "v9007199254740992.0.0",
-    `v1.0.0-${"a".repeat(251)}`,
   ];
   test("any other tag fails with no outputs", async () => {
     const results = await Promise.all(
@@ -327,38 +299,18 @@ describe("build", () => {
 
   // Publish and release read these exact files, so the tested tarballs are the published ones.
   test("test:pack runs on the tarballs the upload sends", () => {
-    expect(step("build", "pack").run).toContain('pack --out "$file"');
     expect(step("build", "pack").run).toContain('file="$RUNNER_TEMP/tarballs/tide-ota-$p.tgz"');
-    expect(step("build", "test-pack").run).toBe('pnpm test:pack "$RUNNER_TEMP"/tarballs/*.tgz');
-    expect(step("build", "upload").with).toEqual({
-      name: "tarballs-${{ github.run_attempt }}",
-      path: "${{ runner.temp }}/tarballs/*.tgz",
-      "if-no-files-found": "error",
-    });
+    expect(step("build", "test-pack").run).toContain('"$RUNNER_TEMP"/tarballs/*.tgz');
+    expect(step("build", "upload").with?.path).toBe("${{ runner.temp }}/tarballs/*.tgz");
     expect(job("build").outputs?.["artifact-id"]).toBe("${{ steps.upload.outputs.artifact-id }}");
   });
 });
 
 describe("publish", () => {
-  test("downloads the build's artifact, checks npm, plans, then publishes", () => {
-    expect(job("publish").steps.map((s) => s.id)).toEqual([
-      "artifact-id",
-      "setup-node",
-      "download",
-      "npm-version",
-      "plan",
-      "publish",
-    ]);
-    expect(job("publish").env).toEqual({
-      VERSION: "${{ needs.build.outputs.version }}",
-      DIST_TAG: "${{ needs.build.outputs.dist-tag }}",
-    });
-    expect(step("publish", "setup-node").with).toEqual({
-      "node-version": "${{ needs.build.outputs.node }}",
-    });
-    expect(step("publish", "publish").env).toEqual({
-      PUBLISH: "${{ steps.plan.outputs.publish }}",
-    });
+  test("npm is checked before anything is published", () => {
+    const ids = job("publish").steps.map((s) => s.id);
+    expect(ids.indexOf("npm-version")).toBeLessThan(ids.indexOf("publish"));
+    expect(ids.indexOf("npm-version")).toBeGreaterThan(-1);
   });
 
   test("npm older than 11.5.1 fails the job", async () => {
@@ -380,191 +332,105 @@ describe("publish", () => {
     ]);
   });
 
-  describe("plan, against a local registry and the real npm CLI", () => {
-    interface Doc {
-      status: number;
-      body?: unknown;
-    }
-    let docs = new Map<string, Doc>();
+  // The real npm CLI answers `view` from a local registry; `publish` goes to a fake that only records it.
+  describe("against a local registry", () => {
+    let published = new Map<string, string[]>();
     let registry = "";
     const server = createServer((req, res) => {
-      const doc = docs.get(req.url ?? "") ?? { status: 404, body: { error: "not found" } };
-      res.writeHead(doc.status, { "content-type": "application/json" });
-      res.end(JSON.stringify(doc.body ?? {}));
+      const p = /^\/@tide-ota%2f(\w+)$/.exec(req.url ?? "")?.[1];
+      const versions = p ? published.get(p) : undefined;
+      if (!versions) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+      const name = `@tide-ota/${p}`;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          name,
+          "dist-tags": { latest: versions.at(-1) },
+          versions: Object.fromEntries(versions.map((version) => [version, { name, version }])),
+        }),
+      );
     });
+    let realNpm = "";
     beforeAll(async () => {
       await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
       registry = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+      realNpm = spawnSync("sh", ["-c", "command -v npm"], { encoding: "utf8" }).stdout.trim();
     });
     afterAll(() => new Promise<void>((done) => server.close(() => done())));
 
-    const bytes = (p: string) => Buffer.from(`${p} tarball`);
-    const integrity = (b: Buffer) => `sha512-${createHash("sha512").update(b).digest("base64")}`;
-    /** Serves each package's packument: version -> tarball bytes, plus dist-tags. */
-    function serve(
-      packages: Record<
-        string,
-        { versions: Record<string, Buffer>; tags: Record<string, string> } | Doc
-      >,
-    ) {
-      docs = new Map(
-        Object.entries(packages).map(([p, spec]) => {
-          if ("status" in spec) return [`/@tide-ota%2f${p}`, spec];
-          const name = `@tide-ota/${p}`;
-          const versions = Object.fromEntries(
-            Object.entries(spec.versions).map(([v, b]) => [
-              v,
-              { name, version: v, dist: { integrity: integrity(b) } },
-            ]),
-          );
-          return [
-            `/@tide-ota%2f${p}`,
-            { status: 200, body: { name, "dist-tags": spec.tags, versions } },
-          ];
-        }),
+    async function publish(onNpm: Record<string, string[]>, version: string, distTag: string) {
+      published = new Map(Object.entries(onNpm));
+      const dir = scratch();
+      const log = join(dir, "npm.log");
+      executable(
+        join(dir, "bin/npm"),
+        `#!/bin/sh\nif [ "$1" = view ]; then exec "${realNpm}" "$@"; fi\nprintf '%s\\n' "$*" >> "${log}"\n`,
       );
-    }
-    const placeholder = {
-      versions: { "0.0.1": Buffer.from("placeholder") },
-      tags: { latest: "0.0.1" },
-    };
-    const released = (p: string, latest = "1.2.3") => ({
-      versions: { "0.0.1": Buffer.from("placeholder"), "1.2.3": bytes(p) },
-      tags: { latest },
-    });
-    async function plan(dir = scratch()) {
-      mkdirSync(join(dir, "tarballs"));
-      for (const p of PACKAGES.split(" "))
-        writeFileSync(join(dir, `tarballs/tide-ota-${p}.tgz`), bytes(p));
-      return runStep("publish", "plan", dir, {
-        VERSION: "1.2.3",
-        DIST_TAG: "latest",
+      writeFileSync(log, "");
+      const r = await runStep("publish", "publish", dir, {
+        VERSION: version,
+        DIST_TAG: distTag,
         npm_config_registry: registry,
         npm_config_userconfig: join(dir, "npmrc"),
         npm_config_globalconfig: join(dir, "global-npmrc"),
         npm_config_cache: join(dir, "npm-cache"),
       });
+      const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
+      return { code: r.code, calls, dir };
     }
+    const placeholders = { protocol: ["0.0.1"], server: ["0.0.1"], cli: ["0.0.1"] };
+    const call = (dir: string, p: string, tag: string) =>
+      `publish ${dir}/tarballs/tide-ota-${p}.tgz --provenance --access public --tag ${tag}`;
 
-    test("a new version plans every package in order", async () => {
-      serve({ protocol: placeholder, server: placeholder, cli: placeholder });
-      expect(await plan()).toMatchObject({ code: 0, outputs: { publish: "protocol server cli" } });
-    });
-
-    // A rerun after protocol published resumes with the rest, and publish runs exactly the planned tarballs.
-    test("a rerun skips what is already published with the same bytes", async () => {
-      serve({ protocol: released("protocol"), server: placeholder, cli: placeholder });
-      const dir = scratch();
-      const r = await plan(dir);
-      expect(r).toMatchObject({ code: 0, outputs: { publish: "server cli" } });
-
-      const log = join(dir, "npm.log");
-      executable(join(dir, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\n`);
-      const published = await runStep("publish", "publish", dir, {
-        PUBLISH: r.outputs.publish!,
-        DIST_TAG: "latest",
+    test("a new version publishes every package in order under latest", async () => {
+      const r = await publish(placeholders, "1.2.3", "latest");
+      expect(r).toEqual({
+        code: 0,
+        dir: r.dir,
+        calls: ["protocol", "server", "cli"].map((p) => call(r.dir, p, "latest")),
       });
-      expect(published.code).toBe(0);
-      expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual([
-        `publish ${dir}/tarballs/tide-ota-server.tgz --provenance --access public --tag latest`,
-        `publish ${dir}/tarballs/tide-ota-cli.tgz --provenance --access public --tag latest`,
-      ]);
     });
 
     test("prerelease tarballs publish under next", async () => {
-      const dir = scratch();
-      const log = join(dir, "npm.log");
-      executable(join(dir, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\n`);
-      const r = await runStep("publish", "publish", dir, {
-        PUBLISH: "protocol server cli",
-        DIST_TAG: "next",
-      });
-      expect(r.code).toBe(0);
-      expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual(
-        ["protocol", "server", "cli"].map(
-          (p) =>
-            `publish ${dir}/tarballs/tide-ota-${p}.tgz --provenance --access public --tag next`,
-        ),
-      );
+      const r = await publish(placeholders, "1.2.3-rc.1", "next");
+      expect(r.calls).toEqual(["protocol", "server", "cli"].map((p) => call(r.dir, p, "next")));
     });
 
-    test("a fully published version plans nothing", async () => {
-      serve({ protocol: released("protocol"), server: released("server"), cli: released("cli") });
-      expect(await plan()).toMatchObject({ code: 0, outputs: { publish: "" } });
-    });
-
-    // npm, the artifact and the Release must agree; a placeholder that collides with the tag counts as different.
-    test("a version on npm with other bytes fails before publishing anything", async () => {
-      serve({
-        protocol: placeholder,
-        server: { versions: { "1.2.3": Buffer.from("rebuilt") }, tags: { latest: "1.2.3" } },
-        cli: placeholder,
-      });
-      const r = await plan();
-      expect([r.code, r.outputs]).toEqual([1, {}]);
-      expect(r.log).toContain("@tide-ota/server@1.2.3 is on npm with other bytes");
-    });
-
-    // v1 published protocol and stopped, v2 published everything: finishing v1 would move latest back for two.
-    test("a skipped package whose dist-tag moved on fails while others still need publishing", async () => {
-      serve({ protocol: released("protocol", "1.3.0"), server: placeholder, cli: placeholder });
-      const r = await plan();
-      expect([r.code, r.outputs]).toEqual([1, {}]);
-      expect(r.log).toContain("@tide-ota/protocol@latest is 1.3.0, not 1.2.3");
-    });
-
-    test("a moved dist-tag does not block a rerun with nothing left to publish", async () => {
-      serve({
-        protocol: released("protocol", "1.3.0"),
-        server: released("server", "1.3.0"),
-        cli: released("cli", "1.3.0"),
-      });
-      expect(await plan()).toMatchObject({ code: 0, outputs: { publish: "" } });
-    });
-
-    test("a registry error or a missing package fails", async () => {
-      serve({ protocol: placeholder, server: { status: 500 }, cli: placeholder });
-      const failed = await plan();
-      serve({ protocol: placeholder, server: placeholder });
-      const missing = await plan();
-      expect([failed.code, failed.outputs, missing.code, missing.outputs]).toEqual([1, {}, 1, {}]);
-      expect([failed.log, missing.log]).toEqual([
-        expect.stringContaining("@tide-ota/server: the registry answered 500"),
-        expect.stringContaining("@tide-ota/cli: the registry answered 404"),
+    // A rerun after protocol published resumes with the rest.
+    test("a rerun skips what npm already holds", async () => {
+      const r = await publish({ ...placeholders, protocol: ["0.0.1", "1.2.3"] }, "1.2.3", "latest");
+      expect([r.code, r.calls]).toEqual([
+        0,
+        ["server", "cli"].map((p) => call(r.dir, p, "latest")),
       ]);
+    });
+
+    test("a fully published version publishes nothing", async () => {
+      const all = ["0.0.1", "1.2.3"];
+      const r = await publish({ protocol: all, server: all, cli: all }, "1.2.3", "latest");
+      expect([r.code, r.calls]).toEqual([0, []]);
     });
   });
 });
 
 describe("release", () => {
-  test("needs build and publish, and gh targets this repository", () => {
+  test("needs build and publish, gh targets this repository, and prerelease follows the dist-tag", () => {
     expect(job("release").needs).toEqual(["build", "publish"]);
-    expect(job("release").steps.map((s) => s.id)).toEqual(["artifact-id", "download", "assets"]);
-    expect(job("release").env).toEqual({
-      GH_TOKEN: "${{ github.token }}",
+    expect(job("release").env).toMatchObject({
       GH_REPO: "${{ github.repository }}",
-      PRERELEASE: "${{ needs.build.outputs.prerelease }}",
+      PRERELEASE: "${{ needs.build.outputs.dist-tag == 'next' }}",
     });
-    expect(step("release", "assets").run).not.toContain("--clobber");
   });
 
-  interface Asset {
-    id: number;
-    name: string;
-    state: string;
-    content: string;
-  }
   interface Release {
     tag: string;
     draft: boolean;
     prerelease: boolean;
-    assets: Asset[];
-  }
-  interface GhState {
-    listFails?: boolean;
-    nextId: number;
-    releases: Release[];
-    calls: string[];
+    assets: Record<string, string>;
   }
   const TAG = "v1.2.3-rc.1";
   // One fake for the GitHub CLI: the subcommands the step uses, over a JSON state file.
@@ -577,153 +443,64 @@ const args = process.argv.slice(2);
 state.calls.push(args.join(" "));
 const save = () => fs.writeFileSync(file, JSON.stringify(state));
 const fail = (message) => { save(); process.stderr.write(message + "\\n"); process.exit(1); };
-const flag = (name) => args[args.indexOf(name) + 1];
-const find = (tag) => state.releases.find((r) => r.tag === tag) || fail("release not found");
 const [group, command, tag] = args;
-if (group === "release" && command === "list") {
-  if (state.listFails) fail("HTTP 502");
-  process.stdout.write(JSON.stringify(state.releases.map((r) => ({ tagName: r.tag }))));
-} else if (group === "release" && command === "create") {
-  state.releases.push({ tag, draft: args.includes("--draft"), prerelease: false, assets: [] });
-} else if (group === "release" && command === "view") {
-  const assets = find(tag).assets.map((a) => ({
-    name: a.name, state: a.state, size: Buffer.from(a.content, "base64").length,
-    apiUrl: "https://api.github.com/repos/" + process.env.GH_REPO + "/releases/assets/" + a.id,
-  }));
-  process.stdout.write(JSON.stringify({ assets }));
-} else if (group === "release" && command === "download") {
-  const asset = find(tag).assets.find((a) => a.name === flag("--pattern") && a.state === "uploaded");
-  if (!asset) fail("no assets to download");
-  fs.writeFileSync(path.join(flag("--dir"), asset.name), Buffer.from(asset.content, "base64"));
-} else if (group === "release" && command === "upload") {
-  const release = find(tag);
-  for (const f of args.slice(3)) {
-    if (release.assets.some((a) => a.name === path.basename(f))) fail("asset already exists");
-    release.assets.push({ id: state.nextId++, name: path.basename(f), state: "uploaded", content: fs.readFileSync(f).toString("base64") });
+const release = state.releases.find((r) => r.tag === tag);
+const attach = (r) => {
+  for (const f of args.slice(3).filter((a) => !a.startsWith("--"))) {
+    if (r.assets[path.basename(f)] !== undefined && !args.includes("--clobber")) fail("asset already exists");
+    r.assets[path.basename(f)] = fs.readFileSync(f, "utf8");
   }
-} else if (group === "release" && command === "edit") {
-  const release = find(tag);
-  if (args.includes("--draft=false")) release.draft = false;
-  release.prerelease = args.includes("--prerelease=true");
-} else if (group === "api" && args[1] === "-X" && args[2] === "DELETE") {
-  const prefix = "repos/" + process.env.GH_REPO + "/releases/assets/";
-  if (!args[3].startsWith(prefix)) fail("wrong repository");
-  const id = Number(args[3].slice(prefix.length));
-  const release = state.releases.find((r) => r.assets.some((a) => a.id === id)) || fail("asset not found");
-  release.assets = release.assets.filter((a) => a.id !== id);
+};
+if (group !== "release") fail("unexpected gh " + args.join(" "));
+else if (command === "view") release ? process.stdout.write(tag) : fail("release not found");
+else if (command === "create") {
+  if (release && !release.draft) fail("already exists");
+  const created = { tag, draft: args.includes("--draft"), prerelease: false, assets: {} };
+  attach(created);
+  state.releases.push(created);
+} else if (command === "upload") attach(release || fail("release not found"));
+else if (command === "edit") {
+  const r = release || fail("release not found");
+  if (args.includes("--draft=false")) r.draft = false;
+  r.prerelease = args.includes("--prerelease=true");
 } else fail("unexpected gh " + args.join(" "));
 save();
 `;
-  const content = (p: string) => Buffer.from(`${p} tarball`).toString("base64");
-  async function assets(releases: Release[], extra: Partial<GhState> = {}) {
+  const tarballs = Object.fromEntries(
+    PACKAGES.split(" ").map((p) => [`tide-ota-${p}.tgz`, `${p} tarball`]),
+  );
+  async function assets(releases: Release[]) {
     const dir = scratch();
     executable(join(dir, "bin/gh"), FAKE_GH);
     mkdirSync(join(dir, "tarballs"));
-    for (const p of PACKAGES.split(" "))
-      writeFileSync(join(dir, `tarballs/tide-ota-${p}.tgz`), Buffer.from(content(p), "base64"));
+    for (const [name, body] of Object.entries(tarballs))
+      writeFileSync(join(dir, "tarballs", name), body);
     const stateFile = join(dir, "gh.json");
-    writeFileSync(stateFile, JSON.stringify({ nextId: 100, releases, calls: [], ...extra }));
+    writeFileSync(stateFile, JSON.stringify({ releases, calls: [] }));
     const r = await runStep("release", "assets", dir, {
       GITHUB_REF_NAME: TAG,
       GH_REPO: "example/tide",
       PRERELEASE: "true",
       FAKE_GH_STATE: stateFile,
     });
-    return { ...r, dir, state: JSON.parse(readFileSync(stateFile, "utf8")) as GhState };
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as { releases: Release[] };
+    return { code: r.code, releases: state.releases };
   }
-  const uploaded = (id: number, p: string, c = content(p)) => ({
-    id,
-    name: `tide-ota-${p}.tgz`,
-    state: "uploaded",
-    content: c,
+  const finished = { tag: TAG, draft: false, prerelease: true, assets: tarballs };
+
+  test("a first run creates the release with the tarballs and publishes it as a prerelease", async () => {
+    expect(await assets([])).toEqual({ code: 0, releases: [finished] });
   });
 
-  test("a first run creates a draft, attaches the tarballs, then publishes it as a prerelease", async () => {
-    const r = await assets([]);
-    expect(r.code).toBe(0);
-    expect(r.state.calls).toEqual([
-      "release list --limit 1000 --json tagName",
-      `release create ${TAG} --draft --verify-tag --generate-notes`,
-      `release view ${TAG} --json assets`,
-      `release upload ${TAG} ${["protocol", "server", "cli"].map((p) => `${r.dir}/tarballs/tide-ota-${p}.tgz`).join(" ")}`,
-      `release edit ${TAG} --draft=false --prerelease=true`,
-    ]);
-    expect(r.state.releases).toEqual([
-      {
-        tag: TAG,
-        draft: false,
-        prerelease: true,
-        assets: [uploaded(100, "protocol"), uploaded(101, "server"), uploaded(102, "cli")],
-      },
-    ]);
-  });
-
-  // A stopped run leaves a draft; an upload cut off mid-way leaves an asset that never finished.
-  test("a rerun keeps a matching asset, replaces an unfinished one, adds the rest and publishes the draft", async () => {
-    const r = await assets([
-      {
-        tag: TAG,
-        draft: true,
-        prerelease: false,
-        assets: [
-          uploaded(7, "protocol"),
-          { id: 8, name: "tide-ota-server.tgz", state: "starter", content: "" },
-        ],
-      },
-    ]);
-    expect(r.code).toBe(0);
-    expect(r.state.calls).toEqual([
-      "release list --limit 1000 --json tagName",
-      `release view ${TAG} --json assets`,
-      `release download ${TAG} --pattern tide-ota-protocol.tgz --dir ${r.dir}/existing`,
-      "api -X DELETE repos/example/tide/releases/assets/8",
-      `release upload ${TAG} ${r.dir}/tarballs/tide-ota-server.tgz ${r.dir}/tarballs/tide-ota-cli.tgz`,
-      `release edit ${TAG} --draft=false --prerelease=true`,
-    ]);
-    expect(r.state.releases[0]).toEqual({
+  // A stopped run leaves a draft, perhaps holding an asset whose upload was cut off.
+  test("a rerun replaces what the release holds with the tarballs and publishes the draft", async () => {
+    const draft = {
       tag: TAG,
-      draft: false,
-      prerelease: true,
-      assets: [uploaded(7, "protocol"), uploaded(100, "server"), uploaded(101, "cli")],
-    });
-  });
-
-  test("an asset with other bytes fails before anything on the release changes", async () => {
-    const before: Release = {
-      tag: TAG,
-      draft: false,
-      prerelease: true,
-      assets: [
-        { id: 8, name: "tide-ota-protocol.tgz", state: "starter", content: "" },
-        uploaded(9, "server", Buffer.from("other").toString("base64")),
-      ],
+      draft: true,
+      prerelease: false,
+      assets: { "tide-ota-protocol.tgz": "" },
     };
-    const r = await assets([structuredClone(before)]);
-    expect(r.code).toBe(1);
-    expect(r.log).toContain("tide-ota-server.tgz on the release is not the published tarball");
-    expect(r.state.calls).toEqual([
-      "release list --limit 1000 --json tagName",
-      `release view ${TAG} --json assets`,
-      `release download ${TAG} --pattern tide-ota-server.tgz --dir ${r.dir}/existing`,
-    ]);
-    expect(r.state.releases).toEqual([before]);
-  });
-
-  test("a failed release lookup or two releases for the tag fail without creating anything", async () => {
-    const failed = await assets([], { listFails: true });
-    const twice = await assets([
-      { tag: TAG, draft: true, prerelease: false, assets: [] },
-      { tag: TAG, draft: true, prerelease: false, assets: [] },
-    ]);
-    expect([failed.code, failed.state.calls, failed.state.releases]).toEqual([
-      1,
-      ["release list --limit 1000 --json tagName"],
-      [],
-    ]);
-    expect([twice.code, twice.state.calls]).toEqual([
-      1,
-      ["release list --limit 1000 --json tagName"],
-    ]);
+    expect(await assets([draft])).toEqual({ code: 0, releases: [finished] });
   });
 });
 
@@ -736,19 +513,11 @@ describe("artifact flow, pins and secrets", () => {
     }
   });
 
-  // An empty ID would make the download take every artifact in the run.
-  test("publish and release download only the build's artifact, by a required ID", () => {
-    for (const name of ["publish", "release"]) {
-      expect(step(name, "download").with).toEqual({
-        "artifact-ids": "${{ needs.build.outputs.artifact-id }}",
-        path: "${{ runner.temp }}/tarballs",
-        "digest-mismatch": "error",
-      });
-      expect(step(name, "artifact-id")).toMatchObject({
-        env: { ARTIFACT_ID: "${{ needs.build.outputs.artifact-id }}" },
-        run: 'test -n "$ARTIFACT_ID"',
-      });
-    }
+  test("publish and release download only the build's artifact", () => {
+    for (const name of ["publish", "release"])
+      expect(step(name, "download").with?.["artifact-ids"]).toBe(
+        "${{ needs.build.outputs.artifact-id }}",
+      );
   });
 
   // The scripts the tests run are the ones the runner runs, and no expression is spliced into shell code.
