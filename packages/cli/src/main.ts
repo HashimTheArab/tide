@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { CERTIFICATE_USAGE, certificate } from "./certificate.ts";
 import { EXPORT_USAGE, exportProject } from "./export.ts";
 import { PROBE_USAGE, probe } from "./probe.ts";
 import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
@@ -10,7 +11,7 @@ import { status } from "./status.ts";
 import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}`;
+const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}\n${CERTIFICATE_USAGE}`;
 // Commands that parse arguments and read their own configuration.
 const COMMANDS = {
   export: exportProject,
@@ -19,6 +20,7 @@ const COMMANDS = {
   republish,
   "register-build": registerBuild,
   probe,
+  certificate,
 };
 const READERS = { status, storage };
 

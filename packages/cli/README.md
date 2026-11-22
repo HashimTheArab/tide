@@ -21,10 +21,20 @@ npx tide publish --from <dir> --channel main        # signs and uploads; runs no
 `tide publish` signs with a key from `TIDE_SIGNING_KEY_FILE`, `TIDE_SIGNING_KEY` or AWS KMS (`TIDE_KMS_*`), checks
 every signature against your app's certificate, and writes to the bucket named by `TIDE_S3_*` or `TIDE_DISK_DIR`.
 
+## Certificate
+
+Your app trusts one code-signing certificate. `tide certificate --common-name <name> --validity-years <n>` makes it
+with the same signing key, so a key created inside AWS KMS never leaves it. It reads only the signing key variables,
+prints the certificate on stdout and its SHA-256 on stderr, and writes no file itself.
+
+It holds your signing key, so never run it with your app's own `npx tide`. Install Tide outside your app and check it
+first, as in [Signing identity](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#setting-up-an-environment).
+
 ## Other commands
 
 | Command                         | What it does                                                |
 | ------------------------------- | ----------------------------------------------------------- |
+| `tide certificate`              | Makes your app's code-signing certificate with your key     |
 | `tide register-build`           | Lets fresh installs get a patch instead of the whole bundle |
 | `tide rollback --embedded`      | Sends apps back to the bundle inside the store build        |
 | `tide rollback --to <updateId>` | Serves an earlier update again                              |

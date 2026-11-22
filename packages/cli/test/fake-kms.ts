@@ -1,8 +1,8 @@
-import { constants, createHash, privateEncrypt } from "node:crypto";
+import { constants, createHash, createPublicKey, privateEncrypt } from "node:crypto";
 import { createServer } from "node:http";
 import type { KeyObject } from "node:crypto";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 
 import { signV4 } from "@tide-ota/protocol";
 
@@ -24,8 +24,11 @@ export type KmsFault =
   | "stall" // 200 headers flushed, then no body
   | "oversize"; // 200 chunked, longer than any KMS reply
 
-/** A request the fake accepted, as received. */
+type Operation = "Sign" | "GetPublicKey";
+
+/** A request whose signature verified, as received. */
 interface Received {
+  readonly target: Operation; // From x-amz-target.
   readonly headers: IncomingHttpHeaders;
   readonly body: Uint8Array<ArrayBuffer>;
 }
@@ -34,11 +37,13 @@ export interface FakeKms {
   readonly endpoint: string;
   /** Every request that reached the fake, including one refused for its signature. */
   readonly requests: number;
-  /** The last request whose signature verified. */
+  /** Every request whose signature verified, in order. */
+  readonly received: readonly Received[];
   readonly last: Received | undefined;
-  fault(fault: KmsFault | undefined): void;
-  /** Signs every later request with `key`. */
-  signWith(key: KeyObject): void;
+  /** Applies `fault` to every later request for `operation`, or for both when omitted. */
+  fault(fault: KmsFault | undefined, operation?: Operation): void;
+  /** Signs every later request with `key`, or only those whose digest `only` accepts; GetPublicKey keeps the start key. */
+  signWith(key: KeyObject, only?: (digest: Buffer) => boolean): void;
   close(): Promise<void>;
 }
 
@@ -47,12 +52,12 @@ const ALGORITHM = "RSASSA_PKCS1_V1_5_SHA_256";
 const SHA256_DIGEST_INFO = Buffer.from("3031300d060960864801650304020105000420", "hex");
 const SIGNED = ["content-type", "host", "x-amz-content-sha256", "x-amz-date", "x-amz-target"];
 
-/** Starts a fake of the KMS `Sign` API on 127.0.0.1 that signs with `key`, the private key of the generated pair. */
+/** Starts a fake of the KMS `Sign` and `GetPublicKey` APIs on 127.0.0.1 over `key`, a generated private key. */
 export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
-  let signing = key;
-  let fault: KmsFault | undefined;
+  let signing = (_digest: Buffer) => key;
+  let fault: { readonly fault: KmsFault; readonly operation: Operation | undefined } | undefined;
   let requests = 0;
-  let last: Received | undefined;
+  const received: Received[] = [];
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -67,13 +72,17 @@ export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
       ) {
         return kmsError(res, 400, "InvalidSignatureException");
       }
-      if (
-        req.headers["x-amz-target"] !== "TrentService.Sign" ||
-        req.headers["content-type"] !== "application/x-amz-json-1.1"
-      ) {
+      const target = req.headers["x-amz-target"];
+      const operation =
+        target === "TrentService.Sign"
+          ? "Sign"
+          : target === "TrentService.GetPublicKey"
+            ? "GetPublicKey"
+            : undefined;
+      if (operation === undefined || req.headers["content-type"] !== "application/x-amz-json-1.1") {
         return kmsError(res, 400, "UnknownOperationException");
       }
-      last = { headers: req.headers, body };
+      received.push({ target: operation, headers: req.headers, body });
       let request: Record<string, unknown>;
       try {
         request = JSON.parse(Buffer.from(body).toString("utf8")) as Record<string, unknown>;
@@ -81,6 +90,15 @@ export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
         return kmsError(res, 400, "SerializationException");
       }
       if (request.KeyId !== FAKE_KMS.keyId) return kmsError(res, 400, "NotFoundException");
+      const active =
+        fault === undefined || (fault.operation ?? operation) !== operation
+          ? undefined
+          : fault.fault;
+      if (operation === "GetPublicKey") {
+        if (Object.keys(request).length !== 1) return kmsError(res, 400, "ValidationException");
+        if (active !== undefined) return applyFault(req.socket, res, active);
+        return reply(res, publicKeyReply(key));
+      }
       const message =
         typeof request.Message === "string" ? Buffer.from(request.Message, "base64") : undefined;
       const digest =
@@ -92,33 +110,16 @@ export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
       if (request.SigningAlgorithm !== ALGORITHM || digest === undefined) {
         return kmsError(res, 400, "ValidationException");
       }
-
-      if (fault === "drop") return req.socket.destroy();
-      if (fault === "stall") return res.writeHead(200).flushHeaders();
-      if (fault === "oversize") {
-        res.writeHead(200, { "content-type": "application/x-amz-json-1.1" });
-        return res.end("x".repeat(20 * 1024));
-      }
-      if (fault !== undefined && "redirect" in fault) {
-        return res.writeHead(307, { location: fault.redirect }).end();
-      }
-      if (fault !== undefined && "status" in fault) {
-        const headers = fault.header === undefined ? {} : { "x-amzn-errortype": fault.header };
-        return res.writeHead(fault.status, headers).end(fault.body ?? "");
-      }
-      if (fault !== undefined) return res.writeHead(200).end(fault.reply);
+      if (active !== undefined) return applyFault(req.socket, res, active);
       const signature = privateEncrypt(
-        { key: signing, padding: constants.RSA_PKCS1_PADDING },
+        { key: signing(digest), padding: constants.RSA_PKCS1_PADDING },
         Buffer.concat([SHA256_DIGEST_INFO, digest]),
       );
-      res.writeHead(200, { "content-type": "application/x-amz-json-1.1" });
-      res.end(
-        JSON.stringify({
-          KeyId: FAKE_KMS.arn,
-          Signature: signature.toString("base64"),
-          SigningAlgorithm: ALGORITHM,
-        }),
-      );
+      reply(res, {
+        KeyId: FAKE_KMS.arn,
+        Signature: signature.toString("base64"),
+        SigningAlgorithm: ALGORITHM,
+      });
     })();
   });
   server.listen(0, "127.0.0.1");
@@ -130,14 +131,15 @@ export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
     get requests() {
       return requests;
     },
+    received,
     get last() {
-      return last;
+      return received.at(-1);
     },
-    fault: (f) => {
-      fault = f;
+    fault: (f, operation) => {
+      fault = f === undefined ? undefined : { fault: f, operation };
     },
-    signWith: (k) => {
-      signing = k;
+    signWith: (k, only = () => true) => {
+      signing = (digest) => (only(digest) ? k : key);
     },
     close: () =>
       new Promise((resolve) => {
@@ -147,6 +149,39 @@ export async function startFakeKms(key: KeyObject): Promise<FakeKms> {
         });
       }),
   };
+}
+
+/** Answers with `fault`. */
+function applyFault(socket: Socket, res: ServerResponse, fault: KmsFault): void {
+  if (fault === "drop") return void socket.destroy();
+  if (fault === "stall") return res.writeHead(200).flushHeaders();
+  if (fault === "oversize") {
+    res.writeHead(200, { "content-type": "application/x-amz-json-1.1" });
+    return void res.end("x".repeat(20 * 1024));
+  }
+  if ("redirect" in fault) return void res.writeHead(307, { location: fault.redirect }).end();
+  if ("status" in fault) {
+    const headers = fault.header === undefined ? {} : { "x-amzn-errortype": fault.header };
+    return void res.writeHead(fault.status, headers).end(fault.body ?? "");
+  }
+  res.writeHead(200).end(fault.reply);
+}
+
+/** KMS's GetPublicKey reply for the RSA signing key `key`. */
+function publicKeyReply(key: KeyObject): Record<string, unknown> {
+  const spki = createPublicKey(key).export({ type: "spki", format: "der" });
+  return {
+    KeyId: FAKE_KMS.arn,
+    KeySpec: `RSA_${key.asymmetricKeyDetails?.modulusLength}`,
+    KeyUsage: "SIGN_VERIFY",
+    PublicKey: spki.toString("base64"),
+    SigningAlgorithms: ["RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PSS_SHA_256"],
+  };
+}
+
+function reply(res: ServerResponse, body: Record<string, unknown>): void {
+  res.writeHead(200, { "content-type": "application/x-amz-json-1.1" });
+  res.end(JSON.stringify(body));
 }
 
 /**

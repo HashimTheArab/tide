@@ -59,21 +59,55 @@ Once per environment, in this order.
    `https://assets.example.com/assets/<hex>` then serves the object `assets/<hex>`. Every object in the bucket
    becomes public; Tide stores nothing secret there. Connect it before the first publish.
 5. **Signing identity.** A self-signed certificate per environment with its `keyid` (`design.md`, Keys). Tide
-   rejects unsigned apps. From the app's directory, write the certificate where the app config reads it and the key
-   outside every checkout, never inside a repository:
+   rejects unsigned apps. Put the certificate where the app config reads it (here `keys/certificate.pem`), made one
+   of two ways:
 
-   ```sh
-   npx expo-updates codesigning:generate \
-     --certificate-output-directory keys \
-     --key-output-directory ~/tide-signing/main \
-     --certificate-validity-duration-years 10 \
-     --certificate-common-name "Example App"
-   ```
+   - **`tide certificate`**, signed by the key the writers will use: a KMS key created in KMS (`design.md`, KMS
+     provisioning) or a file key kept outside every checkout. It holds that key or a `kms:Sign` session, so never run
+     the app's own `npx tide`. Install Tide into fresh directories outside the app checkout with the writer job's
+     checks (Publishing, Trusted CLI). The subshell stops at the first failure, so npm installs nothing that failed
+     verification:
 
-   The key goes only to the writer job (Publishing), as `TIDE_SIGNING_KEY_FILE`,
-   `TIDE_SIGNING_KEY` or `TIDE_KMS_KEY_ID`. Every writer, `register-build` included, and `tide probe` read the
-   builds' identity from `TIDE_BUILD_KEYID` and one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`,
-   taken from a shipped binary.
+     ```sh
+     (
+       set -e
+       mkdir ~/tide-pkgs ~/tide-cli && cd ~/tide-pkgs
+       for p in cli protocol; do
+         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
+         gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+           --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+       done
+       npm install --prefix ~/tide-cli --offline --ignore-scripts --no-fund \
+         ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+     )
+     ```
+
+     Then run it outside the app checkout with that source's variables set; for KMS, also `TIDE_KMS_ACCESS_KEY_ID`,
+     `TIDE_KMS_SECRET_ACCESS_KEY` and `TIDE_KMS_SESSION_TOKEN` from a session allowed `kms:GetPublicKey` and
+     `kms:Sign`. Copy only the printed certificate into the app:
+
+     ```sh
+     mkdir -p ~/tide-signing/main
+     TIDE_KMS_KEY_ID=alias/tide-main TIDE_KMS_REGION=us-east-1 \
+       ~/tide-cli/node_modules/.bin/tide certificate --common-name "Example App" --validity-years 10 \
+       > ~/tide-signing/main/certificate.pem
+     ```
+
+   - **`expo-updates codesigning:generate`**, from the app's directory, writing the key outside every checkout, never
+     inside a repository; for KMS, import that key afterwards (`design.md`, Key import):
+
+     ```sh
+     npx expo-updates codesigning:generate \
+       --certificate-output-directory keys \
+       --key-output-directory ~/tide-signing/main \
+       --certificate-validity-duration-years 10 \
+       --certificate-common-name "Example App"
+     ```
+
+   Either way, the app config names the certificate and its `keyid` (The app). The key goes only to the writer job
+   (Publishing), as `TIDE_SIGNING_KEY_FILE`, `TIDE_SIGNING_KEY` or `TIDE_KMS_KEY_ID`. Every writer, `register-build`
+   included, and `tide probe` read the builds' identity from `TIDE_BUILD_KEYID` and one of
+   `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, taken from a shipped binary.
 6. **Publisher credential.** An R2 Object Read & Write token scoped to the bucket, given to the publish workflow as
    the five `TIDE_S3_*` variables in a protected CI secret (`design.md`, Bucket configuration). The publisher's
    `TIDE_SERVER_URL` is the server origin and `TIDE_ASSET_URL` the asset origin.

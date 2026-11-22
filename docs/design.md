@@ -486,6 +486,31 @@ identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bund
 object store safely while writes can land late would need machinery Tide does not want; if storage ever matters,
 deletion gets its own design.
 
+### `tide certificate`
+
+`tide certificate --common-name <name> --validity-years <n>` prints the self-signed certificate the app embeds,
+signed by the configured key source (Keys), so a key created inside KMS needs no copy anywhere else. It reads only
+the key-source variables: no build pins, no bucket and no project code, and it opens no file for writing.
+
+- **Arguments.** The common name is 1 to 64 printable ASCII characters with no space at either end; the validity is
+  a whole number of years from 1 to 100.
+- **Certificate.** X.509 v3 with a random positive 16-octet serial, `sha256WithRSAEncryption` with NULL parameters
+  inside and outside the TBS, and one Name as issuer and subject holding only the common name. Validity runs from
+  now, in whole seconds, to the same time `<n>` years later (29 February rolls to 1 March), as UTCTime through 2049
+  and GeneralizedTime from 2050. Then the source's SubjectPublicKeyInfo and exactly two extensions: Key Usage
+  (critical) `digitalSignature` and Extended Key Usage `codeSigning`.
+- **Signing.** The source signs the TBS as `publish` signs a part: KMS signs its SHA-256 with `Sign` (`DIGEST`).
+  The public key comes from the PEM key, or from KMS `GetPublicKey` on the same request path as `Sign`. A reply is
+  refused unless the key is `SIGN_VERIFY`, `RSA_2048`, `RSA_3072` or `RSA_4096`, allows
+  `RSASSA_PKCS1_V1_5_SHA_256`, and its public key is an RSA SubjectPublicKeyInfo of that size.
+- **Checks, before any output.** The PEM passes the certificate profile (Keys), its public key is the source's, and
+  `tide signing probe` signed by the source verifies under it, so a KMS key whose `Sign` and `GetPublicKey` disagree
+  is refused.
+- **Output.** stdout is exactly the PEM, one block of 64-column lines; redirect it to a file outside the app
+  checkout, then copy it into the app (`deploy.md`, Signing identity).
+  stderr is `tide: certificate DER SHA-256 <hex>`, the fingerprint the identity check compares. Exit 0, or 2 on any
+  refusal with nothing on stdout. No message carries a key, credential or provider text.
+
 ## Keys
 
 A leaked key can ship code to every installed app. Publish only from CI, and sign through KMS where possible. Tide
@@ -504,6 +529,7 @@ DIGEST` over the SHA-256 computed locally: `RAW` caps the message at 4096 bytes,
 both give the same signature. Requests are SigV4-signed without an AWS SDK, never follow a redirect, and go to
 `https://kms.<region>.amazonaws.com` or `TIDE_KMS_ENDPOINT`, which must be an `https:` origin (plain `http:` only to
 a loopback IP literal). Throttling, access denied, a disabled key, a timeout or a malformed reply is an error.
+Writers call only `Sign`; `tide certificate` also calls `GetPublicKey` on the same request path.
 
 **Build pins.** The checkout can drift from what installed builds embed, so every writer and `tide probe` take the
 identity from the store builds, read from a shipped binary rather than the checkout:
@@ -542,8 +568,24 @@ ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `re
 the certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
 write. No writer runs project code (CLI).
 
-**KMS provisioning.** KMS cannot export a private key, so the self-signed certificate is made offline and the key
-imported:
+**KMS provisioning.** Prefer a key created inside KMS, whose private key never exists anywhere else:
+
+1. `aws kms create-key --origin AWS_KMS --key-spec RSA_2048 --key-usage SIGN_VERIFY` (or `RSA_3072`, `RSA_4096`),
+   with an alias.
+2. The identity that runs `tide certificate` needs `kms:GetPublicKey` and `kms:Sign` on the key; writers need only
+   `kms:Sign`.
+3. `tide certificate` with the `TIDE_KMS_*` variables, run from a checked Tide install outside the app checkout,
+   writes the app's certificate (`deploy.md`, Signing identity).
+
+Such a key cannot be exported, so there is no recovery copy. Disabling it stops every publish until `enable-key`, and
+a pending deletion can be cancelled with `cancel-key-deletion`, then `enable-key`. Once it is deleted, or left
+disabled, every installed build is stranded: it keeps the updates it has, but nothing new is signed for it until a
+new store build ships. That build needs a new key, a new bucket and a new `updates.url` (One signing identity per
+bucket); certificate chains and per-`keyid` identities are roadmap P11. So schedule any deletion with the longest
+waiting period, `schedule-key-deletion --pending-window-in-days 30`, and give the key a policy that allows
+`kms:ScheduleKeyDeletion` and `kms:DisableKey` only to a break-glass role.
+
+**Key import** keeps a recovery copy instead. The certificate is made offline and the key imported:
 
 1. `npx expo-updates codesigning:generate` with all four flags (`deploy.md`, Signing identity), writing the key
    outside every checkout (for example `--key-output-directory ~/tide-signing/main`, never inside a repository), then

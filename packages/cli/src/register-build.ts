@@ -22,7 +22,7 @@ import { buildIdentity, checkBucket, member } from "./keys.ts";
 import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError, platformOf } from "./publish-record.ts";
-import { addKey, execute, parsed, recordedKeys } from "./publish.ts";
+import { addKey, execute, once, parsed, recordedKeys, requiredOnce } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const REGISTER_BUILD_USAGE =
@@ -123,23 +123,13 @@ function parse(args: readonly string[]) {
       allowPositionals: false,
     }),
   );
-  const once = (name: keyof typeof values) => {
-    const list = values[name];
-    if (list !== undefined && list.length > 1) throw new PublishError(`--${name} is given twice`);
-    return list?.[0];
-  };
-  const required = (name: keyof typeof values) => {
-    const value = once(name);
-    if (value === undefined)
-      throw new PublishError(`--${name} is required; ${REGISTER_BUILD_USAGE}`);
-    return value;
-  };
+  const required = (name: keyof typeof values) => requiredOnce(values, name, REGISTER_BUILD_USAGE);
   return {
     platform: platformOf(required("platform")),
     runtime: required("runtime-version"),
     manifest: required("manifest"),
     bundle: required("bundle"),
-    assetsDir: once("assets-dir"),
+    assetsDir: once(values, "assets-dir"),
   };
 }
 
