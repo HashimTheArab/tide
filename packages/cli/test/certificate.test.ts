@@ -1103,6 +1103,45 @@ describe("chain forms and KMS", () => {
       async () => issuedArgs(await intermediateUnderRoot(), keys[2048], INTERMEDIATE_ARGS),
       SUBJECT_IS_CA,
     ],
+    [
+      "a leaf for the key of a root above its issuer that encodes it without NULL parameters",
+      async () => {
+        const der = spkiOf(keys[3072]);
+        const [, bitString] = children(der, readTlv(der, 0, der.length));
+        const bare = derTlv(
+          0x30,
+          derTlv(0x30, derOid("1.2.840.113549.1.1.1")),
+          der.subarray(bitString!.start, bitString!.end),
+        );
+        const fields = { notBefore: new Date(AT - DAY_MS), notAfter: new Date(AT + DAY_MS) };
+        const signer = (key: KeyObject) => async (tbs: Uint8Array) =>
+          new Uint8Array(await crypto.subtle.sign(RSA, cryptoKey(key, "sign"), tbs));
+        const root = await signedCertificate(
+          { spki: bare, commonName: "Bare Root", ...fields, ca: {} },
+          signer(keys[3072]),
+        );
+        const intermediate = await signedCertificate(
+          {
+            spki: spkiOf(keys[2048]),
+            commonName: "Tide Intermediate CA",
+            ...fields,
+            issuer: derTlv(
+              0x30,
+              derTlv(0x31, derTlv(0x30, derOid("2.5.4.3"), derTlv(0x0c, Buffer.from("Bare Root")))),
+            ),
+            ca: {},
+          },
+          signer(keys[3072]),
+        );
+        return issuedArgs(intermediate + root, keys[3072], [
+          "--common-name",
+          "Tide Leaf",
+          "--validity-days",
+          "1",
+        ]);
+      },
+      SUBJECT_IS_CA,
+    ],
   ])("%s is refused before any KMS request", async (_, args, message) => {
     const before = kms.received.length;
     expectRefused(await chainIssue(kmsEnv(), await args()), message);

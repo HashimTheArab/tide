@@ -1039,7 +1039,7 @@ function certificatePem(der: Uint8Array): string {
 /** The certificate an issued certificate names as its issuer, and the path above it. */
 export interface IssuerPath {
   readonly subject: Uint8Array; // The issuing certificate's subject Name DER.
-  readonly spkis: readonly [Uint8Array, ...Uint8Array[]]; // Each member's SubjectPublicKeyInfo DER, the issuing certificate's first.
+  readonly spkis: readonly [Uint8Array, ...Uint8Array[]]; // Each member's key as Web Crypto exports SPKI DER, the issuing certificate's first.
   readonly notAfter: number; // The earliest notAfter on the path, in epoch ms.
   readonly served: string | undefined; // Canonical PEMs below the root, issuer first; undefined for a root.
   readonly root: string; // The root's canonical PEM.
@@ -1064,10 +1064,20 @@ export async function issuerPath(bytes: Uint8Array, now: Date): Promise<IssuerPa
   checkAuthorities(top, members.slice(0, -1));
   checkProject(members);
   const first = members[0] ?? top;
-  const spkiOf = (m: Member) => bytesOf(m.der, m.cert.spki).slice();
+  // Web Crypto imports other encodings of one key, so callers compare its canonical re-export.
+  const spkiOf = async (m: Member) => {
+    const key = await crypto.subtle.importKey(
+      "spki",
+      m.der.slice(m.cert.spki.start, m.cert.spki.end),
+      RSA,
+      true,
+      ["verify"],
+    );
+    return new Uint8Array(await crypto.subtle.exportKey("spki", key));
+  };
   return {
     subject: first.subject.slice(),
-    spkis: [spkiOf(first), ...members.slice(1).map(spkiOf)],
+    spkis: [await spkiOf(first), ...(await Promise.all(members.slice(1).map(spkiOf)))],
     notAfter: Math.min(...members.map((m) => m.notAfter)),
     served: below === "" ? undefined : below,
     root: certificatePem(top.der),
