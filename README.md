@@ -179,10 +179,10 @@ tide register-build --platform android --runtime-version 1.0.0 \
 
 `tide probe` needs no secrets and no bucket access. It identifies builds by `TIDE_BUILD_KEYID` and the certificate
 they embed, given as exactly one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, plus
-`TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN=true` for builds that embed a CA root, then checks a live server end to end: it
-verifies the reply's signature under that certificate, or under the served chain's leaf, and compares the served
-bundle's hash with the signed manifest. On Workers, every update check that reaches a reply also records one Analytics Engine
-data point; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
+`TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN` set to `true` for builds that embed a CA root. It then checks a live server end
+to end: it verifies the reply's signature under that certificate, or under the served chain's leaf, and compares the
+served bundle's hash with the signed manifest. On Workers, every update check that reaches a reply also records one
+Analytics Engine data point; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
 and exit codes.
 
 ## Security model
