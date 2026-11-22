@@ -1,0 +1,123 @@
+diff --git a/App.js b/App.js
+index 14b11e7..c6db6b3 100644
+--- a/App.js
++++ b/App.js
+@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
+ import { Image, Text, View } from "react-native";
+ 
+ import { MARKER } from "./marker";
++import { UpdateDetails } from "./UpdateDetails";
+ 
+ const PREFIX = "tide-conformance ";
+ 
+@@ -31,6 +32,7 @@ export default function App() {
+       {lines.map((line) => (
+         <Text key={line}>{line}</Text>
+       ))}
++      <UpdateDetails />
+     </View>
+   );
+ }
+diff --git a/UpdateDetails.js b/UpdateDetails.js
+new file mode 100644
+index 0000000..8aa6ccf
+--- /dev/null
++++ b/UpdateDetails.js
+@@ -0,0 +1,97 @@
++// A panel that shows what the running update is and lets the user check for a newer one.
++import * as Updates from "expo-updates";
++import { useCallback, useMemo, useState } from "react";
++import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
++
++const UNKNOWN = "unknown";
++
++function formatDate(date) {
++  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return UNKNOWN;
++  const pad = (n) => String(n).padStart(2, "0");
++  return (
++    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ` +
++    `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
++  );
++}
++
++function shortId(id) {
++  return typeof id === "string" && id.length > 8 ? `${id.slice(0, 8)}…` : (id ?? UNKNOWN);
++}
++
++function Row({ label, value }) {
++  return (
++    <View style={styles.row}>
++      <Text style={styles.label}>{label}</Text>
++      <Text style={styles.value} selectable>
++        {value}
++      </Text>
++    </View>
++  );
++}
++
++export function UpdateDetails() {
++  const [open, setOpen] = useState(false);
++  const [checking, setChecking] = useState(false);
++  const [result, setResult] = useState(null);
++
++  const rows = useMemo(
++    () => [
++      ["Update", shortId(Updates.updateId)],
++      ["Channel", Updates.channel ?? UNKNOWN],
++      ["Runtime", Updates.runtimeVersion ?? UNKNOWN],
++      ["Published", formatDate(Updates.createdAt)],
++      ["Source", Updates.isEmbeddedLaunch ? "built into the app" : "downloaded update"],
++      ["Emergency launch", Updates.isEmergencyLaunch ? "yes" : "no"],
++    ],
++    [],
++  );
++
++  const check = useCallback(async () => {
++    setChecking(true);
++    try {
++      const found = await Updates.checkForUpdateAsync();
++      setResult(found.isAvailable ? "A newer update is ready to download." : "You have the newest update.");
++    } catch (e) {
++      setResult(`Could not check: ${String(e?.message ?? e)}`);
++    } finally {
++      setChecking(false);
++    }
++  }, []);
++
++  return (
++    <View style={styles.panel}>
++      <Pressable accessibilityRole="button" onPress={() => setOpen((shown) => !shown)}>
++        <Text style={styles.title}>{open ? "Hide update details" : "Show update details"}</Text>
++      </Pressable>
++      {open && (
++        <ScrollView style={styles.list}>
++          {rows.map(([label, value]) => (
++            <Row key={label} label={label} value={value} />
++          ))}
++          <Pressable
++            accessibilityRole="button"
++            disabled={checking}
++            onPress={check}
++            style={({ pressed }) => [styles.button, pressed && styles.pressed]}
++          >
++            {checking ? <ActivityIndicator /> : <Text style={styles.buttonText}>Check for updates</Text>}
++          </Pressable>
++          {result !== null && <Text style={styles.result}>{result}</Text>}
++        </ScrollView>
++      )}
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  panel: { marginTop: 16, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8 },
++  title: { fontSize: 16, fontWeight: "600", color: "#1d4ed8" },
++  list: { marginTop: 8, maxHeight: 280 },
++  row: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4 },
++  label: { color: "#4b5563" },
++  value: { fontVariant: ["tabular-nums"], marginLeft: 12, flexShrink: 1, textAlign: "right" },
++  button: { marginTop: 12, padding: 10, borderRadius: 8, backgroundColor: "#1d4ed8", alignItems: "center" },
++  pressed: { opacity: 0.7 },
++  buttonText: { color: "white", fontWeight: "600" },
++  result: { marginTop: 8, color: "#111827" },
++});

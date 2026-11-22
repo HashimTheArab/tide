@@ -28,6 +28,7 @@
     "conformance": {
       "entry": [
         "src/main.ts",
+        "src/hermes-delta/main.ts",
         "test/fake-android.ts",
         "test/hold-stack.ts",
         "test/hung-export.ts",

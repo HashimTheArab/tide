@@ -42,7 +42,8 @@
     "knip": "knip --no-config-hints",
     "docs:check": "node scripts/check-docs.mjs",
     "gate": "node scripts/gate.mjs",
-    "conformance": "node conformance/src/main.ts"
+    "conformance": "node conformance/src/main.ts",
+    "hermes-delta": "node conformance/src/hermes-delta/main.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -1,0 +1,12 @@
+diff --git a/App.js b/App.js
+index 7dc47b7..14b11e7 100644
+--- a/App.js
++++ b/App.js
+@@ -27,6 +27,7 @@ export default function App() {
+   return (
+     <View style={{ flex: 1, justifyContent: "center", padding: 24 }}>
+       <Image source={require("./image.png")} style={{ width: 16, height: 16 }} />
++      <Text style={{ fontWeight: "bold", marginVertical: 8 }}>Tide conformance</Text>
+       {lines.map((line) => (
+         <Text key={line}>{line}</Text>
+       ))}
