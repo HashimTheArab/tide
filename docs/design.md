@@ -417,9 +417,8 @@ Steps, in order; every refusal comes before the first write, and all replies are
    at `patches/<from hex>/<to hex>` (put-if-absent, `no-store`; a lost race stored the same deterministic, checked
    bytes), then in chain mode the identity binding (put-if-absent; a winner must bind the same root), then
    `reply/no-update` (put-if-absent, or `If-Match` for a renewal; in chain mode the chain is re-checked by both
-   clocks just before it; a winner must verify under the identity and, in chain mode, pass the client's chain check by
-   both clocks), then each release record followed by
-   its `update` base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
+   clocks just before it; a winner must verify under the identity), then each release record followed by its `update`
+   base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
    Then,
    per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
    its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
@@ -489,11 +488,6 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
 - **Copied bodies are verified.** Every body a write copies (both sides for `tide rollout`, the kept reply for
   `publish --rollout`) must verify under the configured certificate and `keyid`, whatever `reply/no-update` holds.
   Plain publish, republish and rollback copy nothing, so they still replace a pointer that fails; that repairs it.
-- **Live chains.** In chain mode each stored body carries its own chain, so every body a write leaves reachable must
-  also pass the client's chain check by both clocks, read afresh: `publish --rollout` checks the kept reply with the
-  certificate; `tide rollout` checks `new` above 0% and `earlier` (or `reply/no-update` without one) below 100%,
-  for every target before any write and again before each pointer write. A refusal names the reply; replace it with
-  a publish, republish or rollback.
 - **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
   version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
 - **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
@@ -696,8 +690,7 @@ write. No writer runs project code (CLI).
   `tide rollout` and `register-build` sign nothing and refuse a chain-mode bucket without the binding.
 - **Shared no-update.** `reply/no-update` carries the leaf that signed it, so a signing writer whose configured chain
   differs from the stored body's re-signs it, replacing it with `If-Match` on the ETag it read. A lost race keeps the
-  winner when it is this identity's and passes the client's chain check by both clocks; an unknown outcome is
-  re-read by the next run.
+  winner when it is this identity's; an unknown outcome is re-read by the next run.
 - **Expiry.** An expired leaf or intermediate in the served chain stops every writer until it is replaced; bodies
   already stored keep their own chain, and each device rejects one whose chain has expired. Publish or republish each
   live channel, and finish or replace rollouts, before an old leaf expires; `tide probe` fails on an expired served

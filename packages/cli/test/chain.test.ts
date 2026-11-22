@@ -61,8 +61,8 @@ const LATER = T + 2 * HOUR;
 const IOS_ONLY = { platforms: { ios: { runtimeVersion: "1.0.0" } } };
 const ANDROID_ONLY = { platforms: { android: { runtimeVersion: "1.0.0" } } };
 const TARGET = ["--channel", "main", "--runtime-version", "1.0.0"];
-const LIVE = (label: string) =>
-  `tide: ${label} carries a certificate chain the app no longer accepts: replace it with tide publish, republish or rollback first`;
+const BOUND_ELSEWHERE = async () =>
+  `${await identityKey("main")} binds another root or is not one tide writes: a new signing identity needs a new bucket`;
 
 /** The chain-mode identities one file uses; every root but `root2` and `dual` shares the root key. */
 interface World {
@@ -429,6 +429,18 @@ describe("leaf rotation under the same root", () => {
     expect(store.objects().get(ANDROID)).toEqual(android);
   });
 
+  test("rollouts keep and move bodies whose own leaf has expired: only the served chain is checked", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, SOON_LEAF(), { now: at(T) })).toMatchObject({ code: 0 });
+    const now = at(LATER);
+    const staged = await publishWith(store, B(), { now, extra: ["--rollout", "10"] });
+    expect(staged).toMatchObject({ code: 0, err: [] });
+    const chains = [served(w.leafB), served(w.leafSoon)];
+    await expectChained(store.objects().get(IOS), IOS, w.root.certificate, chains, T);
+    expect(await rolloutTo(store, w.root, "20", now)).toMatchObject({ code: 0, err: [] });
+    expect(await rolloutTo(store, w.root, "revert", now)).toMatchObject({ code: 0, err: [] });
+  });
+
   test("a missing reply/no-update is recreated over pointers an expired leaf signed, which keep their bytes", async () => {
     const store = s3Store();
     expect(await publishWith(store, SOON_LEAF(), { now: at(T) })).toMatchObject({ code: 0 });
@@ -465,7 +477,7 @@ describe("another identity's bucket", () => {
       code: 0,
     });
     const before = s3Snapshot();
-    await everyWriterRefuses(store, B(), OTHER_IDENTITY);
+    await everyWriterRefuses(store, B(), await BOUND_ELSEWHERE());
     expect(s3Snapshot()).toEqual(before);
     // Without the binding, the bodies themselves refuse.
     s3.objects.delete(await identityKey("main"));
@@ -476,7 +488,7 @@ describe("another identity's bucket", () => {
     const store = s3Store();
     expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     const before = s3Snapshot();
-    await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, OTHER_IDENTITY);
+    await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, await BOUND_ELSEWHERE());
     expect(s3Snapshot()).toEqual(before);
   });
 
@@ -567,7 +579,7 @@ describe("validity checks before each write", () => {
     expect(s3.puts).not.toContain(NO_UPDATE_KEY);
   });
 
-  test("a renewal another writer won is accepted when its chain is valid, and refused when it has expired", async () => {
+  test("a renewal another writer won is kept when it is this identity's, and refused under another root", async () => {
     const store = s3Store();
     expect(await publishWith(store, A())).toMatchObject({ code: 0 });
     const theirs = await chainedNoUpdate(B());
@@ -575,117 +587,11 @@ describe("validity checks before each write", () => {
     expect(await publishWith(store, SOON_LEAF())).toMatchObject({ code: 0, err: [] });
     expect(store.objects().get(NO_UPDATE_KEY)).toEqual(theirs);
 
-    const expired = await chainedNoUpdate({ root: w.root, chain: [w.leafOld] });
-    s3.raceOnPut(NO_UPDATE_KEY, expired);
+    const foreign = await chainedNoUpdate({ root: w.root2, chain: [w.leaf2] });
+    s3.raceOnPut(NO_UPDATE_KEY, foreign);
     const result = await publishWith(store, A());
-    expect(result).toEqual({ code: 1, out: [], err: [LIVE(NO_UPDATE_KEY)] });
-    expect(s3.objects.get(NO_UPDATE_KEY)).toEqual(expired);
-  });
-});
-
-describe("rollouts keep only bodies the app accepts reachable", () => {
-  /** A rollout at 10% on `keys`' platforms whose earlier side `earlier` signed and new side `next` signed, at T. */
-  async function staged(store: Store, earlier: Config, next: Config) {
-    expect(await publishWith(store, earlier, { now: at(T) })).toMatchObject({ code: 0 });
-    expect(
-      await publishWith(store, next, { now: at(T), extra: ["--rollout", "10"] }),
-    ).toMatchObject({ code: 0 });
-  }
-
-  test("with the earlier side expired: complete passes; a higher percentage, revert and publish --rollout refuse", async () => {
-    const store = s3Store();
-    await staged(store, SOON_LEAF(), B());
-    const before = s3Snapshot();
-    const now = at(LATER);
-    for (const goal of ["20", "revert"]) {
-      expect(await rolloutTo(store, w.root, goal, now)).toEqual({
-        code: 2,
-        out: [],
-        err: [LIVE(`${IOS}'s earlier reply`)],
-      });
-    }
-    expect(s3Snapshot()).toEqual(before);
-    expect(await rolloutTo(store, w.root, "complete", now)).toMatchObject({ code: 0, err: [] });
-
-    s3.reset();
-    const fresh = s3Store();
-    expect(await publishWith(fresh, SOON_LEAF(), { now: at(T) })).toMatchObject({ code: 0 });
-    s3.puts.length = 0;
-    const kept = await publishWith(fresh, B(), { now: at(LATER), extra: ["--rollout", "10"] });
-    expect(kept).toEqual({ code: 2, out: [], err: [LIVE(`${IOS}'s current reply`)] });
-    expect(s3.puts).toEqual([]);
-  });
-
-  test("with the new side expired: revert passes and a higher percentage refuses", async () => {
-    const store = s3Store();
-    await staged(store, B(), SOON_LEAF());
-    const now = at(LATER);
-    expect(await rolloutTo(store, w.root, "20", now)).toEqual({
-      code: 2,
-      out: [],
-      err: [LIVE(`${IOS}'s new reply`)],
-    });
-    expect(await rolloutTo(store, w.root, "revert", now)).toMatchObject({ code: 0, err: [] });
-  });
-
-  test("revert with no earlier reply refuses when reply/no-update has expired", async () => {
-    const store = s3Store();
-    // Another writer's reply/no-update, valid when it landed, serves the soon leaf; the new side serves leaf B.
-    s3.raceOnPut(NO_UPDATE_KEY, await chainedNoUpdate(SOON_LEAF()));
-    const staged = await publishWith(store, B(), { now: at(T), extra: ["--rollout", "10"] });
-    expect(staged).toMatchObject({ code: 0, err: [] });
-    s3.puts.length = 0;
-    expect(await rolloutTo(store, w.root, "revert", at(LATER))).toEqual({
-      code: 2,
-      out: [],
-      err: [LIVE(NO_UPDATE_KEY)],
-    });
-    expect(s3.puts).toEqual([]);
-    expect(await rolloutTo(store, w.root, "complete", at(LATER))).toMatchObject({ code: 0 });
-  });
-
-  test("the first target's body expiring while the second is prepared refuses before any write", async () => {
-    const store = s3Store();
-    // iOS keeps the soon leaf's reply as its earlier side, Android leaf B's.
-    expect(await publishWith(store, SOON_LEAF(), { now: at(T), fields: IOS_ONLY })).toMatchObject({
-      code: 0,
-    });
-    expect(await publishWith(store, B(), { now: at(T), fields: ANDROID_ONLY })).toMatchObject({
-      code: 0,
-    });
-    expect(await publishWith(store, B(), { now: at(T), extra: ["--rollout", "10"] })).toMatchObject(
-      { code: 0 },
-    );
-    s3.puts.length = 0;
-    // Readings: the pins, iOS's check, then Android's, which is already past the soon leaf's notAfter.
-    let readings = 0;
-    const now = () => (++readings <= 2 ? T : LATER);
-    expect(await rolloutTo(store, w.root, "20", now)).toEqual({
-      code: 2,
-      out: [],
-      err: [LIVE(`${IOS}'s earlier reply`)],
-    });
-    expect(s3.puts).toEqual([]);
-  });
-
-  test("a body expiring after the first pointer write stops the second", async () => {
-    const store = s3Store();
-    expect(await publishWith(store, B(), { now: at(T), fields: IOS_ONLY })).toMatchObject({
-      code: 0,
-    });
-    expect(
-      await publishWith(store, SOON_LEAF(), { now: at(T), fields: ANDROID_ONLY }),
-    ).toMatchObject({ code: 0 });
-    expect(await publishWith(store, B(), { now: at(T), extra: ["--rollout", "10"] })).toMatchObject(
-      { code: 0 },
-    );
-    const now = () => (s3.puts.includes(IOS) ? LATER : T);
-    s3.puts.length = 0;
-    const result = await rolloutTo(store, w.root, "20", now);
-    expect(result).toMatchObject({ code: 1, err: [LIVE(`${ANDROID}'s earlier reply`)] });
-    expect(result.out).toHaveLength(1);
-    expect(result.out[0]).toMatch(/^reply\/main\/1\.0\.0\/ios [0-9a-f-]{36} 20$/);
-    expect(s3.puts).toEqual([IOS]);
+    expect(result).toEqual({ code: 1, out: [], err: [`tide: ${OTHER_IDENTITY}`] });
+    expect(s3.objects.get(NO_UPDATE_KEY)).toEqual(foreign);
   });
 });
 

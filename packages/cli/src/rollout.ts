@@ -1,20 +1,12 @@
 import { parseArgs } from "node:util";
 
 import type { Rollout } from "@tide-ota/protocol";
-import { NO_UPDATE_KEY, ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
+import { ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
 
-import type { Env, Identity, Live, NoUpdate, Writer } from "./keys.ts";
+import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
-import type { Side } from "./status.ts";
-import {
-  buildIdentity,
-  byBothClocks,
-  checkCopied,
-  checkLive,
-  sameBytes,
-  servingBucket,
-} from "./keys.ts";
+import { buildIdentity, checkCopied, sameBytes, servingBucket } from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
   PublishError,
@@ -43,9 +35,8 @@ export function percentOf(value: string, name: string): number {
 
 /**
  * Moves each existing rollout to a higher percentage, to 100% (`complete`) or to 0% (`revert`), copying both stored
- * bodies byte for byte; nothing is signed. In chain mode each body the move leaves reachable is checked by both
- * clocks for every target, then again just before its PUT. Exit codes as publish: 0 every rollout at its goal, 2
- * refused before any write, 1 failed after writes began.
+ * bodies byte for byte; nothing is signed. Exit codes as publish: 0 every rollout at its goal, 2 refused before any
+ * write, 1 failed after writes began.
  */
 export async function rollout(
   args: readonly string[],
@@ -58,15 +49,11 @@ export async function rollout(
     const identity = await buildIdentity(env, now());
     const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
-    const fallback = await servingBucket(
+    await servingBucket(
       bucket,
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
     );
-    // Direct mode makes no request here: the pinned certificate's validity covers every body.
-    const check = async (live: readonly Live[]) => {
-      if (identity.chain) await byBothClocks(bucket, now, (at) => checkLive(identity, live, at));
-    };
     const writes: PointerWrite[] = [];
     for (const key of keys) {
       const previous = await readPointer(bucket, key);
@@ -75,52 +62,21 @@ export async function rollout(
       if (reply.kind !== "rollout") throw new PublishError(`${key} holds no rollout`);
       if (reply.percent !== goal) forward(key, reply.percent, goal);
       await checkCopied(key, sides, identity);
-      const live = reply.percent === goal ? [] : reachable(key, goal, sides, fallback);
-      await check(live);
       writes.push({
         key,
         previous,
         // Encoded here, so a record over the size limit refuses before any write.
         reply: reply.percent === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal }),
         line: `${key} ${reply.new.updateId} ${goal}`,
-        live,
       });
     }
-    // The first PUT's own check, after every other target was read, so its expiry meanwhile is still a refusal.
-    const first = writes.find((w) => w.reply !== undefined);
-    if (first !== undefined) await check(first.live ?? []);
     return async () => {
-      for (const w of writes) {
-        if (w.reply !== undefined) {
-          if (w !== first) await check(w.live ?? []);
-          await writePointer(bucket, w.key, w.reply, w.previous);
-        }
-        out(w.line);
+      for (const { key, previous, reply, line } of writes) {
+        if (reply !== undefined) await writePointer(bucket, key, reply, previous);
+        out(line);
       }
     };
   });
-}
-
-/**
- * Returns the bodies a rollout at `key` serves at `goal`: its new reply above 0%, and below 100% its earlier reply,
- * or `reply/no-update` when it has none.
- */
-function reachable(
-  key: string,
-  goal: number,
-  [next, earlier]: readonly Side[],
-  fallback: NoUpdate,
-): Live[] {
-  const live: Live[] = [];
-  if (goal > 0 && next !== undefined) live.push({ label: `${key}'s new reply`, side: next });
-  if (goal < 100) {
-    live.push(
-      earlier === undefined
-        ? { label: NO_UPDATE_KEY, side: fallback.side }
-        : { label: `${key}'s earlier reply`, side: earlier },
-    );
-  }
-  return live;
 }
 
 /** Returns the record for `rollout` at `key`; one over the size limit refuses, naming the key. */

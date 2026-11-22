@@ -20,7 +20,13 @@ import {
   validCertificate,
   validRoot,
 } from "./keys.ts";
-import { EXPORT_FILE, EXPORT_LIMIT, encodeProjectExport, readExport } from "./publish-export.ts";
+import {
+  CHAIN_FLAG,
+  EXPORT_FILE,
+  EXPORT_LIMIT,
+  encodeProjectExport,
+  readExport,
+} from "./publish-export.ts";
 import { PublishError, platformsOf } from "./publish-record.ts";
 import { parsed, report } from "./publish.ts";
 
@@ -32,8 +38,6 @@ const INHERITED = /^(?:PATH|HOME|TMPDIR|LANG|LANGUAGE|TZ|CI|LC_[A-Z]+|EXPO_PUBLI
 const NAME = /^[A-Za-z_]\w*$/;
 // Tide's own, cloud and CI credentials; the export holds none, so project code is never given them.
 const SECRET = /^(?:TIDE|AWS|ACTIONS)_/i;
-// Read from the app config, which a config plugin also writes into the native opt-in.
-const CHAIN_FLAG = "codeSigningIncludeManifestResponseCertificateChain";
 
 /**
  * Exports the app for `tide publish --from`: the public config, each platform's runtime, the certificate and
@@ -66,6 +70,7 @@ async function run(
     member(updates, "codeSigningMetadata"),
     "app config updates.codeSigningMetadata",
   );
+  // A config plugin also writes it into the native opt-in.
   const chain = member(updates, CHAIN_FLAG);
   if (chain !== undefined && typeof chain !== "boolean") {
     throw new KeyError(`app config updates.${CHAIN_FLAG} must be true or false`);

@@ -24,6 +24,8 @@ import type { ProjectExport } from "./publish-export.ts";
 import type { Side, Verdict } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { KMS_VARIABLES, kmsSource } from "./keys-kms.ts";
+import { writing } from "./pointer.ts";
+import { CHAIN_FLAG } from "./publish-export.ts";
 import { checkRecord, readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
 
@@ -55,14 +57,8 @@ export interface Identity {
 }
 
 /** A stored `reply/no-update` of this identity, with the ETag it was read under. */
-export interface NoUpdate {
+interface NoUpdate {
   readonly etag: string;
-  readonly side: Side;
-}
-
-/** A stored body a write makes reachable, and how a refusal names it. */
-export interface Live {
-  readonly label: string;
   readonly side: Side;
 }
 
@@ -75,12 +71,10 @@ export interface Writer {
   readonly noUpdate: NoUpdate | undefined;
   /** Whether a write must replace `noUpdate`: in chain mode, when it serves another chain than the configured one. */
   readonly renewNoUpdate: boolean;
-  /** The chain-mode binding to create before any other write; undefined once the bucket holds it, or direct. */
-  readonly binding: { readonly key: string; readonly bytes: Uint8Array<ArrayBuffer> } | undefined;
+  /** Creates the chain-mode binding, accepting another writer's of this root; undefined once bound, or direct. */
+  readonly bind: (() => Promise<void>) | undefined;
   /** Re-reads `reply/no-update`, refusing one under another identity. */
   readNoUpdate(): Promise<NoUpdate | undefined>;
-  /** Re-reads the binding, refusing another root: true when it binds this one, false when absent. */
-  checkBinding(): Promise<boolean>;
   /** Refuses unless the certificate, and in chain mode every served certificate, is valid at epoch ms `at`. */
   checkCertificate(at: number): Promise<void>;
   /** Returns the multipart of `body` signed as part `name`, followed in chain mode by the served chain. */
@@ -115,9 +109,8 @@ const OTHER_IDENTITY =
   "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
 
 /**
- * Returns a signer proven against the shipped builds' certificate and the bucket it may write; with `app`, refused
- * unless an export carries that same certificate, key ID and mode. Every refusal about the key, identity or served
- * chain comes before the bucket is constructed; the bucket check then only reads.
+ * Returns a signer proven against the builds' pins and the bucket it may write; with `app`, refused unless the export
+ * carries the same pins. Every refusal before the bucket is constructed; the bucket check only reads.
  */
 export async function openWriter(
   env: Env,
@@ -146,9 +139,8 @@ export async function openWriter(
     noUpdate,
     renewNoUpdate:
       served !== undefined && chained !== undefined && !sameBytes(chained, served.bytes),
-    binding: bound ? undefined : await binding(identity.keyId, identity.sha256),
+    bind: bound ? undefined : () => bind(bucket, identity),
     readNoUpdate: () => readNoUpdate(bucket, identity),
-    checkBinding: () => checkBinding(bucket, identity),
     checkCertificate: async (at) => {
       if (served === undefined) await validCertificate(identity.pem, identity.source, at);
       else await chainOf(served, identity, at);
@@ -166,10 +158,7 @@ export async function openWriter(
 }
 
 /** What a writer compares with the pins from an export. */
-type App = Pick<
-  ProjectExport,
-  "certificate" | "codeSigningMetadata" | "codeSigningIncludeManifestResponseCertificateChain"
->;
+type App = Pick<ProjectExport, "certificate" | "codeSigningMetadata" | typeof CHAIN_FLAG>;
 
 /**
  * Returns the shipped builds' identity: `TIDE_BUILD_KEYID`, the mode in `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN`, and
@@ -208,10 +197,8 @@ async function checkApp(app: App, identity: Identity, now: number): Promise<void
   if (app.codeSigningMetadata.keyid !== identity.keyId) {
     throw new KeyError(`tide-export.json codeSigningMetadata.keyid differs from ${BUILD_KEYID}`);
   }
-  if ((app.codeSigningIncludeManifestResponseCertificateChain === true) !== identity.chain) {
-    throw new KeyError(
-      `tide-export.json codeSigningIncludeManifestResponseCertificateChain differs from ${BUILD_CHAIN}`,
-    );
+  if ((app[CHAIN_FLAG] === true) !== identity.chain) {
+    throw new KeyError(`tide-export.json ${CHAIN_FLAG} differs from ${BUILD_CHAIN}`);
   }
   const check = identity.chain ? validRoot : validCertificate;
   const { sha256 } = await check(app.certificate, "tide-export.json certificate", now);
@@ -248,29 +235,21 @@ function servedChain(env: Env, { chain }: Identity): Served | undefined {
 }
 
 /** Returns the served chain's leaf key, refused unless the chain over the root passes the client's rules at `at`. */
-async function chainOf(served: Served, { pem }: Identity, at: number): Promise<CryptoKey> {
-  try {
-    return await certificateChain(served.bytes, pem, new Date(at));
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    throw new KeyError(`${served.source}: ${e.message}`);
-  }
-}
+const chainOf = (served: Served, { pem }: Identity, at: number) =>
+  keyChecked(served.source, certificateChain(served.bytes, pem, new Date(at)));
 
 /** Returns the chain-mode root checked as the client reads it at epoch milliseconds `at`. */
-export async function validRoot(pem: string, source: string, at: number) {
-  try {
-    return await rootCertificate(pem, new Date(at));
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    throw new KeyError(`${source}: ${e.message}`);
-  }
-}
+export const validRoot = (pem: string, source: string, at: number) =>
+  keyChecked(source, rootCertificate(pem, new Date(at)));
 
 /** Returns the certificate checked against the code-signing profile at epoch milliseconds `at`. */
-export async function validCertificate(pem: string, source: string, at: number) {
+export const validCertificate = (pem: string, source: string, at: number) =>
+  keyChecked(source, codeSigningCertificate(pem, new Date(at)));
+
+/** Returns `check`'s result, its protocol refusal as a `KeyError` naming `source`. */
+async function keyChecked<T>(source: string, check: Promise<T>): Promise<T> {
   try {
-    return await codeSigningCertificate(pem, new Date(at));
+    return await check;
   } catch (e) {
     if (!(e instanceof ProtocolError)) throw e;
     throw new KeyError(`${source}: ${e.message}`);
@@ -387,10 +366,8 @@ function verifying(inner: Signer, { key, keyId }: Identity, leaf: CryptoKey | un
 }
 
 /**
- * Refuses a bucket whose `reply/no-update` is unreadable or signed under another identity: every build the bucket
- * serves gets that one reply, so all of them trust one certificate and key ID. Without one, every pointer must
- * verify instead, so only a new bucket or one of this identity's gets it repaired. In chain mode a binding names the
- * exact root, since stored chains omit it; `bound` says whether it exists.
+ * Refuses a bucket whose binding, `reply/no-update` or, without that, any pointer is unreadable or another
+ * identity's: every build the bucket serves gets that one reply. `bound` says whether the chain-mode binding exists.
  */
 async function checkBucket(
   bucket: Bucket,
@@ -411,15 +388,12 @@ async function checkBucket(
   return { noUpdate: undefined, bound };
 }
 
-/**
- * Returns `reply/no-update` for a writer that signs nothing, refusing it absent (`absent` says why) or, in chain
- * mode, a bucket without the binding.
- */
+/** For a writer that signs nothing, also refuses an absent `reply/no-update` (`absent` says why) or chain binding. */
 export async function servingBucket(
   bucket: Bucket,
   identity: Identity,
   absent: string,
-): Promise<NoUpdate> {
+): Promise<void> {
   const { noUpdate, bound } = await checkBucket(bucket, identity);
   if (noUpdate === undefined) throw new KeyError(absent);
   if (!bound) {
@@ -427,19 +401,11 @@ export async function servingBucket(
       `${await identityKey(identity.keyId)} is absent: tide publish, republish or rollback writes it`,
     );
   }
-  return noUpdate;
 }
 
 /** Reads `reply/no-update`, refusing it unreadable or under another identity; undefined when absent. */
 async function readNoUpdate(bucket: Bucket, identity: Identity): Promise<NoUpdate | undefined> {
-  let object;
-  try {
-    object = await bucket.get(NO_UPDATE_KEY, MAX_REPLY_BYTES);
-  } catch (e) {
-    throw new KeyError(
-      `${NO_UPDATE_KEY} is unreadable: ${e instanceof BucketError ? e.message : "read failed"}`,
-    );
-  }
+  const object = await stored(bucket, NO_UPDATE_KEY, MAX_REPLY_BYTES);
   if (object === undefined) return undefined;
   const verdict = checkRecord(NO_UPDATE_KEY, object.bytes);
   const side = await checkSigned(NO_UPDATE_KEY, verdict, identity);
@@ -453,34 +419,38 @@ async function binding(keyId: string, root: string) {
 }
 
 /**
- * In chain mode, refuses a binding of the key ID to another root, or one Tide would not write; true when it binds
- * this root, false when absent. Direct mode reads nothing and returns true.
+ * In chain mode, refuses any binding of the key ID but this root's; true when it binds this root, false when absent.
+ * Direct mode reads nothing and returns true.
  */
 async function checkBinding(bucket: Bucket, { chain, keyId, sha256 }: Identity): Promise<boolean> {
   if (!chain) return true;
   const { key, bytes } = await binding(keyId, sha256);
-  let object;
+  const object = await stored(bucket, key, BINDING_LIMIT);
+  if (object === undefined) return false;
+  if (sameBytes(object.bytes, bytes)) return true;
+  throw new KeyError(
+    `${key} binds another root or is not one tide writes: a new signing identity needs a new bucket`,
+  );
+}
+
+/** Creates this root's binding; another writer's counts only when it is this root's too. */
+async function bind(bucket: Bucket, identity: Identity): Promise<void> {
+  const { key, bytes } = await binding(identity.keyId, identity.sha256);
+  if ((await writing(key, () => bucket.putIfAbsent(key, bytes))) !== undefined) return;
+  if (!(await checkBinding(bucket, identity))) {
+    throw new KeyError(`${key} was removed by another writer during the publish`);
+  }
+}
+
+/** Returns the object at `key`, undefined when absent; a failed read refuses. */
+async function stored(bucket: Bucket, key: string, limit: number) {
   try {
-    object = await bucket.get(key, BINDING_LIMIT);
+    return await bucket.get(key, limit);
   } catch (e) {
     throw new KeyError(
       `${key} is unreadable: ${e instanceof BucketError ? e.message : "read failed"}`,
     );
   }
-  if (object === undefined) return false;
-  if (sameBytes(object.bytes, bytes)) return true;
-  let root: unknown;
-  try {
-    root = member(JSON.parse(new TextDecoder().decode(object.bytes)), "root");
-  } catch {
-    root = undefined;
-  }
-  if (typeof root === "string" && /^[0-9a-f]{64}$/.test(root)) {
-    if (sameBytes(object.bytes, (await binding(keyId, root)).bytes)) {
-      throw new KeyError(OTHER_IDENTITY);
-    }
-  }
-  throw new KeyError(`${key} is unreadable: not a binding tide writes`);
 }
 
 /**
@@ -515,11 +485,7 @@ export async function checkCopied(
   }
 }
 
-/**
- * True when `identity` signed the side: direct, under its certificate and key ID; chained, with its key ID and a
- * chain to its root as of the chain's issue, however long ago. A side's mode must be the identity's, so a
- * dual-purpose root cannot pass off a direct-signed body as a one-certificate chain.
- */
+/** True when the side is this identity's, in its mode; chains are judged as of their issue. */
 async function verifies({ signed }: Side, identity: Identity): Promise<boolean> {
   const { key, keyId, pem, chain } = identity;
   if ((signed.chain !== undefined) !== chain) return false;
@@ -535,39 +501,6 @@ async function verifies({ signed }: Side, identity: Identity): Promise<boolean> 
   } catch {
     return false;
   }
-}
-
-/**
- * Refuses, in chain mode, unless each `live` body passes the client's chain check at epoch milliseconds `at`: each
- * stored body serves its own chain, so the configured one's validity does not cover it.
- */
-export async function checkLive(
-  identity: Identity,
-  live: readonly Live[],
-  at: number,
-): Promise<void> {
-  if (!identity.chain) return;
-  for (const { label, side } of live) {
-    try {
-      const leaf = await certificateChain(side.signed.chain, identity.pem, new Date(at));
-      await verifyChainedSignature(side.signed.body, side.signed.signature, leaf);
-    } catch (e) {
-      if (!(e instanceof ProtocolError)) throw e;
-      throw new KeyError(
-        `${label} carries a certificate chain the app no longer accepts: replace it with tide publish, republish or rollback first`,
-      );
-    }
-  }
-}
-
-/** Runs `check` at the bucket's time, then at the local clock, so expiry during the bucket read still counts. */
-export async function byBothClocks(
-  bucket: Bucket,
-  now: () => number,
-  check: (at: number) => Promise<void>,
-): Promise<void> {
-  await check(await bucket.time());
-  await check(now());
 }
 
 /** Returns the file's bytes if it is a regular file of at most 64 KiB, else undefined. */

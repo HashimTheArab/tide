@@ -57,7 +57,7 @@ const EXPORT_FIELDS = {
   expoClient: true,
   platforms: true,
 } as const satisfies Record<keyof ProjectExport | "version", true>;
-const CHAIN_FLAG = "codeSigningIncludeManifestResponseCertificateChain";
+export const CHAIN_FLAG = "codeSigningIncludeManifestResponseCertificateChain";
 const CERTIFICATE_LIMIT = 64 * 1024;
 const METADATA_LIMIT = 16 * 1024 * 1024;
 // O_NOFOLLOW refuses a symlink as the last component; O_NONBLOCK keeps a FIFO from hanging the open.
