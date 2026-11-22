@@ -11,22 +11,20 @@ import {
   buildManifest,
   buildNoUpdateAvailable,
   contentKey,
-  encodeMultipart,
   encodeBaseRecord,
   encodeSfvDictionary,
   encodeStoredReply,
-  expoSignature,
   replyKey,
 } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
-import type { Env, Writer } from "./keys.ts";
+import type { Env, Live, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
-import { KeyError, openWriter } from "./keys.ts";
+import { KeyError, byBothClocks, checkLive, openWriter } from "./keys.ts";
 import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
 import { readProjectExport } from "./publish-export.ts";
 import { preparePatches, uploadPatches } from "./publish-patch.ts";
@@ -63,16 +61,20 @@ export interface PointerWrite {
   readonly previous: PointerState;
   readonly reply: Uint8Array<ArrayBuffer> | undefined;
   readonly line: string;
+  readonly live?: readonly Live[]; // Stored bodies the write keeps reachable, checked like the served chain.
 }
 
 /** Everything a write command writes after its uploads, prepared with every refusal already made. */
 export interface Plan {
   readonly writer: Writer;
-  readonly noUpdate: Uint8Array<ArrayBuffer> | undefined; // Absent when the bucket already holds one.
+  /** The `reply/no-update` to create, or with `etag` to renew; absent when the stored one stays. */
+  readonly noUpdate:
+    | { readonly bytes: Uint8Array<ArrayBuffer>; readonly etag?: string }
+    | undefined;
   readonly records: readonly (readonly [string, Uint8Array<ArrayBuffer>])[]; // Release and base records.
   readonly pointers: readonly PointerWrite[];
-  /** Refuses unless the certificate is valid by both clocks, each read afresh. */
-  readonly checkCertificate: () => Promise<void>;
+  /** Refuses unless the certificate, and each `live` body, is valid by both clocks, each read afresh. */
+  readonly checkCertificate: (live?: readonly Live[]) => Promise<void>;
 }
 
 /** A write command's writes, returned once every refusal has been made; every failure in it follows a write. */
@@ -183,6 +185,11 @@ async function prepare(
       }
       earlier = await earlierOf(writer.identity, t.key, t.previous);
     }
+    const [current] = t.previous.sides ?? [];
+    const live =
+      earlier === undefined || current === undefined
+        ? []
+        : [{ label: `${t.key}'s current reply`, side: current }];
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
     if (percent === undefined) {
@@ -192,7 +199,7 @@ async function prepare(
     const next: Rollout = { kind: "rollout", percent, new: c.manifest, earlier };
     // Sized at the longest percentage too, so tide rollout can move it to any goal within the limit.
     rolloutRecord(t.key, { ...next, percent: 99.99 });
-    writes.push({ ...c.pointer, reply: rolloutRecord(t.key, next) });
+    writes.push({ ...c.pointer, reply: rolloutRecord(t.key, next), live });
   }
   const stored = await storedContent(writer.bucket);
   // Before the plan, so its fresh certificate check also covers the time spent diffing.
@@ -226,42 +233,58 @@ export async function readTargets<T extends { readonly key: string }>(
   }
   await writer.checkCertificate(local);
   await writer.checkCertificate(bucketTime);
-  // The local clock last, so expiry during the bucket read still counts.
-  const checkCertificate = async () => {
-    await writer.checkCertificate(await bucket.time());
-    await writer.checkCertificate(now());
-  };
+  const checkCertificate = (live: readonly Live[] = []) =>
+    byBothClocks(bucket, now, async (at) => {
+      await writer.checkCertificate(at);
+      await checkLive(writer.identity, live, at);
+    });
   return { targets, local, checkCertificate };
 }
 
 /**
- * Ends a plan once everything is signed: builds `reply/no-update` if the bucket lacks one, then checks the
- * certificate afresh, so an expiry before the first write is a refusal.
+ * Ends a plan once everything is signed: builds `reply/no-update` if the bucket lacks one or it serves an old chain,
+ * then checks the certificate and every live body afresh, so an expiry before the first write is a refusal.
  */
 export async function plan(
   writer: Writer,
-  checkCertificate: () => Promise<void>,
+  checkCertificate: Plan["checkCertificate"],
   records: Plan["records"],
   pointers: Plan["pointers"],
 ): Promise<Plan> {
-  const noUpdate = writer.noUpdate ? undefined : await noUpdateReply(writer);
-  await checkCertificate();
+  const stored = writer.noUpdate;
+  const noUpdate =
+    stored === undefined
+      ? { bytes: await noUpdateReply(writer) }
+      : writer.renewNoUpdate
+        ? { bytes: await noUpdateReply(writer), etag: stored.etag }
+        : undefined;
+  await checkCertificate(pointers.flatMap((p) => p.live ?? []));
   return { writer, noUpdate, records, pointers, checkCertificate };
 }
 
 /**
- * Writes `reply/no-update` if needed, the records, then each pointer. The certificate is re-checked before a pointer
- * only once a PUT has been attempted since the plan's final check, so every failure here follows a write.
+ * Writes the chain-mode binding and `reply/no-update` if needed, the records, then each pointer. The certificate and
+ * a pointer's live bodies are re-checked before it only once a PUT has been attempted since the plan's final check,
+ * so every failure here follows a write. In chain mode `reply/no-update` is checked just before its PUT too, since
+ * uploads come after the plan.
  */
-export async function commit(
-  { writer, noUpdate, records, pointers, checkCertificate }: Plan,
-  out: (line: string) => void,
-): Promise<void> {
+export async function commit(plan: Plan, out: (line: string) => void): Promise<void> {
+  const { writer, noUpdate, records, pointers, checkCertificate } = plan;
   const { bucket } = writer;
   let attempted = false;
-  if (noUpdate !== undefined) {
+  if (writer.binding !== undefined) {
     attempted = true;
-    await writing(NO_UPDATE_KEY, () => ensureNoUpdate(writer, noUpdate));
+    const { key, bytes } = writer.binding;
+    if ((await writing(key, () => bucket.putIfAbsent(key, bytes))) === undefined) {
+      if (!(await writer.checkBinding())) {
+        throw new PublishError(`${key} was removed by another writer during the publish`);
+      }
+    }
+  }
+  if (noUpdate !== undefined) {
+    if (writer.identity.chain) await checkCertificate();
+    attempted = true;
+    await writing(NO_UPDATE_KEY, () => ensureNoUpdate(plan, noUpdate));
   }
   for (const [key, bytes] of records) {
     attempted = true;
@@ -274,7 +297,7 @@ export async function commit(
   }
   for (const p of pointers) {
     if (p.reply !== undefined) {
-      if (attempted) await checkCertificate();
+      if (attempted) await checkCertificate(p.live);
       attempted = true;
       await writePointer(bucket, p.key, p.reply, p.previous);
     }
@@ -438,8 +461,7 @@ export async function compose(
     metadata: { channel: draft.channel },
     extra: draft.extra,
   });
-  const signature = await expoSignature(manifest, writer.signer);
-  const { boundary, body } = encodeMultipart([{ name: "manifest", body: manifest, signature }]);
+  const { boundary, body } = await writer.signedReply("manifest", manifest);
   const stored: Rollout["new"] = {
     kind: "manifest",
     updateId,
@@ -471,18 +493,29 @@ export async function compose(
 
 /** Builds and signs the stored `reply/no-update`. */
 async function noUpdateReply(writer: Writer): Promise<Uint8Array<ArrayBuffer>> {
-  const directive = buildNoUpdateAvailable();
-  const signature = await expoSignature(directive, writer.signer);
-  const { boundary, body } = encodeMultipart([{ name: "directive", body: directive, signature }]);
+  const { boundary, body } = await writer.signedReply("directive", buildNoUpdateAvailable());
   return encodeStoredReply({ kind: "noUpdateAvailable", boundary, body });
 }
 
-/** Creates `reply/no-update` from `bytes`, or accepts one another writer created under this identity. */
-async function ensureNoUpdate(writer: Writer, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
-  if ((await writer.bucket.putIfAbsent(NO_UPDATE_KEY, bytes)) !== undefined) return;
-  if (!(await writer.checkNoUpdate())) {
+/**
+ * Creates or renews `reply/no-update` from `bytes`, or accepts the body another writer stored first when it is this
+ * identity's and, in chain mode, valid by both clocks now.
+ */
+async function ensureNoUpdate(
+  { writer, checkCertificate }: Plan,
+  { bytes, etag }: NonNullable<Plan["noUpdate"]>,
+): Promise<void> {
+  const { bucket } = writer;
+  const written =
+    etag === undefined
+      ? await bucket.putIfAbsent(NO_UPDATE_KEY, bytes)
+      : await bucket.putIfMatch(NO_UPDATE_KEY, bytes, etag);
+  if (written !== undefined) return;
+  const winner = await writer.readNoUpdate();
+  if (winner === undefined) {
     throw new PublishError(`${NO_UPDATE_KEY} was removed by another writer during the publish`);
   }
+  await checkCertificate([{ label: NO_UPDATE_KEY, side: winner.side }]);
 }
 
 /**

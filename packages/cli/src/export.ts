@@ -18,6 +18,7 @@ import {
   readSmallFile,
   signingMetadata,
   validCertificate,
+  validRoot,
 } from "./keys.ts";
 import { EXPORT_FILE, EXPORT_LIMIT, encodeProjectExport, readExport } from "./publish-export.ts";
 import { PublishError, platformsOf } from "./publish-record.ts";
@@ -31,6 +32,8 @@ const INHERITED = /^(?:PATH|HOME|TMPDIR|LANG|LANGUAGE|TZ|CI|LC_[A-Z]+|EXPO_PUBLI
 const NAME = /^[A-Za-z_]\w*$/;
 // Tide's own, cloud and CI credentials; the export holds none, so project code is never given them.
 const SECRET = /^(?:TIDE|AWS|ACTIONS)_/i;
+// Read from the app config, which a config plugin also writes into the native opt-in.
+const CHAIN_FLAG = "codeSigningIncludeManifestResponseCertificateChain";
 
 /**
  * Exports the app for `tide publish --from`: the public config, each platform's runtime, the certificate and
@@ -63,9 +66,14 @@ async function run(
     member(updates, "codeSigningMetadata"),
     "app config updates.codeSigningMetadata",
   );
+  const chain = member(updates, CHAIN_FLAG);
+  if (chain !== undefined && typeof chain !== "boolean") {
+    throw new KeyError(`app config updates.${CHAIN_FLAG} must be true or false`);
+  }
   const certificate = await appCertificate(
     projectRoot,
     member(updates, "codeSigningCertificate"),
+    chain === true,
     now(),
   );
   const expoClient = await expoJson(
@@ -104,6 +112,7 @@ async function run(
   const value: ProjectExport = {
     certificate,
     codeSigningMetadata: metadata,
+    ...(chain === true && { [CHAIN_FLAG]: chain }),
     expoClient: expoClient as JsonObject,
     platforms: runtimes,
   };
@@ -195,8 +204,16 @@ function environment(env: Env, passEnv: readonly string[]): Record<string, strin
   return out;
 }
 
-/** Returns the app's certificate PEM, checked against the code-signing profile at epoch milliseconds `now`. */
-async function appCertificate(projectRoot: string, path: unknown, now: number): Promise<string> {
+/**
+ * Returns the app's certificate PEM, checked at epoch milliseconds `now` against the code-signing profile, or in
+ * chain mode as the root: Tide always serves a chain there, and a chain longer than one needs a CA root.
+ */
+async function appCertificate(
+  projectRoot: string,
+  path: unknown,
+  chain: boolean,
+  now: number,
+): Promise<string> {
   if (typeof path !== "string" || path === "") {
     throw new KeyError(
       "app config has no updates.codeSigningCertificate: Tide publishes only signed updates",
@@ -208,7 +225,7 @@ async function appCertificate(projectRoot: string, path: unknown, now: number): 
     throw new KeyError("updates.codeSigningCertificate is unreadable or over 64 KiB");
   }
   // One CERTIFICATE block and whitespace only, so the export can carry nothing else from the file.
-  await validCertificate(pem, "updates.codeSigningCertificate", now);
+  await (chain ? validRoot : validCertificate)(pem, "updates.codeSigningCertificate", now);
   return pem;
 }
 

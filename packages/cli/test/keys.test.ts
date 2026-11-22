@@ -645,7 +645,7 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rollbackReply(main.keys.privateKey),
     });
-    expect((await open(opened.env)).noUpdate).toBe(false);
+    expect((await open(opened.env)).noUpdate).toBeUndefined();
     opened.unchanged(kind === "s3" ? 3 : 0);
   });
 
@@ -653,7 +653,7 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rolloutReply(main.keys.privateKey, main.keys.privateKey),
     });
-    expect((await open(opened.env)).noUpdate).toBe(false);
+    expect((await open(opened.env)).noUpdate).toBeUndefined();
     opened.unchanged(kind === "s3" ? 3 : 0);
   });
 

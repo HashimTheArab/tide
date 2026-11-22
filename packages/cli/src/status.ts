@@ -19,7 +19,11 @@ export interface Side {
   readonly kind: StoredReply["kind"];
   readonly updateId?: string;
   readonly time?: string;
-  readonly signed: { readonly body: Uint8Array<ArrayBuffer>; readonly signature: string };
+  readonly signed: {
+    readonly body: Uint8Array<ArrayBuffer>;
+    readonly signature: string;
+    readonly chain?: Uint8Array<ArrayBuffer>; // The reply's certificate_chain part body, when it has one.
+  };
 }
 
 /**
@@ -118,17 +122,19 @@ function checkSide(key: string, reply: StoredReply): Side | string {
     return `holds ${reply.kind}, which does not fit its key`;
   }
   const partName = reply.kind === "manifest" ? "manifest" : "directive";
-  let part;
+  let parts;
   try {
-    part = parseMultipart(reply.body, reply.boundary).find((p) => p.name === partName);
+    parts = parseMultipart(reply.body, reply.boundary);
   } catch {
     return "body is not a valid multipart";
   }
+  const part = parts.find((p) => p.name === partName);
   if (part === undefined) return `body has no ${partName} part`;
   // A client configured for code signing rejects a part without one.
   const { body, signature } = part;
   if (signature === undefined) return `${partName} part has no expo-signature`;
-  const signed = { body, signature };
+  const chain = parts.find((p) => p.name === "certificate_chain")?.body;
+  const signed = chain === undefined ? { body, signature } : { body, signature, chain };
   try {
     parseExpoSignature(signature);
   } catch {

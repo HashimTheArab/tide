@@ -39,6 +39,8 @@ export interface ExportedPlatform {
 export interface ProjectExport {
   readonly certificate: string; // The PEM the builds embed.
   readonly codeSigningMetadata: SigningMetadata; // What the builds embed.
+  // Chain mode: the certificate is the root the builds embed. Written only when true, so a direct export is unchanged.
+  readonly codeSigningIncludeManifestResponseCertificateChain?: true;
   readonly expoClient: JsonObject; // `expo config --type public`, served as `extra.expoClient`.
   readonly platforms: Readonly<Partial<Record<Platform, { readonly runtimeVersion: string }>>>;
 }
@@ -51,9 +53,11 @@ const EXPORT_FIELDS = {
   version: true,
   certificate: true,
   codeSigningMetadata: true,
+  codeSigningIncludeManifestResponseCertificateChain: true,
   expoClient: true,
   platforms: true,
 } as const satisfies Record<keyof ProjectExport | "version", true>;
+const CHAIN_FLAG = "codeSigningIncludeManifestResponseCertificateChain";
 const CERTIFICATE_LIMIT = 64 * 1024;
 const METADATA_LIMIT = 16 * 1024 * 1024;
 // O_NOFOLLOW refuses a symlink as the last component; O_NONBLOCK keeps a FIFO from hanging the open.
@@ -94,7 +98,7 @@ export async function readProjectExport(dir: string) {
     if (e instanceof PublishError) throw e;
     throw new PublishError(`${EXPORT_FILE} is not UTF-8 JSON`);
   }
-  const { certificate, codeSigningMetadata, expoClient, platforms } = checkExport(value);
+  const { platforms, ...identity } = checkExport(value);
   const targets = Object.entries(platforms).map(([platform, { runtimeVersion }]) => ({
     platform: platform as Platform,
     runtime: runtimeVersion,
@@ -102,7 +106,7 @@ export async function readProjectExport(dir: string) {
   const dist = containedPath(root, "dist", "dist");
   if (!statSync(dist).isDirectory()) throw new PublishError("export dist is not a directory");
   const exported = (await readExport(dist, targets)).platforms;
-  return { certificate, codeSigningMetadata, expoClient, platforms: exported };
+  return { ...identity, platforms: exported };
 }
 
 /** Returns `value` as an export, refusing any field it should not hold. */
@@ -116,6 +120,11 @@ function checkExport(value: unknown): ProjectExport {
     throw new PublishError(`${EXPORT_FILE} version must be ${EXPORT_VERSION}`);
   }
   const { certificate, codeSigningMetadata, expoClient, platforms } = value;
+  const chain = value[CHAIN_FLAG];
+  // Absent is direct, so exports from before chain mode still read.
+  if (chain !== undefined && chain !== true) {
+    throw new PublishError(`${EXPORT_FILE} ${CHAIN_FLAG} must be true when present`);
+  }
   if (
     typeof certificate !== "string" ||
     new TextEncoder().encode(certificate).length > CERTIFICATE_LIMIT
@@ -144,6 +153,7 @@ function checkExport(value: unknown): ProjectExport {
   return {
     certificate,
     codeSigningMetadata: signingMetadata(codeSigningMetadata, `${EXPORT_FILE} codeSigningMetadata`),
+    ...(chain && { [CHAIN_FLAG]: chain }),
     expoClient: expoClient as JsonObject,
     platforms: platforms as ProjectExport["platforms"],
   };
