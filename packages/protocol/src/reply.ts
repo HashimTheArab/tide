@@ -27,8 +27,8 @@ export type StoredReply =
     };
 
 type Kind = StoredReply["kind"];
-export type ManifestReply = Extract<StoredReply, { kind: "manifest" }>;
-export type RollbackReply = Extract<StoredReply, { kind: "rollBackToEmbedded" }>;
+type ManifestReply = Extract<StoredReply, { kind: "manifest" }>;
+type RollbackReply = Extract<StoredReply, { kind: "rollBackToEmbedded" }>;
 export type NoUpdateReply = Extract<StoredReply, { kind: "noUpdateAvailable" }>;
 
 /**
