@@ -147,6 +147,16 @@ describe("the Android device driver", () => {
     });
   });
 
+  test("refuses an ANDROID_SERIAL that names a phone, and touches nothing on it", async () => {
+    await withStack(async (stack) => {
+      const fake = fakeSdk({ running: { "emulator-5554": {}, R5CT10ABCDE: {} } });
+      await expect(
+        androidDevice(stack, { sdk: fake.sdk, avd: undefined, serial: "R5CT10ABCDE" }),
+      ).rejects.toThrow("ANDROID_SERIAL R5CT10ABCDE is not an emulator");
+      expect(fake.calls().filter((c) => c.includes("R5CT10ABCDE"))).toEqual([]);
+    });
+  });
+
   test("installs fresh, launches, and reads the app's reports in order until the deadline", async () => {
     await withStack(async (stack) => {
       const fake = fakeSdk({ running: { "emulator-5554": {} }, installed: [PKG] });

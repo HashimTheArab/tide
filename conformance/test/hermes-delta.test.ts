@@ -568,24 +568,35 @@ printf '  Function count: 2\\n  String count: 3\\nGlobal String Table:\\n  Funct
 });
 
 describe("the emulator check", () => {
-  test("applyPatches applies and reverses the conformance patches in an app dir inside another repository", () => {
-    // Git run inside a repository would skip every path outside the app dir and still exit 0.
-    const repo = scratch();
-    execFileSync("git", ["init", "-q"], { cwd: repo });
-    const app = join(repo, "app");
-    mkdirSync(app);
-    const original = readFileSync(join(SHARED, "App.js"));
-    writeFileSync(join(app, "App.js"), original);
-    const patches = ["conformance/previous.patch", "conformance/feature.patch"];
+  test.each([
+    ["", false],
+    [", even when the caller's GIT_DIR and GIT_WORK_TREE name that repository", true],
+  ])(
+    "applyPatches applies and reverses the conformance patches in an app dir inside another repository%s",
+    (_, inherit) => {
+      // Git run inside a repository would skip every path outside the app dir and still exit 0.
+      const repo = scratch();
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      if (inherit) {
+        vi.stubEnv("GIT_DIR", join(repo, ".git"));
+        vi.stubEnv("GIT_WORK_TREE", repo);
+        onTestFinished(() => vi.unstubAllEnvs());
+      }
+      const app = join(repo, "app");
+      mkdirSync(app);
+      const original = readFileSync(join(SHARED, "App.js"));
+      writeFileSync(join(app, "App.js"), original);
+      const patches = ["conformance/previous.patch", "conformance/feature.patch"];
 
-    applyPatches({ dir: app }, patches);
-    expect(readFileSync(join(app, "App.js"), "utf8")).toContain("<UpdateDetails />");
-    expect(existsSync(join(app, "UpdateDetails.js"))).toBe(true);
+      applyPatches({ dir: app }, patches);
+      expect(readFileSync(join(app, "App.js"), "utf8")).toContain("<UpdateDetails />");
+      expect(existsSync(join(app, "UpdateDetails.js"))).toBe(true);
 
-    applyPatches({ dir: app }, patches.toReversed(), true);
-    expect(readFileSync(join(app, "App.js"))).toEqual(original);
-    expect(readdirSync(app)).toEqual(["App.js"]);
-  });
+      applyPatches({ dir: app }, patches.toReversed(), true);
+      expect(readFileSync(join(app, "App.js"))).toEqual(original);
+      expect(readdirSync(app)).toEqual(["App.js"]);
+    },
+  );
 
   const inspection = { bytecodeVersion: 99, sourceHash: "ab", functions: 10, strings: 20 };
   const sample: EmulatorResults = {

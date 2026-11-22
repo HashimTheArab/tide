@@ -53,6 +53,10 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
     if (attached.get(options.serial) !== "device") {
       throw new Error(`ANDROID_SERIAL ${options.serial} is not an attached device`);
     }
+    // Installing uninstalls the app first, so a phone would lose its data.
+    if (!isEmulator(options.serial)) {
+      throw new Error(`ANDROID_SERIAL ${options.serial} is not an emulator`);
+    }
     serial = options.serial;
   } else {
     const running = [...attached].filter(([s, state]) => isEmulator(s) && state === "device");

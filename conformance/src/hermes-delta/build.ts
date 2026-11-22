@@ -580,13 +580,15 @@ function write(path: string, data: string | Uint8Array): void {
 
 /**
  * Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it.
- * Git finds no repository above the tree: inside one, `git apply` skips paths outside the tree and still exits 0.
+ * Git finds no repository above the tree, even through an inherited GIT_DIR or GIT_WORK_TREE: inside one, `git
+ * apply` skips paths outside the tree and still exits 0.
  */
 function git(tree: Pick<Tree, "dir">, args: readonly string[]): string {
+  const inherited = Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"));
   return execFileSync("git", ["-C", tree.dir, ...args], {
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...Object.fromEntries(inherited),
       GIT_CEILING_DIRECTORIES: dirname(tree.dir),
       GIT_CONFIG_GLOBAL: devNull,
       GIT_CONFIG_NOSYSTEM: "1",
