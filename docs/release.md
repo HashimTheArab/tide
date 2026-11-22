@@ -48,6 +48,14 @@ A failed step stops the release until a fix lands on `main`.
 
    It uses the booted simulator or boots one (`--simulator` picks another), and must print `pass` for every version
    and scenario and exit 0. Keep its result lines with the release notes.
+4. **Server first for a stored reply version.** Servers must read a stored reply version in a release no later than
+   any CLI that writes it. Version 2 (rollouts) is read from the release that added it; no CLI writes it yet. The
+   notes of the first release whose CLI writes a new version tell operators to:
+   - deploy a server that reads it to every server sharing the bucket (staging and production, Workers and
+     containers) before raising the CLI version pinned in the publish workflow to one that writes it
+     ([deploy.md](deploy.md#upgrade-order));
+   - not roll any server back below the release that reads it while a pointer holds that version: an older server
+     answers 503 for that pointer.
 
 ## Publishing a release
 

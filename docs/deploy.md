@@ -206,6 +206,15 @@ How production is gated depends on the GitHub plan:
 | Private on Pro or Team | `production` environment limited to the protected `main` branch; the token is an environment secret; review happens in the pull request that branch protection requires |
 | Private on Free | No environment secrets or protection rules. Use Workers Builds, or accept that anyone with write access can deploy, with the token as a repository secret |
 
+### Upgrade order
+
+A release whose CLI writes a new stored reply version (`design.md`, Stored replies) needs servers that read it first.
+Deploy a server release that reads the version to every server sharing the bucket, staging and production, Workers
+and containers, before raising the CLI version pinned in the publish workflow to one that writes it. Version 2
+(rollouts) is read by servers from the release that added it; no CLI writes it yet. Never roll a server back below
+that release while any pointer holds the version: an older server answers 503 for that pointer, so first replace
+each such pointer with a version-1 reply.
+
 ## The container
 
 The Node entry runs from the npm package in any image with a supported Node:

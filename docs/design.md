@@ -15,8 +15,11 @@ Tide requires code signing. Apps must ship a code-signing certificate (`updates.
 CLI refuses to publish without a key. Without it, anyone who can write the bucket could make apps run their code.
 
 - A client checks on launch (and, depending on the app, on foreground) and never needs the server to start.
-- It applies a manifest only if its `createdAt` is newer than the update it runs, after filtering by
-  `expo-manifest-filters`. So a rollback is a new, newer publish: a pointer can never move back in time.
+- It ignores a manifest that fails the response's `expo-manifest-filters`. Otherwise it applies the manifest when its
+  `createdAt` is newer than the update it runs, or whatever its age when the running update fails those filters
+  (expo-updates' filter-aware selection policy; a `rollBackToEmbedded` directive follows the same rule). So a
+  rollback is a new, newer publish, and a device must never be served an older reply whose filters its running
+  update fails.
 - It verifies `expo-signature` over the exact bytes of the multipart part, and each asset's SHA-256.
 - With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
   launch-asset request carries `A-IM: bsdiff`,
@@ -91,7 +94,8 @@ golden files are `packages/protocol/test/fixtures/*.reply.json`. Keys in this or
   and `manifestFilters` (empty, or exactly what `encodeSfvDictionary` writes, at most 4 KiB).
 - `body` is the exact signed multipart as a string. It is UTF-8 by construction, so the string round-trips its bytes;
   nothing parses or re-serialises it. A record is at most 2 MiB; encode refuses a larger one.
-- Any other `version` is unreadable. A new layout bumps it, and the CLI must not write it before servers read it.
+- Any other `version` is unreadable. A new layout bumps it, and no CLI may write it before every server sharing the
+  bucket reads it ([release.md](release.md), [deploy.md](deploy.md#upgrade-order)).
 - The bucket is trusted, so neither codec nor server checks signatures, framing or that fields agree with the body.
   The publisher builds the record from what it has just built and signed: the boundary `encodeMultipart` returned,
   the kind of the part it built, `updateId` from the signed manifest's `id`, and the key's runtime from its
@@ -100,6 +104,21 @@ golden files are `packages/protocol/test/fixtures/*.reply.json`. Keys in this or
   iOS compares Swift strings that way and traps on duplicate dictionary keys.
 - A publish replaces a record whole (R2 and S3 atomically; on disk a temporary file and a rename), so a request reads
   the old reply or the new one, never a mix.
+
+A pointer may instead hold a version-2 rollout record, encoded by `encodeRollout` and read with `decodePointer`, which
+reads both versions; `decodeStoredReply` reads version 1 only, so `reply/no-update` can never hold a rollout. Keys in
+this order, no whitespace, no trailing newline:
+
+```json
+{"version":2,"kind":"rollout","percent":12.5,"new":{"kind":"manifest","updateId":"<uuid>","contentType":"…","manifestFilters":"…","body":"…"},"earlier":{"kind":"rollBackToEmbedded","contentType":"…","body":"…"}}
+```
+
+- `percent` is a JSON number from 0 to 100 in steps of 0.01.
+- `new` and `earlier` hold the version-1 fields without `version`. `new` is a manifest. `earlier` is a manifest with
+  another update ID, a `rollBackToEmbedded`, or `null` for the stored `reply/no-update`; never `noUpdateAvailable`.
+- Decode refuses any record encode would not write byte for byte: another key order, whitespace, escape or number
+  spelling, an unknown or missing field, or a record over 2 MiB. Both bodies are the exact signed bytes, carried as
+  strings like a version-1 body.
 
 ### Base records
 
@@ -168,22 +187,42 @@ An empty request header counts as absent. In order:
 4. `expo-channel-name` or `expo-runtime-version` missing or outside the reply key grammar: 400. There is no default
    channel: a misconfigured app sees a 400 in its logs rather than a silent no-update, and keeps its current update.
 5. No pointer for `<channel>/<runtime>/<platform>`: the stored `reply/no-update`.
-6. `Expo-Current-Update-ID` equal to the manifest pointer's update ID (compared ignoring case): the stored
-   `reply/no-update`.
-7. Otherwise the pointer. A rollback is served even to a client running its embedded update: the client applies it
-   only when its `commitTime` is newer than the running update's, and applying it stops an OTA update it already
+6. A rollout pointer picks a side, then the reply on that side, as below.
+7. `Expo-Current-Update-ID` equal to the update ID of the manifest picked (compared ignoring case), or no reply on
+   the side picked: the stored `reply/no-update`.
+8. Otherwise the reply picked. A rollback is served even to a client running its embedded update: the client applies
+   it when its `commitTime` is newer than the running update's, and applying it stops an OTA update it already
    downloaded from launching next.
 
+A rollout's side:
+
+- 100% is `new` for every request. Otherwise a request without a usable client ID gets `earlier`. A usable client ID
+  is an `EAS-Client-ID` holding exactly one UUID, in any case; both platforms send a per-install UUID on every
+  manifest request. Empty, malformed and repeated (joined) values are unusable.
+- Otherwise the bucket is the first 4 bytes (big-endian) of SHA-256 over `<new update ID>:<lowercased client ID>`,
+  mod 10,000, and the side is `new` when the bucket is below `percent × 100`. So 0% is `earlier` for every request,
+  a device keeps its side while the percentage does not drop, raising it only adds devices, and each rollout
+  reshuffles which devices go first. Protocol `rolloutSide` is the one implementation.
+- A device whose `Expo-Current-Update-ID` is the new update gets `reply/no-update` on either side. The earlier reply
+  can carry filters the new update fails (another branch, or a rollback), and the client would then apply it
+  whatever its age (Client rules). Step 7 still applies on the side picked, so a device on the earlier manifest gets
+  no-update on the earlier side.
+- So 100% serves exactly what a version-1 pointer to the new reply serves, and 0% exactly what a version-1 pointer to
+  the earlier reply (or no pointer, when it is absent) serves, except that a device on the new update gets no-update.
+  Lowering the percentage never moves a device back: devices already on the new update stay there. To move them off
+  it, publish a newer update or use `tide rollback`.
+
 A served reply is 200 with the stored body, `content-type: multipart/mixed; boundary=…`, `expo-protocol-version: 1`,
-`expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the stored
+`expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the served manifest's stored
 `expo-manifest-filters` (even when empty: a client keeps earlier filters when the header is absent). Each part
 carries `Content-Disposition: form-data; name="manifest"` (or `"directive"`), `Content-Type: application/json` and
 `expo-signature: sig="<base64>", keyid="<id>"` over its exact bytes.
 
 One deadline (10 s) covers every read of a request. A missing `reply/no-update` when it is needed, a record over
-2 MiB (checked from its stored size before reading), one that fails to decode or has the wrong kind for its key, a
-store error, and a read past the deadline are each 503 with `cache-control: no-store`; 400 and 406 are `no-store`
-too.
+2 MiB (checked from its stored size before reading), one that fails to decode (a malformed version-2 record
+included) or has the wrong kind for its key, a store error, and a read past the deadline are each 503 with
+`cache-control: no-store`; 400 and 406 are `no-store` too. A server older than version 2 answers 503 for a pointer
+holding it.
 
 ### `GET /bundles/<sha256>`
 
@@ -530,6 +569,7 @@ before that decision and writes none. The Node entry has no sink and records not
 | `blob4` | `expo-current-update-id` |
 | `blob5` | `expo-embedded-update-id` |
 | `blob6` | `expo-recent-failed-update-ids`, comma-joined |
+| `blob7` | The rollout side assigned: `new` or `earlier` (also when the new-update guard serves no-update, which `blob1` shows); `none` for a plain pointer, no pointer, or a 503 |
 | `double1` | 1 when `expo-fatal-error` is present, else 0 |
 
 Headers are client input, so each value is bounded before it is written. Channel and runtime already passed the
@@ -537,8 +577,9 @@ reply key grammar (at most 64 ASCII characters). An update ID is kept only when 
 a repeated header arrives joined and is dropped. The failed IDs are read as a list of quoted strings: members that
 are quoted UUIDs are kept, lowercased and in order, up to 5 (a stock client sends at most 5); any other member is
 dropped. `expo-fatal-error` holds the client's error message, which may contain user data, so only its presence is
-recorded. A point is therefore at most 64 bytes of index and 345 bytes of blobs, well inside Analytics Engine's
-limits (96-byte index, 16 KB of blobs).
+recorded. The client ID is never recorded. A point is therefore at most 64 bytes of index and 352 bytes of blobs (an
+earlier-side rollback on Android: 18 + 7 + 64 + 36 + 36 + 184 + 7), well inside Analytics Engine's limits (96-byte
+index, 16 KB of blobs).
 
 The sink is never awaited: a sink that throws, rejects, or returns a promise that never settles leaves the reply
 unchanged, and a throw or rejection is logged by error name only, never with the point's values.
