@@ -766,8 +766,8 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
   test("main under key A and root under key B each pass; publish refuses the layout once checked", async () => {
     const opened = await store(kind, await twoIdentities());
     // Each identity's bodies fail under the other's certificate, so neither judges the other's.
-    await expect(check(opened.env, main)).resolves.toBeUndefined();
-    await expect(check(opened.env, other, "root")).resolves.toBeUndefined();
+    await expect(check(opened.env, main)).resolves.toBe("identities");
+    await expect(check(opened.env, other, "root")).resolves.toBe("identities");
     await refusal(
       openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }),
       SEVERAL("reply/no-update"),
@@ -829,7 +829,7 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
 
   test("a legacy pointer beside a version-3 no-update is main's alone: root is refused until it is converted", async () => {
     const opened = await store(kind, await twoIdentities(await rollbackReply(A())));
-    await expect(check(opened.env, main)).resolves.toBeUndefined();
+    await expect(check(opened.env, main)).resolves.toBe("identities");
     await refusal(check(opened.env, other, "root"), STILL_LEGACY(IOS, "root"));
     opened.unchanged(kind === "s3" ? 7 : 0);
   });
@@ -896,7 +896,7 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
       "reply/no-update": bytes,
       ...Object.fromEntries([await directBinding(main)]),
     });
-    await expect(check(opened.env, main)).resolves.toBeUndefined();
+    await expect(check(opened.env, main)).resolves.toBe("identities");
   });
 });
 

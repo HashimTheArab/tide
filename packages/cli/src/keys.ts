@@ -482,14 +482,14 @@ async function refuseIdentities(
 }
 
 /**
- * For a writer that signs nothing, also refuses a bucket without this keyid's `reply/no-update`, or whose version-1
- * `reply/no-update` sits beside a version-3 pointer; `absent` says why when it is absent.
+ * For a writer that signs nothing, also refuses a bucket without this keyid's `reply/no-update`; `absent` says why
+ * when it is absent. Returns its layout.
  */
 export async function servingBucket(
   bucket: Bucket,
   identity: Identity,
   absent: string,
-): Promise<void> {
+): Promise<"legacy" | "identities"> {
   const { noUpdate, fallback } = await checkBucket(bucket, identity);
   if (fallback === undefined) throw new KeyError(absent);
   if (noUpdate === undefined) {
@@ -497,12 +497,16 @@ export async function servingBucket(
       `${NO_UPDATE_KEY} holds no reply for keyid ${JSON.stringify(identity.keyId)}: tide publish, republish or rollback writes it`,
     );
   }
-  // The server answers 503 where a version-3 pointer falls back to a version-1 reply/no-update.
-  if (fallback === "legacy") await refuseIdentities(bucket, mixedLayout);
+  return fallback;
 }
 
-/** The refusal of a version-3 pointer beside a version-1 `reply/no-update`. */
-const mixedLayout = (key: string) =>
+/** Refuses every version-3 pointer beside a version-1 `reply/no-update`, as the server answers 503 there. */
+export async function refuseMixedLayout(bucket: Bucket): Promise<void> {
+  await refuseIdentities(bucket, mixedLayout);
+}
+
+/** The refusal of a version-3 pointer at `key` beside a version-1 `reply/no-update`. */
+export const mixedLayout = (key: string) =>
   `${key} holds replies for several keyids, but ${NO_UPDATE_KEY} holds one reply for every keyid`;
 
 /**

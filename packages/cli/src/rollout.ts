@@ -7,7 +7,14 @@ import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
 import type { Side } from "./status.ts";
-import { buildIdentity, checkCopied, checkLive, sameBytes, servingBucket } from "./keys.ts";
+import {
+  buildIdentity,
+  checkCopied,
+  checkLive,
+  mixedLayout,
+  sameBytes,
+  servingBucket,
+} from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
   PublishError,
@@ -50,7 +57,7 @@ export async function rollout(
     const identity = await buildIdentity(env, now());
     const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
-    await servingBucket(
+    const fallback = await servingBucket(
       bucket,
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
@@ -59,6 +66,8 @@ export async function rollout(
     for (const key of keys) {
       const previous = await readPointer(bucket, key, identity.keyId);
       const { reply, sides = [], others } = previous;
+      // Only the pointers moved: an emergency revert must not wait on an unrelated key.
+      if (others !== undefined && fallback === "legacy") throw new PublishError(mixedLayout(key));
       if (previous.etag === undefined) {
         throw new PublishError(`${key} does not exist: there is no rollout`);
       }

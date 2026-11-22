@@ -916,6 +916,26 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("several keyids on
     );
   });
 
+  test.each([
+    ["a version-3", (main10: Rollout, root: PointerEntry) => pointerOf({ main: main10, root })],
+    ["an unreadable", () => new Uint8Array(MAX_IDENTITIES_BYTES + 1)],
+  ])(
+    "over a version-1 reply/no-update, a legacy rollout reverts beside %s pointer it does not move",
+    async (_, android) => {
+      const store = open();
+      const { main10, root } = await seedTwo(store);
+      await bucketPut(store, NO_UPDATE_KEY, await noUpdateBy(main));
+      await bucketPut(store, IOS, encodeRollout(main10));
+      await bucketPut(store, ANDROID, android(main10, root));
+      expect(await rolloutTo(store, "revert", ONLY_IOS)).toEqual({
+        code: 0,
+        out: [`${IOS} ${ID_A} 0`],
+        err: [],
+      });
+      expect(stored(store, IOS)).toEqual(encodeRollout({ ...main10, percent: 0 }));
+    },
+  );
+
   test("publish, rollback and republish refuse a version-3 target beside a version-1 reply/no-update", async () => {
     const store = open();
     const published = await publishTo(store, iosExport());
