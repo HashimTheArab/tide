@@ -6,6 +6,7 @@ import { ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
 import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
+import type { Side } from "./status.ts";
 import { buildIdentity, checkCopied, checkLive, sameBytes, servingBucket } from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
@@ -54,8 +55,7 @@ export async function rollout(
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
     );
-    const clocks = identity.chain ? [now(), await bucket.time()] : [];
-    const writes: PointerWrite[] = [];
+    const writes: (PointerWrite & { readonly rise?: Side })[] = [];
     for (const key of keys) {
       const previous = await readPointer(bucket, key);
       const { reply, sides = [] } = previous;
@@ -65,20 +65,31 @@ export async function rollout(
       await checkCopied(key, sides, identity);
       // A rise serves the new reply to devices the earlier one served; revert restores what they got before.
       const [fresh] = sides;
-      if (goal > reply.percent && fresh !== undefined) {
-        for (const at of clocks) await checkLive(`${key}'s new reply`, fresh, identity, at);
-      }
+      const rise = identity.chain && goal > reply.percent ? fresh : undefined;
       writes.push({
         key,
         previous,
         // Encoded here, so a record over the size limit refuses before any write.
         reply: reply.percent === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal }),
         line: `${key} ${reply.new.updateId} ${goal}`,
+        ...(rise && { rise }),
       });
     }
+    // Both clocks, each read afresh and the local one last, so expiry during the bucket read still counts.
+    const checkRise = async (rise: Side, key: string) => {
+      for (const at of [await bucket.time(), now()]) {
+        await checkLive(`${key}'s new reply`, rise, identity, at);
+      }
+    };
+    for (const { rise, key } of writes) if (rise !== undefined) await checkRise(rise, key);
     return async () => {
-      for (const { key, previous, reply, line } of writes) {
-        if (reply !== undefined) await writePointer(bucket, key, reply, previous);
+      let attempted = false;
+      for (const { key, previous, reply, line, rise } of writes) {
+        if (reply !== undefined) {
+          if (attempted && rise !== undefined) await checkRise(rise, key);
+          attempted = true;
+          await writePointer(bucket, key, reply, previous);
+        }
         out(line);
       }
     };

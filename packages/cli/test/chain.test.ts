@@ -472,6 +472,43 @@ describe("leaf rotation under the same root", () => {
     await expectServes(store, NO_UPDATE_KEY, B(), LATER);
     expect(store.objects().get(ANDROID)).toEqual(android);
   });
+
+  test("revert and a rerun at the reached percentage need no bucket clock", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B(), { now: at(T) })).toMatchObject({ code: 0 });
+    const staged = await publishWith(store, B(), { now: at(T), extra: ["--rollout", "10"] });
+    expect(staged).toMatchObject({ code: 0, err: [] });
+    s3.setNow(Number.NaN); // Every Date header is now unreadable.
+    for (const goal of ["10", "revert"]) {
+      expect(await rolloutTo(store, w.root, goal, () => T)).toMatchObject({ code: 0, err: [] });
+    }
+  });
+
+  test.each(["local", "bucket"])(
+    "a new chain that expires by the %s clock after the first pointer rises stops the second",
+    async (clock) => {
+      const store = s3Store();
+      expect(await publishWith(store, B(), { now: at(T) })).toMatchObject({ code: 0 });
+      const staged = await publishWith(store, SOON_LEAF(), {
+        now: at(T),
+        extra: ["--rollout", "10"],
+      });
+      expect(staged).toMatchObject({ code: 0, err: [] });
+      const android = store.objects().get(ANDROID);
+      const from = s3.puts.length;
+      const risen = () => s3.puts.slice(from).includes(IOS);
+      if (clock === "bucket") s3.onPut(IOS, () => s3.setNow(LATER));
+      const now = () => (clock === "local" && risen() ? LATER : T);
+      const result = await rolloutTo(store, w.root, "20", now);
+      expect(result).toMatchObject({
+        code: 1,
+        err: [`tide: ${ANDROID}'s new reply: certificate_chain leaf has expired`],
+      });
+      expect(result.out).toEqual([expect.stringMatching(/^reply\/main\/1\.0\.0\/ios .* 20$/)]);
+      expect(risen()).toBe(true);
+      expect(store.objects().get(ANDROID)).toEqual(android);
+    },
+  );
 });
 
 describe("another identity's bucket", () => {

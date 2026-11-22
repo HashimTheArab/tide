@@ -489,8 +489,9 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
   `publish --rollout`) must verify under the configured certificate and `keyid`, whatever `reply/no-update` holds.
   Plain publish, republish and rollback copy nothing, so they still replace a pointer that fails; that repairs it.
 - **A rise checks the new reply.** In chain mode, a higher percentage or `complete` refuses (exit 2) when the new
-  reply's chain fails the client's rules by either clock, since it would reach devices the earlier reply served.
-  `revert` restores what devices got before the rollout and checks nothing.
+  reply's chain fails the client's rules by either clock, read after the pointers, since it would reach devices the
+  earlier reply served. Before each later rising write, both clocks are read afresh again; a failure then exits 1.
+  `revert` and a target already at its goal restore or keep what devices get, and read no clock.
 - **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
   version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
 - **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
