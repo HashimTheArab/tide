@@ -1,0 +1,17 @@
+# Renovate owns version updates. These entries only constrain Dependabot security updates:
+# each conformance app pins one Expo major, so a fix that needs another major is not applied.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories: ["/conformance/apps/sdk-55", "/conformance/apps/sdk-58"]
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "expo"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "expo-*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@expo/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-native"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
