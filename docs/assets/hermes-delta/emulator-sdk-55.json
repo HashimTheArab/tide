@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "about": "Android release build of the conformance app against a local Tide (Node entry, disk store) on an emulator. Updates in publish order: older (the start tree), base (previous.patch), delta-1 (feature.patch on base, its launch bundle recompiled from Expo's JS and hermesc command with -base-bytecode of base's bundle), older-2 (the start tree), delta-2 (as delta-1). No device ever runs base. The embedded build is registered before the first publish, so Tide patches from it.",
+  "app": {
+    "id": "sdk-55",
+    "title": "Tide conformance app, Expo SDK 55",
+    "platform": "android"
+  },
+  "device": {
+    "abi": "arm64-v8a"
+  },
+  "tools": {
+    "expo": "55.0.32",
+    "@expo/cli": "55.0.37",
+    "@expo/metro-config": "55.0.27",
+    "react-native": "0.83.10",
+    "hermes-compiler": "0.14.1",
+    "@react-native/gradle-plugin": "0.83.10",
+    "hermesc": {
+      "path": "node_modules/hermes-compiler/hermesc/osx-bin/hermesc",
+      "release": "0.14.1",
+      "bytecodeVersion": 96
+    },
+    "hermesRuntime": {
+      "release": "0.14.1",
+      "from": "react-native/sdks/hermes-engine/version.properties HERMES_VERSION_NAME"
+    }
+  },
+  "deltaArgs": [
+    "-emit-binary",
+    "-out",
+    "index.hbc",
+    "index.js",
+    "-O",
+    "-base-bytecode=base.hbc"
+  ],
+  "embeddedBytecodeVersion": 96,
+  "deltas": [
+    {
+      "marker": "delta-55-1",
+      "delta": {
+        "bytes": 1718839,
+        "sha256": "0f17f9b6fdcf0c79f342b27b82c33af433dd51bac16f014cb2d3766d973e5c1f",
+        "alone": {
+          "bytecodeVersion": 96,
+          "sourceHash": "eee3a9fac2f01eb49e92d80ac9d1ace79d5de547",
+          "functions": 7028,
+          "strings": 7241
+        }
+      },
+      "plain": {
+        "bytes": 1718727,
+        "sha256": "7b3f1a1eca66733e3054ccbfc58019ce6d18244d41ff5987a53e52a30643ce71",
+        "alone": {
+          "bytecodeVersion": 96,
+          "sourceHash": "eee3a9fac2f01eb49e92d80ac9d1ace79d5de547",
+          "functions": 7028,
+          "strings": 7240
+        }
+      },
+      "patchFromBase": {
+        "plain": 97117,
+        "delta": 7661
+      }
+    },
+    {
+      "marker": "delta-55-2",
+      "delta": {
+        "bytes": 1718839,
+        "sha256": "8e98d288b06ba795b54f53ac388f6b83505fa938e4f9e94b3280fec0b2853615",
+        "alone": {
+          "bytecodeVersion": 96,
+          "sourceHash": "904b5b6a0625271133fc6ed331cd13325c7d013a",
+          "functions": 7028,
+          "strings": 7241
+        }
+      },
+      "plain": {
+        "bytes": 1718727,
+        "sha256": "6cdba60d9e5ad461d0716d9dba669b30717c1c258eb1e53bd365f289238c36fd",
+        "alone": {
+          "bytecodeVersion": 96,
+          "sourceHash": "904b5b6a0625271133fc6ed331cd13325c7d013a",
+          "functions": 7028,
+          "strings": 7240
+        }
+      },
+      "patchFromBase": {
+        "plain": 97111,
+        "delta": 7668
+      }
+    }
+  ],
+  "baseRequested": false,
+  "paths": {
+    "other-ota-patch": {
+      "pass": true,
+      "saw": "delta-55-1 ran on a device on older-55"
+    },
+    "other-ota-full": {
+      "pass": true,
+      "saw": "delta-55-2 ran on a device on older-55-2"
+    },
+    "embedded-patch": {
+      "pass": true,
+      "saw": "delta-55-2 ran on a device on embedded-55"
+    },
+    "embedded-full": {
+      "pass": true,
+      "saw": "delta-55-2 ran on a device on embedded-55"
+    }
+  }
+}

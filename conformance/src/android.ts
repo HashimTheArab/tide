@@ -69,6 +69,10 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
   }
   const adb = (args: readonly string[], ms = COMMAND_MS) =>
     tool(adbPath, ["-s", serial, ...args], ms);
+  // Installing uninstalls the app first, so a phone would lose its data. A serial is only a name: ask the device.
+  if (!booted && !(await qemu(adb, "ro.boot.qemu")) && !(await qemu(adb, "ro.kernel.qemu"))) {
+    throw new Error(`${serial} is not an emulator`);
+  }
   const abi = (await adb(["shell", "getprop", "ro.product.cpu.abi"])).trim();
   const reports = await followLog(stack, adbPath, serial, adb);
   return {
@@ -108,6 +112,11 @@ export function parseDevices(out: string): Map<string, string> {
 }
 
 const isEmulator = (serial: string) => serial.startsWith("emulator-");
+
+/** Whether the device sets `prop`, one of the properties only the emulator's kernel sets, to 1. */
+async function qemu(adb: (args: readonly string[]) => Promise<string>, prop: string) {
+  return (await adb(["shell", "getprop", prop])).trim() === "1";
+}
 
 /** Boots the AVD read-only on a free console port, registers its shutdown and returns its serial once booted. */
 async function boot(

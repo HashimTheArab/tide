@@ -18,6 +18,7 @@ import {
 import { createRequire } from "node:module";
 import { devNull, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import type { AppId, AppPin } from "./apps.ts";
@@ -51,6 +52,11 @@ export interface Hermesc {
   readonly args: readonly string[];
   readonly input: string;
   readonly out: string;
+}
+
+/** Applies (or reverses) patch files in the tree, in order. */
+export function applyPatches(tree: Pick<Tree, "dir">, patches: readonly string[], reverse = false) {
+  for (const patch of patches) git(tree, ["apply", ...(reverse ? ["-R"] : []), patchPath(patch)]);
 }
 
 /** Returns the hash of everything the start commit is made from, so a changed pin rebuilds a cached tree. */
@@ -212,7 +218,7 @@ export async function exportJs(tree: Tree): Promise<Uint8Array<ArrayBuffer>> {
 }
 
 /** Returns metadata.json's Android bundle path. */
-function exportedBundle(out: string): string {
+export function exportedBundle(out: string): string {
   const metadata = JSON.parse(readFileSync(join(out, "metadata.json"), "utf8")) as {
     fileMetadata: { android: { bundle: string } };
   };
@@ -305,6 +311,62 @@ export async function compile(
     );
     await run(tree, hermescPath(tree), args, {}, dir);
     return { hbc: bytes(join(dir, "index.hbc")), args };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** What hermesc reads from a bytecode file's header. */
+export interface Inspection {
+  readonly bytecodeVersion: number;
+  readonly sourceHash: string;
+  readonly functions: number;
+  readonly strings: number;
+}
+
+/** Returns the header facts of `hermesc -b -dump-bytecode` output; a dump missing one throws. */
+export function parseDump(lines: readonly string[]): Inspection {
+  const field = (name: string) => {
+    const value = lines
+      .find((l) => l.trim().startsWith(`${name}: `))
+      ?.trim()
+      .slice(name.length + 2);
+    if (value === undefined) throw new Error(`the bytecode dump has no ${name}`);
+    return value;
+  };
+  return {
+    bytecodeVersion: Number(field("Bytecode version number")),
+    sourceHash: field("Source hash"),
+    functions: Number(field("Function count")),
+    strings: Number(field("String count")),
+  };
+}
+
+/**
+ * Returns what the app's hermesc reads from `hbc` as executable bytecode, disassembled in a scratch dir holding no
+ * other file, so a delta compile's base is out of reach. A file hermesc cannot load to the end throws.
+ */
+export async function inspect(tree: Tree, hbc: Uint8Array): Promise<Inspection> {
+  const dir = mkdtempSync(join(tmpdir(), "hermes-delta-inspect-"));
+  try {
+    writeFileSync(join(dir, "index.hbc"), hbc);
+    const child = spawn(hermescPath(tree), ["-b", "-dump-bytecode", "index.hbc"], {
+      cwd: dir,
+      env: buildEnv(tree, {}),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // The header ends where the string table starts; the rest of the dump is read and dropped.
+    const header: string[] = [];
+    let inHeader = true;
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      if (line.startsWith("Global String Table")) inHeader = false;
+      if (inHeader) header.push(line);
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+    const [code] = (await once(child, "close")) as [number | null];
+    if (code !== 0) throw new Error(`hermesc could not load the bytecode alone: ${stderr.trim()}`);
+    return parseDump(header);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -516,11 +578,21 @@ function write(path: string, data: string | Uint8Array): void {
   writeFileSync(path, data);
 }
 
-/** Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it. */
+/**
+ * Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it.
+ * Git finds no repository above the tree, even through an inherited GIT_DIR or GIT_WORK_TREE: inside one, `git
+ * apply` skips paths outside the tree and still exits 0.
+ */
 function git(tree: Pick<Tree, "dir">, args: readonly string[]): string {
+  const inherited = Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"));
   return execFileSync("git", ["-C", tree.dir, ...args], {
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+    env: {
+      ...Object.fromEntries(inherited),
+      GIT_CEILING_DIRECTORIES: dirname(tree.dir),
+      GIT_CONFIG_GLOBAL: devNull,
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
   });
 }
 
