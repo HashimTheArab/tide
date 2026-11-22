@@ -70,7 +70,7 @@ The design behind all of this — storage layout, wire rules, key handling — i
 1. Only on Expo's Production and Enterprise plans, where `eas update` signs locally.
 2. xprem needs PostgreSQL for bundle diffing and rollouts. Its stateless mode drops PostgreSQL but reads channels
    from Expo's API and has neither feature.
-3. Planned; see "Later" in [docs/design.md](docs/design.md#later).
+3. Planned; see P12 in [docs/roadmap.md](docs/roadmap.md).
 
 Sources for every cell: [docs/comparison.md](docs/comparison.md).
 

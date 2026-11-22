@@ -579,11 +579,3 @@ wherever it points and its SHA-256 compared with `launchAsset.hash`; other asset
 
 Exit 1 is left to an uncaught error, so it always means a bug. Messages are fixed text naming the failure and at
 most a status; no header value, key or response body is printed.
-
-## Later
-
-- Certificate chains: the CLI validates and serves a leaf plus intermediates, so the key can rotate without an app
-  release.
-- A KMS-signed self-signed certificate, so the key never exists outside KMS.
-- Staged rollouts: a percentage in the pointer, a hash of `EAS-Client-ID`, two pre-signed bodies.
-- Hermes delta compiles (`hermesc -base-bytecode`), measured against plain bsdiff.
