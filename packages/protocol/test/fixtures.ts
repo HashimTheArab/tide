@@ -1,7 +1,13 @@
 // Shared by the tests and the fixture generator; Web APIs only, so it also runs on workerd.
 import type { Part, PartName, Rollout, Signer, StoredReply } from "../src/index.ts";
 import { base64 } from "../src/hash.ts";
-import { encodeMultipart, encodeRollout, encodeStoredReply, expoSignature } from "../src/index.ts";
+import {
+  encodeMultipart,
+  encodeRollout,
+  encodeSfvDictionary,
+  encodeStoredReply,
+  expoSignature,
+} from "../src/index.ts";
 
 export const BOUNDARY = "tide_fixture_boundary";
 /** The rollout new side's boundary, so a reply carrying the wrong side's content-type fails. */
@@ -9,7 +15,7 @@ const NEXT_BOUNDARY = "tide_fixture_next";
 
 interface GoldenPart {
   readonly name: PartName;
-  readonly file: string;
+  readonly file: string | readonly string[]; // An array's files are concatenated in order.
   readonly signed?: true;
 }
 
@@ -53,6 +59,34 @@ export const EXPO_GOLDEN: Readonly<Record<string, Golden>> = {
   },
 };
 
+/** A chain-mode golden: signed by `signer` from `chainFixtures`, with `keyId` (absent: no keyid member). */
+interface ChainGolden extends Golden {
+  readonly signer: "leaf" | "shortLeaf";
+  readonly keyId: string | undefined;
+}
+
+/** Tide's chain-mode goldens; `rotated` is no metadata keyid, since chain mode never compares it. */
+export const CHAIN_GOLDEN: Readonly<Record<string, ChainGolden>> = {
+  "chain.multipart": {
+    boundary: BOUNDARY,
+    signer: "leaf",
+    keyId: "rotated",
+    parts: [
+      { name: "manifest", file: "manifest.json", signed: true },
+      { name: "certificate_chain", file: ["chain-leaf.pem", "chain-intermediate.pem"] },
+    ],
+  },
+  "chain-short.multipart": {
+    boundary: BOUNDARY,
+    signer: "shortLeaf",
+    keyId: undefined,
+    parts: [
+      { name: "directive", file: "directive-no-update.json", signed: true },
+      { name: "certificate_chain", file: "chain-short-leaf.pem" },
+    ],
+  },
+};
+
 /** Returns the parts of a golden, with each signed part's signature from `signature`. */
 export async function goldenParts(
   parts: readonly GoldenPart[],
@@ -61,7 +95,7 @@ export async function goldenParts(
 ): Promise<Part[]> {
   return Promise.all(
     parts.map(async ({ name, file, signed }, i) => {
-      const body = read(file);
+      const body = typeof file === "string" ? read(file) : concat(file.map(read));
       return signed ? { name, body, signature: await signature(body, i) } : { name, body };
     }),
   );
@@ -231,7 +265,10 @@ export interface CertificateOptions {
   readonly notBefore?: Date; // Default: `now`.
   readonly notAfter?: Date; // Default: the end of 2049.
   readonly v1?: true; // No version field and no extensions.
-  readonly issuer?: string; // Default: the subject's name, `Tide test`.
+  readonly subject?: string | Uint8Array; // A common name, or a whole Name's DER. Default: `Tide test`.
+  readonly issuer?: string | Uint8Array; // Default: `Tide test`.
+  readonly serial?: Uint8Array; // The INTEGER's contents, as given. Default: 16 random octets, positive.
+  readonly issuerUniqueId?: true; // A one-octet issuerUniqueID before the extensions.
   readonly outerAlgorithm?: Uint8Array;
   readonly innerAlgorithm?: Uint8Array;
   readonly extensions?: readonly Uint8Array[];
@@ -247,21 +284,23 @@ export async function certificate(
   now: Date,
   options: CertificateOptions = {},
 ): Promise<string> {
-  const serial = crypto.getRandomValues(new Uint8Array(16));
-  serial[0] = 0x40 | ((serial[0] ?? 0) & 0x3f); // Positive and minimal.
+  const random = crypto.getRandomValues(new Uint8Array(16));
+  random[0] = 0x40 | ((random[0] ?? 0) & 0x3f); // Positive and minimal.
+  const nameOf = (n: string | Uint8Array) => (typeof n === "string" ? name(n) : n);
   const tbs = der(
     SEQUENCE,
     ...(options.v1 ? [] : [der(0xa0, der(0x02, new Uint8Array([2])))]),
-    der(0x02, serial),
+    der(0x02, options.serial ?? random),
     options.innerAlgorithm ?? ALGORITHM.sha256WithRsa,
-    name(options.issuer ?? "Tide test"),
+    nameOf(options.issuer ?? "Tide test"),
     der(
       SEQUENCE,
       time(options.notBefore ?? now),
       time(options.notAfter ?? new Date("2049-12-31T23:59:59Z")),
     ),
-    name("Tide test"),
+    nameOf(options.subject ?? "Tide test"),
     new Uint8Array(await crypto.subtle.exportKey("spki", subject)),
+    ...(options.issuerUniqueId ? [der(0x81, Uint8Array.of(0, 1))] : []),
     ...(options.v1 ? [] : [der(0xa3, der(SEQUENCE, ...(options.extensions ?? CODE_SIGNING)))]),
   );
   const signature = new Uint8Array(await crypto.subtle.sign(RSA_SHA256, issuer, tbs));
@@ -279,6 +318,156 @@ export async function certificate(
 export function pem(bytes: Uint8Array, label = "CERTIFICATE"): string {
   const lines = base64(bytes).match(/.{1,64}/g) ?? [];
   return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
+}
+
+/** The chain goldens' validity window, so the tests verify them at a fixed instant inside it. */
+export const CHAIN_VALIDITY = {
+  notBefore: new Date("2026-11-01T00:00:00Z"),
+  notAfter: new Date("2046-11-01T00:00:00Z"),
+} as const;
+/** The instant the chain tests verify at, strictly inside `CHAIN_VALIDITY`. */
+export const CHAIN_NOW = new Date("2031-01-01T00:00:00Z");
+
+const hexExtension = (oid: string, critical: boolean, value: Uint8Array) =>
+  der(SEQUENCE, hexBytes(oid), ...(critical ? [hexBytes("0101ff")] : []), der(0x04, value));
+const keyUsage = (bits: string) => hexExtension("0603551d0f", true, der(0x03, hexBytes(bits)));
+
+/** Chain-profile extensions a test certificate can carry, each one DER `Extension`. */
+export const CHAIN_EXTENSION = {
+  /** Basic Constraints cA, critical, with an optional pathLen of 0 to 127. */
+  ca: (pathLen?: number) =>
+    hexExtension(
+      "0603551d13",
+      true,
+      der(
+        SEQUENCE,
+        hexBytes("0101ff"),
+        ...(pathLen === undefined ? [] : [der(0x02, Uint8Array.of(pathLen))]),
+      ),
+    ),
+  /** Critical Key Usage with these BIT STRING contents (unused-bit count first), as hex. */
+  keyUsage,
+  keyCertSign: keyUsage("0204"),
+  digitalSignatureAndKeyCertSign: keyUsage("0284"),
+  subjectKeyId: (id: Uint8Array) => hexExtension("0603551d0e", false, der(0x04, id)),
+  authorityKeyId: (id: Uint8Array) =>
+    hexExtension("0603551d23", false, der(SEQUENCE, der(0x80, id))),
+  /** Authority Key Identifier in the issuer-and-serial form: a directoryName and serial 1. */
+  authorityIssuerSerial: hexExtension(
+    "0603551d23",
+    false,
+    der(SEQUENCE, der(0xa1, der(0xa4, name("Tide root"))), der(0x82, Uint8Array.of(1))),
+  ),
+  /** Noncritical name constraints permitting one DNS subtree. */
+  nameConstraints: hexExtension(
+    "0603551d1e",
+    false,
+    der(SEQUENCE, der(0xa0, der(SEQUENCE, der(0x82, new TextEncoder().encode("example.com"))))),
+  ),
+  /** A critical extension under OID 1.2.3.4. */
+  unknownCritical: hexExtension("06032a0304", true, der(0x05)),
+  /** Expo project information holding `text` as a UTF8String. */
+  project: (text: string) =>
+    hexExtension(
+      "061e2a864886f71401be40937a82d32d817e810066811d83e1ea75819f570201",
+      false,
+      der(0x0c, new TextEncoder().encode(text)),
+    ),
+} as const;
+
+/** Returns a key identifier for `key`: the first 20 octets of its SPKI's SHA-256. */
+export async function keyId(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
+  const spki = await crypto.subtle.exportKey("spki", key);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", spki)).slice(0, 20);
+}
+
+interface KeyPair {
+  readonly publicKey: CryptoKey;
+  readonly privateKey: CryptoKey;
+}
+
+/** The keys behind the chain goldens. */
+export interface ChainKeys {
+  readonly root: KeyPair;
+  readonly intermediate: KeyPair;
+  readonly leaf: KeyPair;
+  readonly shortLeaf: KeyPair;
+}
+
+/** Returns an expo-signature header over `body` by `key`, with `keyid` only when `keyId` is given. */
+async function chainSignature(
+  body: Uint8Array<ArrayBuffer>,
+  key: CryptoKey,
+  keyId: string | undefined,
+): Promise<string> {
+  const sig = base64(new Uint8Array(await crypto.subtle.sign(RSA_SHA256, key, body)));
+  const alg = "rsa-v1_5-sha256";
+  return encodeSfvDictionary(keyId === undefined ? { sig, alg } : { sig, keyid: keyId, alg });
+}
+
+/**
+ * Returns the chain goldens from `keys`: a CA root (pathLen 1), an intermediate (pathLen 0) linked by key
+ * identifiers, a leaf under it, a leaf directly under the root, and the multiparts in `CHAIN_GOLDEN`.
+ */
+export async function chainFixtures(
+  read: Read,
+  keys: ChainKeys,
+): Promise<Record<string, Uint8Array<ArrayBuffer>>> {
+  const [rootId, intermediateId] = [
+    await keyId(keys.root.publicKey),
+    await keyId(keys.intermediate.publicKey),
+  ];
+  const issue = (subject: KeyPair, issuer: KeyPair, options: CertificateOptions) =>
+    certificate(subject.publicKey, issuer.privateKey, CHAIN_NOW, { ...CHAIN_VALIDITY, ...options });
+  const pems = {
+    "chain-root.pem": await issue(keys.root, keys.root, {
+      subject: "Tide root",
+      issuer: "Tide root",
+      extensions: [
+        CHAIN_EXTENSION.ca(1),
+        CHAIN_EXTENSION.keyCertSign,
+        CHAIN_EXTENSION.subjectKeyId(rootId),
+      ],
+    }),
+    "chain-intermediate.pem": await issue(keys.intermediate, keys.root, {
+      subject: "Tide intermediate",
+      issuer: "Tide root",
+      extensions: [
+        CHAIN_EXTENSION.ca(0),
+        CHAIN_EXTENSION.keyCertSign,
+        CHAIN_EXTENSION.subjectKeyId(intermediateId),
+        CHAIN_EXTENSION.authorityKeyId(rootId),
+      ],
+    }),
+    "chain-leaf.pem": await issue(keys.leaf, keys.intermediate, {
+      subject: "Tide leaf",
+      issuer: "Tide intermediate",
+      extensions: [...CODE_SIGNING, CHAIN_EXTENSION.authorityKeyId(intermediateId)],
+    }),
+    "chain-short-leaf.pem": await issue(keys.shortLeaf, keys.root, {
+      subject: "Tide short leaf",
+      issuer: "Tide root",
+    }),
+  };
+  const out: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const [file, text] of Object.entries(pems)) out[file] = new TextEncoder().encode(text);
+  const own = (file: string) => out[file] ?? read(file);
+  for (const [file, { boundary, parts, signer, keyId }] of Object.entries(CHAIN_GOLDEN)) {
+    const key = keys[signer].privateKey;
+    const signed = await goldenParts(parts, own, (body) => chainSignature(body, key, keyId));
+    out[file] = encodeMultipart(signed, boundary).body;
+  }
+  return out;
+}
+
+function concat(chunks: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 /** `patch-known.bsdiff`: these control triples, diff and extra bytes; it applies to any base of 64 or more bytes. */

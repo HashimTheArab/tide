@@ -2,10 +2,17 @@
 
 Tests compare these bytes exactly.
 
-Regenerate `certificate.pem`, the signed Tide multiparts and the `.reply.json` stored replies wrapping them with a
-fresh in-memory key: `node packages/protocol/test/generate-fixtures.ts [--out <dir>]`. `--replies-only` rewraps the
-committed multiparts without signing. Then check the certificate's code-signing profile
+Regenerate `certificate.pem`, the signed Tide multiparts, the `.reply.json` stored replies wrapping them and the
+chain goldens with fresh in-memory keys: `node packages/protocol/test/generate-fixtures.ts [--out <dir>]`.
+`--replies-only` rewraps the committed multiparts without signing. Then check the certificate's code-signing profile
 once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.pem`.
+
+The chain goldens come from `chainFixtures` in `../fixtures.ts`: `chain-root.pem` (CA, pathLen 1),
+`chain-intermediate.pem` (CA, pathLen 0, linked by key identifiers), `chain-leaf.pem` under it, `chain-short-leaf.pem`
+directly under the root, `chain.multipart` (signed by the leaf with keyid `rotated`) and `chain-short.multipart`
+(signed by the short leaf, no keyid). Their validity window is `CHAIN_VALIDITY` and the tests verify at `CHAIN_NOW`.
+Check them with `openssl verify -attime 1924992000 -CAfile chain-root.pem -untrusted chain-intermediate.pem -purpose
+codesign chain-leaf.pem`.
 
 `manifest-next.multipart` (from `manifest-next.json`: another update ID, a later `createdAt`, branch `next`) is framed
 with its own boundary, `tide_fixture_next`. It is the new side of the version-2 rollout goldens
@@ -18,6 +25,10 @@ bodies are signed by an earlier certificate; they pin the version-1 bytes and ar
 `expo-directive.json`, `expo-chain.pem` (leaf then intermediate) and the signature in `expo.multipart` come from
 `packages/expo-updates/ios/Tests` in [expo/expo@54c0d6f6](https://github.com/expo/expo/tree/54c0d6f6e9ef537280831b68e5c236807facb641/packages/expo-updates/ios/Tests),
 copyright 650 Industries, Inc., MIT licence in `LICENSE-expo`.
+`expo-chain-root.pem` (the root above `expo-chain.pem`) and the `expo-not-ca-*`, `expo-path-len-*` and
+`expo-project-information-*` sets are `chainRoot.pem`, `chainNotCA*`, `chainPathLenViolation*` and
+`chainExpoProjectInformationViolation*` from `android/src/shared/certificates` in the expo-updates 58.0.22 npm
+package, under the same licence.
 
 `base-update.json`, `base-embedded.json` and `base-embedded-patch.json` are hand-written golden base records;
 `base-embedded-patch.json`'s launch hash is `patch-text.base`'s, so the server tests can patch from it.
