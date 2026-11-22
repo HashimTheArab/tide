@@ -27,7 +27,7 @@ import type { ProjectExport } from "./publish-export.ts";
 import type { Entry, Side } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { KMS_VARIABLES, kmsSource } from "./keys-kms.ts";
-import { servedToEvery, writing } from "./pointer.ts";
+import { writing } from "./pointer.ts";
 import { CHAIN_FLAG } from "./publish-export.ts";
 import { checkRecord, readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
@@ -111,6 +111,9 @@ const BINDING_LIMIT =
   MAX_KEYID_BYTES + JSON.stringify({ version: 1, keyid: "", certificate: "0".repeat(64) }).length;
 const OTHER_IDENTITY =
   "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
+/** The refusal of a legacy pointer that a version-3 `reply/no-update` beside it serves to `keyId` too. */
+const servedToEvery = (key: string, keyId: string) =>
+  `${key} still serves another keyid's reply to every keyid: keyid ${JSON.stringify(keyId)} is served only once tide publish has converted every pointer`;
 
 /**
  * Returns a signer proven against the builds' pins and the bucket it may write; with `app`, refused unless the export
@@ -440,14 +443,14 @@ async function checkBucket(bucket: Bucket, identity: Identity): Promise<BucketSt
       }
     }
   }
-  // Writers bind before any chained reply, and replies chain by subject and key, so re-binding could take another root.
-  if (chain && !bound && (legacy || entries)) {
+  // A direct keyid with only legacy bodies is its key, as before bindings named direct certificates.
+  const found = chain || (legacy && !entries) ? bound : await checkBinding(bucket, identity);
+  // Bodies without their binding have lost it; chains link by subject and key, so re-binding could take another root.
+  if (!found && (entries || (chain && legacy))) {
     throw new KeyError(
-      `${await identityKey(keyId)} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`,
+      `${await identityKey(keyId)} is absent but the bucket holds replies under this keyid: restore it; it binds the certificate or root they were published under`,
     );
   }
-  // A direct keyid with only legacy bodies is its key, as before bindings named direct certificates.
-  if (!chain && (entries || !legacy)) await checkDirectBinding(bucket, identity, entries);
   return { noUpdate, bound, identities, fallback: fallback?.record.layout };
 }
 
@@ -522,43 +525,15 @@ async function binding({ keyId, chain, sha256 }: Identity) {
   return { key: await identityKey(keyId), bytes: new TextEncoder().encode(json) };
 }
 
-/**
- * In chain mode, refuses any binding of the key ID but this root's; true when it binds this root, false when absent.
- * Direct mode reads nothing and returns true.
- */
+/** Refuses a binding of the keyid to anything but this certificate or root; false when absent. */
 async function checkBinding(bucket: Bucket, identity: Identity): Promise<boolean> {
-  if (!identity.chain) return true;
   const { key, bytes } = await binding(identity);
   const object = await stored(bucket, key, BINDING_LIMIT);
   if (object === undefined) return false;
   if (sameBytes(object.bytes, bytes)) return true;
   throw new KeyError(
-    `${key} binds another root or is not one tide writes: a new signing identity needs a new bucket`,
+    `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`,
   );
-}
-
-/**
- * In direct mode, refuses a binding of the keyid to anything but this certificate, and with `required` (the keyid has
- * version-3 bodies) an absent one.
- */
-async function checkDirectBinding(
-  bucket: Bucket,
-  identity: Identity,
-  required: boolean,
-): Promise<void> {
-  const { key, bytes } = await binding(identity);
-  const object = await stored(bucket, key, BINDING_LIMIT);
-  if (object === undefined) {
-    if (!required) return;
-    throw new KeyError(
-      `${key} is absent but the bucket holds version-3 replies under this keyid: restore it; it binds the certificate they were published under`,
-    );
-  }
-  if (!sameBytes(object.bytes, bytes)) {
-    throw new KeyError(
-      `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`,
-    );
-  }
 }
 
 /** Creates this root's binding; another writer's counts only when it is this root's too. */
@@ -599,7 +574,7 @@ async function belongs(
   identity: Identity,
   refusal: string,
 ): Promise<Side> {
-  for (const side of sides) if (!(await verifies(side, identity))) throw new KeyError(refusal);
+  await checkCopied(key, sides, identity, refusal);
   const [first] = sides;
   if (first === undefined) throw new KeyError(`${key} is unreadable: it holds no reply`);
   return first;
@@ -613,14 +588,9 @@ export async function checkCopied(
   key: string,
   sides: readonly Side[],
   identity: Identity,
+  refusal = `${key}: a reply it copies does not verify under this app's certificate and key ID`,
 ): Promise<void> {
-  for (const side of sides) {
-    if (!(await verifies(side, identity))) {
-      throw new KeyError(
-        `${key}: a reply it copies does not verify under this app's certificate and key ID`,
-      );
-    }
-  }
+  for (const side of sides) if (!(await verifies(side, identity))) throw new KeyError(refusal);
 }
 
 /** Refuses a chained `side`, named by `label`, whose chain the builds reject at epoch ms `at`; direct sides pass. */

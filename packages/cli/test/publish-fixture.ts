@@ -367,6 +367,14 @@ export async function identitiesNoUpdate(signers: Readonly<Record<string, Identi
   return encodeIdentityNoUpdate(entries);
 }
 
+/** The refusal of a keyid whose binding names another certificate or root. */
+export const BOUND_ELSEWHERE = (key: string) =>
+  `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`;
+
+/** The refusal of a keyid's bodies whose binding is absent. */
+export const UNBOUND = (key: string) =>
+  `${key} is absent but the bucket holds replies under this keyid: restore it; it binds the certificate or root they were published under`;
+
 /** The direct-mode binding of `keyid` to `id`'s exact certificate, as the bucket stores it beside version-3 bodies. */
 export async function directBinding(
   id: Pick<Identity, "certificate">,

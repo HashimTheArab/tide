@@ -73,20 +73,21 @@ export async function status(
       noUpdate =
         verdict.layout === "legacy"
           ? [`${NO_UPDATE_KEY}: present`]
-          : [...verdict.entries.keys()].map((k) => `${NO_UPDATE_KEY} keyid ${quoted(k)}: present`);
+          : [...verdict.entries.keys()].map(
+              (k) => `${NO_UPDATE_KEY} keyid ${JSON.stringify(k)}: present`,
+            );
     } else {
       const [, channel, runtime, platform] = key.split("/");
       const columns = `${channel} ${runtime} ${platform}`;
       if (verdict.layout === "legacy") out(`${columns} ${row(verdict.entry)}`);
-      else for (const [k, e] of verdict.entries) out(`${columns} keyid ${quoted(k)} ${row(e)}`);
+      else
+        for (const [k, e] of verdict.entries)
+          out(`${columns} keyid ${JSON.stringify(k)} ${row(e)}`);
     }
   }
   for (const line of noUpdate) out(line);
   return unreadable ? 1 : 0;
 }
-
-/** A keyid as status prints it: a JSON string, which for printable ASCII escapes only `"` and `\`. */
-const quoted = (keyId: string) => JSON.stringify(keyId);
 
 /** A pointer's status columns after its key's: `<kind> <updateId|-> <time>`, or a rollout's percentage and sides. */
 function row({ reply, sides }: Entry): string {

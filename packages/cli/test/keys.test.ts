@@ -43,7 +43,7 @@ import {
   tempRoot,
   utf8,
 } from "./helpers.ts";
-import { directBinding } from "./publish-fixture.ts";
+import { BOUND_ELSEWHERE, UNBOUND, directBinding } from "./publish-fixture.ts";
 
 type KeyPair = Awaited<ReturnType<typeof generate>>;
 
@@ -61,8 +61,6 @@ const OWN_KEYID = (key: string, keyid = "main") =>
   `${key}: keyid "${keyid}" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid`;
 const STILL_LEGACY = (key: string, keyid: string) =>
   `${key} still serves another keyid's reply to every keyid: keyid "${keyid}" is served only once tide publish has converted every pointer`;
-const BOUND_ELSEWHERE = (key: string) =>
-  `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`;
 
 /** A key pair generated for this run, its certificate and the forms each key source takes. */
 interface Identity {
@@ -877,10 +875,7 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
     const key = await identityKey("main");
     const seed = Object.entries(await twoIdentities()).filter(([k]) => k !== key);
     const opened = await store(kind, Object.fromEntries(seed));
-    await refusal(
-      check(opened.env, main),
-      `${key} is absent but the bucket holds version-3 replies under this keyid: restore it; it binds the certificate they were published under`,
-    );
+    await refusal(check(opened.env, main), UNBOUND(key));
     opened.unchanged(kind === "s3" ? 4 : 0);
   });
 

@@ -19,32 +19,18 @@ export interface PointerState {
   readonly others?: ReadonlyMap<string, PointerEntry>; // Version 3 only: every other keyid's entry, to copy.
 }
 
-/** The refusal of a legacy pointer that a version-3 `reply/no-update` beside it serves to `keyId` too. */
-export const servedToEvery = (key: string, keyId: string) =>
-  `${key} still serves another keyid's reply to every keyid: keyid ${JSON.stringify(keyId)} is served only once tide publish has converted every pointer`;
-
-/**
- * Reads the pointer at `key` for `keyId`, refusing one a signing client could not receive. Beside a version-3
- * `reply/no-update` (`fallback`), a version-1 or version-2 pointer is `keyId`'s only when every side is signed under it.
- */
+/** Reads the pointer at `key` for `keyId`, refusing one a signing client could not receive. */
 export async function readPointer(
   bucket: Bucket,
   key: string,
   keyId: string,
-  fallback?: "legacy" | "identities",
 ): Promise<PointerState> {
   const object = await bucket.get(key, MAX_IDENTITIES_BYTES);
   if (object === undefined) return {};
   const verdict = checkRecord(key, object.bytes);
   if (typeof verdict === "string") throw new PublishError(`${key} is unreadable: ${verdict}`);
   const { etag } = object;
-  if (verdict.layout === "legacy") {
-    const { entry } = verdict;
-    if (fallback === "identities" && entry.sides.some((s) => s.keyId !== keyId)) {
-      throw new PublishError(servedToEvery(key, keyId));
-    }
-    return { etag, ...state(key, entry) };
-  }
+  if (verdict.layout === "legacy") return { etag, ...state(key, verdict.entry) };
   const own = verdict.entries.get(keyId);
   const others = new Map<string, PointerEntry>();
   // checkRecord has refused a noUpdateAvailable entry in a pointer.

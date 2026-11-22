@@ -44,8 +44,10 @@ import { FAKE_KMS, startFakeKms } from "./fake-kms.ts";
 import { tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
+  BOUND_ELSEWHERE,
   IOS,
   T,
+  UNBOUND,
   artifact,
   diskObjects,
   entryOf,
@@ -67,8 +69,6 @@ const LATER = T + 2 * HOUR;
 const IOS_ONLY = { platforms: { ios: { runtimeVersion: "1.0.0" } } };
 const ANDROID_ONLY = { platforms: { android: { runtimeVersion: "1.0.0" } } };
 const TARGET = ["--channel", "main", "--runtime-version", "1.0.0"];
-const BOUND_ELSEWHERE = async () =>
-  `${await identityKey("main")} binds another root or is not one tide writes: a new signing identity needs a new bucket`;
 
 /** The chain-mode identities one file uses; every root but `root2` and `dual` shares the root key. */
 interface World {
@@ -541,7 +541,7 @@ describe("another identity's bucket", () => {
       code: 0,
     });
     const before = s3Snapshot();
-    await everyWriterRefuses(store, B(), await BOUND_ELSEWHERE());
+    await everyWriterRefuses(store, B(), BOUND_ELSEWHERE(await identityKey("main")));
     expect(s3Snapshot()).toEqual(before);
     // Without the binding, the bodies themselves refuse.
     s3.objects.delete(await identityKey("main"));
@@ -552,7 +552,11 @@ describe("another identity's bucket", () => {
     const store = s3Store();
     expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     const before = s3Snapshot();
-    await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, await BOUND_ELSEWHERE());
+    await everyWriterRefuses(
+      store,
+      { root: w.twin, chain: [w.leafB] },
+      BOUND_ELSEWHERE(await identityKey("main")),
+    );
     expect(s3Snapshot()).toEqual(before);
   });
 
@@ -561,7 +565,7 @@ describe("another identity's bucket", () => {
     expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     s3.objects.delete(await identityKey("main"));
     const before = s3Snapshot();
-    const message = `${await identityKey("main")} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`;
+    const message = UNBOUND(await identityKey("main"));
     await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, message);
     expect(s3Snapshot()).toEqual(before);
   });

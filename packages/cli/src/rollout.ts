@@ -57,7 +57,7 @@ export async function rollout(
     );
     const writes: (PointerWrite & { readonly rise?: Side })[] = [];
     for (const key of keys) {
-      const previous = await readPointer(bucket, key, identity.keyId, fallback);
+      const previous = await readPointer(bucket, key, identity.keyId);
       const { reply, sides = [], others } = previous;
       // The server cannot serve a version-1 reply/no-update under a version-3 pointer.
       if (others !== undefined && fallback !== "identities") {

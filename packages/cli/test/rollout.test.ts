@@ -996,12 +996,12 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("readPointer on %s
       ),
     );
     const bucket = bucketFromEnv(store.env);
-    const state = await readPointer(bucket, IOS, "main", "identities");
+    const state = await readPointer(bucket, IOS, "main");
     expect(state).toMatchObject({ time: T, reply: mine, others: new Map([["root", theirs]]) });
     expect(state.sides?.map((s) => [s.kind, s.updateId, s.keyId])).toEqual([
       ["manifest", ID_A, "main"],
     ]);
-    expect(await readPointer(bucket, IOS, "next", "identities")).toEqual({
+    expect(await readPointer(bucket, IOS, "next")).toEqual({
       etag: state.etag,
       others: new Map<string, PointerEntry>([
         ["main", mine],
@@ -1010,20 +1010,15 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("readPointer on %s
     });
   });
 
-  test("a legacy pointer reads as before, but beside a version-3 reply/no-update only for its own keyid", async () => {
+  test("a legacy pointer reads the same for every keyid", async () => {
     const store = STORES[kind]();
     const legacy = await seededPointer("manifest", T, main);
     await bucketPut(store, IOS, legacy);
     const bucket = bucketFromEnv(store.env);
-    const asMain = await readPointer(bucket, IOS, "main", "identities");
+    const asMain = await readPointer(bucket, IOS, "main");
     expect(asMain).toMatchObject({ time: T, reply: decodePointer(legacy) });
     expect(asMain.others).toBeUndefined();
-    for (const fallback of [undefined, "legacy"] as const) {
-      expect(await readPointer(bucket, IOS, "root", fallback)).toEqual(asMain);
-    }
-    await expect(readPointer(bucket, IOS, "root", "identities")).rejects.toThrow(
-      `${IOS} still serves another keyid's reply to every keyid: keyid "root" is served only once tide publish has converted every pointer`,
-    );
+    expect(await readPointer(bucket, IOS, "root")).toEqual(asMain);
   });
 });
 
