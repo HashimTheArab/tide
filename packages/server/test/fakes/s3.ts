@@ -65,6 +65,8 @@ export interface FakeS3 {
   landHeld(key: string): boolean;
   /** Calls `fn` when the next PUT to `key` reaches handling. */
   onPut(key: string, fn: () => void): void;
+  /** Calls `fn` once the next GET of `key` has been answered. */
+  onGet(key: string, fn: () => void): void;
   arrived(key: string): Promise<void>;
   flushed(key: string): Promise<void>;
   abandoned(key: string): Promise<void>;
@@ -90,6 +92,7 @@ export async function startFakeS3(): Promise<FakeS3> {
   const drops = new Set<string>();
   const holds = new Map<string, (() => boolean) | undefined>(); // A held PUT's commit, once it has arrived.
   const putHooks = new Map<string, () => void>();
+  const getHooks = new Map<string, () => void>();
   // Keyed by the stored array, so an object a test sets directly gets a fresh tag.
   const etags = new WeakMap<Uint8Array, string>();
   let etagCount = 0;
@@ -207,7 +210,10 @@ export async function startFakeS3(): Promise<FakeS3> {
         return res.writeHead(204).end();
       }
       if (req.method !== "GET") return s3Error(res, 405, "MethodNotAllowed");
-      return get(key, res);
+      get(key, res);
+      const hook = getHooks.get(key);
+      getHooks.delete(key);
+      hook?.();
     })();
   });
 
@@ -445,6 +451,7 @@ export async function startFakeS3(): Promise<FakeS3> {
       drops.clear();
       holds.clear();
       putHooks.clear();
+      getHooks.clear();
       md5Etags = false;
     },
     raceOnPut: (key, bytes) => {
@@ -464,6 +471,9 @@ export async function startFakeS3(): Promise<FakeS3> {
     },
     onPut: (key, fn) => {
       putHooks.set(key, fn);
+    },
+    onGet: (key, fn) => {
+      getHooks.set(key, fn);
     },
     arrived: (key) => event("arrived", key).promise,
     flushed: (key) => event("flushed", key).promise,
