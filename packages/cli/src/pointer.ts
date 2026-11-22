@@ -1,14 +1,18 @@
+import type { Rollout, StoredReply } from "@tide-ota/protocol";
 import { MAX_REPLY_BYTES } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
+import type { Side } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { PublishError } from "./publish-record.ts";
 import { checkRecord } from "./status.ts";
 
-/** A pointer as read before composing: the ETag its write must match and its time, both absent for none. */
+/** A pointer as read before composing: the ETag its write must match, its newest time and what it holds; all absent for none. */
 export interface PointerState {
   readonly etag?: string;
-  readonly time?: number; // A manifest's createdAt or a rollback's commitTime, epoch milliseconds.
+  readonly time?: number; // The newest createdAt or commitTime it holds, epoch milliseconds.
+  readonly reply?: StoredReply | Rollout; // Exact bodies, so a writer can copy them.
+  readonly sides?: readonly Side[]; // `[reply]`, or a rollout's `[new, earlier?]`.
 }
 
 /** Reads the pointer at `key`, refusing one a signing client could not receive. */
@@ -18,7 +22,8 @@ export async function readPointer(bucket: Bucket, key: string): Promise<PointerS
   const verdict = checkRecord(key, object.bytes);
   if (typeof verdict === "string") throw new PublishError(`${key} is unreadable: ${verdict}`);
   if (verdict.time === undefined) throw new PublishError(`${key} is unreadable: it has no time`);
-  return { etag: object.etag, time: Date.parse(verdict.time) };
+  const { reply, sides } = verdict;
+  return { etag: object.etag, time: Date.parse(verdict.time), reply, sides };
 }
 
 /** Returns a time a client accepts as newer than the pointer it replaces, whatever the local clock says. */

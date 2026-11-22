@@ -14,7 +14,7 @@ import {
 
 import type { Bucket } from "./bucket.ts";
 import type { ProjectExport } from "./publish-export.ts";
-import type { Verdict } from "./status.ts";
+import type { Side, Verdict } from "./status.ts";
 import { KMS_VARIABLES, kmsSigner } from "./keys-kms.ts";
 import { readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
@@ -45,6 +45,7 @@ export interface Identity {
 /** A proven signer and the bucket it may write, with the checks a write command repeats before activating. */
 export interface Writer {
   readonly signer: Signer;
+  readonly identity: Identity;
   readonly bucket: Bucket;
   /** Whether a `reply/no-update` signed under this identity was present when opened. */
   readonly noUpdate: boolean;
@@ -91,6 +92,7 @@ export async function openWriter(
   const bucket = bucketFromEnv(env);
   return {
     signer,
+    identity,
     bucket,
     noUpdate: await checkBucket(bucket, identity),
     checkNoUpdate: () => checkBucket(bucket, identity),
@@ -257,19 +259,42 @@ export async function checkBucket(bucket: Bucket, identity: Identity): Promise<b
   return false;
 }
 
-/** Refuses a record that is unreadable or whose signed part does not verify under `identity`. */
-async function checkSigned(
-  key: string,
-  record: Verdict,
-  { key: verifyKey, keyId }: Identity,
-): Promise<void> {
+/** Refuses a record that is unreadable or any of whose signed parts does not verify under `identity`. */
+async function checkSigned(key: string, record: Verdict, identity: Identity): Promise<void> {
   if (typeof record === "string") throw new KeyError(`${key} is unreadable: ${record}`);
+  for (const side of record.sides) {
+    if (!(await verifies(side, identity))) {
+      throw new KeyError(
+        "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
+      );
+    }
+  }
+}
+
+/**
+ * Refuses unless each named reply at `key` verifies under `identity`. A writer that copies a signed body checks it
+ * here, since a valid `reply/no-update` stops `checkBucket` before any pointer.
+ */
+export async function checkCopied(
+  key: string,
+  sides: readonly (readonly [name: string, side: Side])[],
+  identity: Identity,
+): Promise<void> {
+  for (const [name, side] of sides) {
+    if (!(await verifies(side, identity))) {
+      throw new KeyError(
+        `${key}: its ${name} does not verify under this app's certificate and key ID`,
+      );
+    }
+  }
+}
+
+async function verifies({ signed }: Side, { key, keyId }: Identity): Promise<boolean> {
   try {
-    await verifyExpoSignature(record.signed.body, record.signed.signature, verifyKey, keyId);
+    await verifyExpoSignature(signed.body, signed.signature, key, keyId);
+    return true;
   } catch {
-    throw new KeyError(
-      "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
-    );
+    return false;
   }
 }
 

@@ -5,8 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
-import type { StoredReply } from "@tide-ota/protocol";
-import { MAX_REPLY_BYTES, diskPath, encodeStoredReply } from "@tide-ota/protocol";
+import type { Rollout, StoredReply } from "@tide-ota/protocol";
+import {
+  MAX_REPLY_BYTES,
+  decodePointer,
+  decodeStoredReply,
+  diskPath,
+  encodeRollout,
+  encodeStoredReply,
+} from "@tide-ota/protocol";
 
 import type { FakeS3 } from "../../server/test/fakes/s3.ts";
 import type { Bucket } from "../src/bucket.ts";
@@ -33,7 +40,12 @@ const BOUNDARY = "tide_fixture_boundary";
 const MANIFEST = fixture("manifest.reply.json"); // Signed for runtime 1.0.0.
 const ROLLBACK = fixture("rollback.reply.json");
 const NO_UPDATE = fixture("no-update.reply.json");
+const NEXT_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // manifest-next.json's id
+const NEXT_AT = "2026-11-20T08:15:00.000Z"; // manifest-next.json's createdAt
 const ascii = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+/** The golden rollout `name`, at `percent` when given, with its earlier reply replaced when `earlier` is given. */
+const rolloutOf = (name: string, change: Partial<Pick<Rollout, "percent" | "earlier">> = {}) =>
+  encodeRollout({ ...(decodePointer(fixture(name)) as Rollout), ...change });
 
 /** A manifest record over the golden multipart, changed by `edit`. */
 const manifestWith = (edit: (multipart: string) => string, updateId = UPDATE_ID) =>
@@ -222,6 +234,62 @@ describe.each(stores)("tide status on %s", (_, open) => {
     expect(stderr).toContain(`${key}: unreadable: ${reason}`);
     const noUpdate = key === "reply/no-update" ? "unreadable" : "missing";
     expect(stdout.endsWith(`reply/no-update: ${noUpdate}\n`)).toBe(true);
+  });
+
+  test("a rollout prints its percentage and both sides, its earlier one a manifest, a rollback or none", async () => {
+    const { bucket, env } = open();
+    await bucket.put("reply/a/1.0.0/ios", fixture("rollout-manifest.reply.json"));
+    await bucket.put("reply/b/1.0.0/ios", fixture("rollout-rollback.reply.json"));
+    await bucket.put("reply/c/1.0.0/ios", fixture("rollout-none.reply.json"));
+    await bucket.put("reply/d/1.0.0/ios", rolloutOf("rollout-rollback.reply.json", { percent: 0 }));
+    await bucket.put("reply/e/1.0.0/ios", rolloutOf("rollout-none.reply.json", { percent: 100 }));
+    expect(await tide(env)).toEqual({
+      code: 0,
+      stdout: lines(
+        `a 1.0.0 ios rollout 12.5 new ${NEXT_ID} ${NEXT_AT} earlier manifest ${UPDATE_ID} ${CREATED_AT}`,
+        `b 1.0.0 ios rollout 50 new ${NEXT_ID} ${NEXT_AT} earlier rollBackToEmbedded - ${COMMIT_TIME}`,
+        `c 1.0.0 ios rollout 0.01 new ${NEXT_ID} ${NEXT_AT} earlier none`,
+        `d 1.0.0 ios rollout 0 new ${NEXT_ID} ${NEXT_AT} earlier rollBackToEmbedded - ${COMMIT_TIME}`,
+        `e 1.0.0 ios rollout 100 new ${NEXT_ID} ${NEXT_AT} earlier none`,
+        "reply/no-update: missing",
+      ),
+      stderr: "",
+    });
+  });
+
+  test.each<[string, string, () => Uint8Array<ArrayBuffer>, string]>([
+    [
+      "a version-2 record encode would not write",
+      "reply/a/1.0.0/ios",
+      () => utf8('{"version":2,"kind":"rollout","percent":50}'),
+      "not a stored reply",
+    ],
+    [
+      "a rollout whose earlier manifest has no expo-signature",
+      "reply/a/1.0.0/ios",
+      () =>
+        rolloutOf("rollout-manifest.reply.json", {
+          earlier: decodeStoredReply(
+            manifestWith((m) => m.replace(/expo-signature: [^\r]*\r\n/, "")),
+          ) as Rollout["earlier"],
+        }),
+      "earlier reply: manifest part has no expo-signature",
+    ],
+    [
+      "a rollout under another runtime",
+      "reply/a/2.0.0/ios",
+      () => fixture("rollout-none.reply.json"),
+      "new reply: manifest runtimeVersion differs from its key",
+    ],
+  ])("%s is unreadable by key with a fixed reason", async (_, key, bytes, reason) => {
+    const { bucket, env } = open();
+    await bucket.put(key, bytes());
+    await bucket.put("reply/zz/1.0.0/ios", MANIFEST);
+    expect(await tide(env)).toEqual({
+      code: 1,
+      stdout: lines(`zz 1.0.0 ios manifest ${UPDATE_ID} ${CREATED_AT}`, "reply/no-update: missing"),
+      stderr: `${key}: unreadable: ${reason}\n`,
+    });
   });
 
   test("a record holding a credential as a field name is reported without it", async () => {
