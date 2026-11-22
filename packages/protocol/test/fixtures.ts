@@ -5,7 +5,7 @@ import { encodeMultipart, encodeRollout, encodeStoredReply, expoSignature } from
 
 export const BOUNDARY = "tide_fixture_boundary";
 /** The rollout new side's boundary, so a reply carrying the wrong side's content-type fails. */
-export const NEXT_BOUNDARY = "tide_fixture_next";
+const NEXT_BOUNDARY = "tide_fixture_next";
 
 interface GoldenPart {
   readonly name: PartName;
