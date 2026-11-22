@@ -582,6 +582,30 @@ export function manifestCases(harness: Harness): void {
     },
   );
 
+  test("a bucket mid leaf rotation serves each stored chained body byte for byte", async () => {
+    // The pointer keeps the intermediate's leaf; reply/no-update was renewed under a second leaf of the same root.
+    const chained = encodeStoredReply({
+      kind: "manifest",
+      updateId: "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90",
+      boundary: BOUNDARY,
+      manifestFilters: "",
+      body: fixture("chain.multipart"),
+    });
+    const renewed = encodeStoredReply({
+      kind: "noUpdateAvailable",
+      boundary: BOUNDARY,
+      body: fixture("chain-short.multipart"),
+    });
+    await harness.put(NO_UPDATE_KEY, renewed);
+    await pointer("rotating", chained);
+    const manifest = await get("rotating");
+    expectReply(manifest, chained);
+    expect(manifest.body).toEqual(fixture("chain.multipart"));
+    const fallback = await get("rotating-none");
+    expectReply(fallback, renewed);
+    expect(fallback.body).toEqual(fixture("chain-short.multipart"));
+  });
+
   test("a client running another update gets the manifest", async () => {
     await pointer("m-other", MANIFEST);
     expectReply(await get("m-other", { "expo-current-update-id": EMBEDDED_ID }), MANIFEST);
