@@ -24,7 +24,7 @@ export const STEADY_BASES = {
   ota: "the previous OTA update, itself delta-compiled against the embedded base",
   "older-ota": "the older OTA update, itself delta-compiled against the embedded base",
 } as const;
-export type SteadyBaseKind = keyof typeof STEADY_BASES;
+type SteadyBaseKind = keyof typeof STEADY_BASES;
 
 /** The new bundle, built three ways from the same JS. */
 export const TARGETS = {
