@@ -261,8 +261,7 @@ export async function certificate(
       time(options.notAfter ?? new Date("2049-12-31T23:59:59Z")),
     ),
     name("Tide test"),
-    // Workers types do not narrow exportKey by format.
-    new Uint8Array((await crypto.subtle.exportKey("spki", subject)) as ArrayBuffer),
+    new Uint8Array(await crypto.subtle.exportKey("spki", subject)),
     ...(options.v1 ? [] : [der(0xa3, der(SEQUENCE, ...(options.extensions ?? CODE_SIGNING)))]),
   );
   const signature = new Uint8Array(await crypto.subtle.sign(RSA_SHA256, issuer, tbs));

@@ -22,8 +22,7 @@ import {
   verifyExpoSignature,
 } from "@tide-ota/protocol";
 
-import { CLIENT_HIGH, CLIENT_LOW } from "../../../protocol/test/fixtures.ts";
-import { fixture } from "./fixtures.ts";
+import { CLIENT_HIGH, CLIENT_LOW, fixture } from "./fixtures.ts";
 
 /** One runtime's real entry, configured with app ID `tide-test`, and its native way to seed the bucket. */
 export interface Harness {
