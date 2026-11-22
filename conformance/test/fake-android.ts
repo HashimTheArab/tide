@@ -1,12 +1,13 @@
 // Stands in for the SDK's adb (argv[2] "adb") and emulator (argv[2] "emulator") over a state file in argv[3], the
 // fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt. The AVD
-// "Crash" exits while booting; "Fresh" drops adb's connection once, as a fresh AVD's first boot does.
+// "Crash" exits while booting; "Fresh" drops adb's connection once, as a fresh AVD's first boot does. A device marked
+// `phone` reports no emulator properties.
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
 interface State {
-  running: Record<string, { pid?: number; avd?: string }>;
+  running: Record<string, { pid?: number; avd?: string; phone?: boolean }>;
   installed: string[];
   reverse: string[];
 }
@@ -100,6 +101,8 @@ if (role === "emulator") {
   } else if (command === "uninstall") {
     state.installed = state.installed.filter((p) => p !== rest[0]);
     write(state);
+  } else if (sub === "getprop ro.boot.qemu" || sub === "getprop ro.kernel.qemu") {
+    process.stdout.write(state.running[serial]?.phone === true ? "\n" : "1\n");
   } else if (sub === "getprop ro.product.cpu.abi") {
     process.stdout.write("x86_64\n");
   } else if (sub === "date +%s") {

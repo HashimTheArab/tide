@@ -147,13 +147,37 @@ describe("the Android device driver", () => {
     });
   });
 
-  test("refuses an ANDROID_SERIAL that names a phone, and touches nothing on it", async () => {
+  test.each(["R5CT10ABCDE", "emulator-lab:5555"])(
+    "refuses phone %s, whatever its serial, and only reads its properties",
+    async (phone) => {
+      await withStack(async (stack) => {
+        const fake = fakeSdk({ running: { [phone]: { phone: true } } });
+        const options = { sdk: fake.sdk, avd: undefined };
+        await expect(androidDevice(stack, { ...options, serial: phone })).rejects.toThrow(
+          `${phone} is not an emulator`,
+        );
+        if (phone.startsWith("emulator-")) {
+          await expect(androidDevice(stack, { ...options, serial: undefined })).rejects.toThrow(
+            `${phone} is not an emulator`,
+          );
+        }
+        const touched = fake.calls().filter((c) => c.includes(phone));
+        expect(touched.every((c) => c.slice(3).join(" ").startsWith("shell getprop ro."))).toBe(
+          true,
+        );
+      });
+    },
+  );
+
+  test("accepts an emulator attached over TCP as ANDROID_SERIAL", async () => {
     await withStack(async (stack) => {
-      const fake = fakeSdk({ running: { "emulator-5554": {}, R5CT10ABCDE: {} } });
-      await expect(
-        androidDevice(stack, { sdk: fake.sdk, avd: undefined, serial: "R5CT10ABCDE" }),
-      ).rejects.toThrow("ANDROID_SERIAL R5CT10ABCDE is not an emulator");
-      expect(fake.calls().filter((c) => c.includes("R5CT10ABCDE"))).toEqual([]);
+      const fake = fakeSdk({ running: { "localhost:5555": {} } });
+      const device = await androidDevice(stack, {
+        sdk: fake.sdk,
+        avd: undefined,
+        serial: "localhost:5555",
+      });
+      expect(device).toMatchObject({ serial: "localhost:5555", booted: false });
     });
   });
 
