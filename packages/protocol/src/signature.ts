@@ -1,4 +1,4 @@
-import { ProtocolError, base64, decodeBase64, hex, sha256Hex } from "./hash.ts";
+import { ProtocolError, base64, decodeBase64, sha256Hex } from "./hash.ts";
 import { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
 
 const ALG = "rsa-v1_5-sha256";
@@ -460,13 +460,12 @@ const TRUE = new Uint8Array([BOOLEAN, 1, 0xff]);
 const DIGITAL_SIGNATURE_ONLY = new Uint8Array([BIT_STRING, 2, 7, 0x80]);
 
 /**
- * Returns the PEM of a v3 certificate in the profile `codeSigningCertificate` accepts, whose TBSCertificate `sign`
- * signs with RSASSA-PKCS1-v1_5 SHA-256. Its only extensions are critical Key Usage digitalSignature and Extended Key
- * Usage codeSigning. The result is not checked here; the caller runs the profile check on it.
+ * Returns the PEM of a v3 certificate whose TBSCertificate `sign` signs with RSASSA-PKCS1-v1_5 SHA-256; its only
+ * extensions are critical Key Usage digitalSignature and Extended Key Usage codeSigning.
  */
 export async function selfSignedCertificate(
   { spki, commonName, notBefore, notAfter }: SelfSignedFields,
-  sign: (tbs: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>,
+  sign: Signer["sign"],
 ): Promise<string> {
   const algorithm = derTlv(SEQUENCE, derOid(SHA256_WITH_RSA), NULL);
   const cn = new TextEncoder().encode(commonName);
@@ -479,7 +478,7 @@ export async function selfSignedCertificate(
   const tbs = derTlv(
     SEQUENCE,
     V3,
-    derInteger(BigInt(`0x${hex(random)}`)),
+    derTlv(INTEGER, random),
     algorithm,
     name, // Issuer, the same bytes as the subject.
     derTlv(SEQUENCE, derTime(notBefore), derTime(notAfter)),
@@ -504,13 +503,9 @@ export async function selfSignedCertificate(
   return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
 }
 
-/** Returns one DER TLV with a low tag number and a minimal definite length of at most 4 octets, as `readTlv` reads. */
+/** Returns one DER TLV with a minimal definite length, as `readTlv` reads; `tag` must have a low tag number. */
 export function derTlv(tag: number, ...contents: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   const length = contents.reduce((n, c) => n + c.length, 0);
-  if (!Number.isInteger(tag) || tag < 0 || tag > 0xff || (tag & 0x1f) === 0x1f) {
-    throw new ProtocolError("certificate", "DER tag must be one octet with a low tag number");
-  }
-  if (length > 0xffffffff) throw new ProtocolError("certificate", "DER length must fit 4 octets");
   const octets: number[] = [];
   for (let n = length; n > 0; n = Math.floor(n / 256)) octets.unshift(n % 256);
   const head = [tag, ...(length < 0x80 ? [length] : [0x80 | octets.length, ...octets])];
@@ -524,32 +519,9 @@ export function derTlv(tag: number, ...contents: readonly Uint8Array[]): Uint8Ar
   return out;
 }
 
-/** Returns `value` as a DER INTEGER: minimal two's complement. */
-export function derInteger(value: bigint): Uint8Array<ArrayBuffer> {
-  const bytes: number[] = [];
-  let n = value;
-  for (;;) {
-    bytes.unshift(Number(n & 0xffn));
-    n >>= 8n;
-    const negative = ((bytes[0] ?? 0) & 0x80) !== 0;
-    if ((n === 0n && !negative) || (n === -1n && negative)) break;
-  }
-  return derTlv(INTEGER, new Uint8Array(bytes));
-}
-
-/** Returns the dotted OID `dotted` as a DER OBJECT IDENTIFIER. */
+/** Returns the dotted OID `dotted`, which the caller keeps valid, as a DER OBJECT IDENTIFIER. */
 export function derOid(dotted: string): Uint8Array<ArrayBuffer> {
-  const arcs = dotted.split(".").map(Number);
-  const [top = 0, second = 0, ...rest] = arcs;
-  if (
-    !/^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))+$/.test(dotted) ||
-    top > 2 ||
-    (top < 2 && second > 39) ||
-    !Number.isSafeInteger(top * 40 + second) ||
-    !rest.every(Number.isSafeInteger)
-  ) {
-    throw new ProtocolError("certificate", "OID must be dotted decimal arcs");
-  }
+  const [top = 0, second = 0, ...rest] = dotted.split(".").map(Number);
   const bytes: number[] = [];
   for (const arc of [top * 40 + second, ...rest]) {
     const group = [arc % 128];

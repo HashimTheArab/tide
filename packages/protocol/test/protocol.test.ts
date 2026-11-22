@@ -57,7 +57,6 @@ import {
 import { EMPTY_SHA256 } from "../src/s3.ts";
 import { parseSfvDictionary } from "../src/sfv.ts";
 import {
-  derInteger,
   derOid,
   derTime,
   derTlv,
@@ -1412,28 +1411,6 @@ describe(`DER encoder (seed ${seed})`, () => {
     );
   });
 
-  test("an integer reads back as minimal two's complement", () => {
-    const value = fc.oneof(
-      fc.bigInt({ min: -(2n ** 168n), max: 2n ** 168n }),
-      fc.constantFrom(0n, -1n, 127n, 128n, -128n, -129n, 255n, 256n),
-    );
-    fc.assert(
-      fc.property(value, (n) => {
-        const der = derInteger(n);
-        const tlv = readTlv(der, 0, der.length);
-        expect([tlv.tag, tlv.end]).toEqual([0x02, der.length]);
-        const body = der.subarray(tlv.body);
-        let decoded = body.reduce((v, b) => v * 256n + BigInt(b), 0n);
-        if ((body[0] ?? 0) & 0x80) decoded -= 1n << BigInt(8 * body.length);
-        expect(decoded).toBe(n);
-        const [first = 0, second = 0] = body;
-        const padded = (first === 0 && second < 0x80) || (first === 0xff && second >= 0x80);
-        expect(body.length === 1 || !padded).toBe(true);
-      }),
-      { seed },
-    );
-  });
-
   test("an OID reads back in dotted form", () => {
     const arcs = fc
       .integer({ min: 0, max: 2 })
@@ -1480,17 +1457,11 @@ describe(`DER encoder (seed ${seed})`, () => {
   });
 
   test.each<[string, () => unknown]>([
-    ["a high tag number", () => derTlv(0x1f)],
-    ["a tag over one octet", () => derTlv(0x100)],
-    ["an OID with one arc", () => derOid("1")],
-    ["an OID with a first arc over 2", () => derOid("3.1")],
-    ["an OID with a second arc over 39 under 1", () => derOid("1.40")],
-    ["an OID with a leading zero", () => derOid("1.02")],
     ["a time with milliseconds", () => derTime(new Date(Date.UTC(2030, 0, 1, 0, 0, 0, 1)))],
     ["a time before 1950", () => derTime(new Date(Date.UTC(1949, 11, 31, 23, 59, 59)))],
     ["a time after 9999", () => derTime(new Date(Date.UTC(10000, 0, 1)))],
     ["an invalid date", () => derTime(new Date(Number.NaN))],
-  ])("the encoder refuses %s", async (_, encode) => {
+  ])("the time encoder refuses %s", async (_, encode) => {
     await rejects(encode, "certificate");
   });
 });

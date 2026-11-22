@@ -62,8 +62,8 @@ export interface KeySource {
 export type Env = Readonly<Record<string, string | undefined>>;
 
 const FILE_LIMIT = 64 * 1024;
-const PROBE = new TextEncoder().encode("tide signing probe");
-const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
+export const PROBE = new TextEncoder().encode("tide signing probe");
+export const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
 const KEY_FILE = "TIDE_SIGNING_KEY_FILE";
 const KEY_PEM = "TIDE_SIGNING_KEY";
 export const BUILD_KEYID = "TIDE_BUILD_KEYID";
@@ -223,14 +223,6 @@ function pemSource(pem: string | Buffer, source: string): KeySource {
     sign: async (bytes) => new Uint8Array(await crypto.subtle.sign(RSA, signing, bytes)),
     publicKey: () => Promise.resolve(spki),
   };
-}
-
-/** Refuses unless `tide signing probe` signed by `source` verifies under `key`. */
-export async function checkProbe(source: KeySource, key: CryptoKey): Promise<void> {
-  const sig = await source.sign(PROBE);
-  if (!(await crypto.subtle.verify(RSA, key, sig, PROBE))) {
-    throw new KeyError("the signing key does not match the certificate it signed");
-  }
 }
 
 /** Wraps `inner` so no signature resolves unless it verifies under the builds' certificate and key ID. */

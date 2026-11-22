@@ -5,9 +5,9 @@ import { selfSignedCertificate } from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import type { PublishOptions } from "./publish.ts";
-import { KeyError, checkProbe, signingKey, validCertificate } from "./keys.ts";
+import { KeyError, PROBE, RSA, signingKey, validCertificate } from "./keys.ts";
 import { PublishError } from "./publish-record.ts";
-import { parsed, report } from "./publish.ts";
+import { parsed, report, requiredOnce } from "./publish.ts";
 
 export const CERTIFICATE_USAGE =
   "usage: tide certificate --common-name <name> --validity-years <n>";
@@ -39,7 +39,9 @@ export async function certificate(
     if (!embedded.equals(spki)) {
       throw new KeyError("the certificate's public key differs from the signing key's");
     }
-    await checkProbe(source, key);
+    if (!(await crypto.subtle.verify(RSA, key, await source.sign(PROBE), PROBE))) {
+      throw new KeyError("the signing key does not match the certificate it signed");
+    }
     out(pem.trimEnd());
     err(`tide: certificate DER SHA-256 ${sha256}`);
     return 0;
@@ -60,14 +62,8 @@ function parse(args: readonly string[]) {
       allowPositionals: false,
     }),
   );
-  const required = (name: keyof typeof values) => {
-    const list = values[name];
-    if (list === undefined) throw new PublishError(`--${name} is required; ${CERTIFICATE_USAGE}`);
-    if (list.length > 1) throw new PublishError(`--${name} is given twice`);
-    return list[0] ?? "";
-  };
-  const commonName = required("common-name");
-  const years = required("validity-years");
+  const commonName = requiredOnce(values, "common-name", CERTIFICATE_USAGE);
+  const years = requiredOnce(values, "validity-years", CERTIFICATE_USAGE);
   if (!COMMON_NAME.test(commonName)) {
     throw new PublishError(
       "--common-name must be 1 to 64 printable ASCII characters, with no space at either end",

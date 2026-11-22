@@ -9,7 +9,7 @@ import {
 } from "@tide-ota/protocol";
 
 import type { Env, KeySource } from "./keys.ts";
-import { KeyError, isObject, read } from "./keys.ts";
+import { KeyError, RSA, isObject, read } from "./keys.ts";
 
 /** The KMS signer's variables; the TIDE_ prefix keeps ambient AWS credentials out. */
 export const KMS_VARIABLES = {
@@ -24,12 +24,11 @@ type KmsField = keyof typeof KMS_VARIABLES;
 const REQUIRED = ["keyId", "region", "accessKeyId", "secretAccessKey"] as const;
 
 const ALGORITHM = "RSASSA_PKCS1_V1_5_SHA_256";
-const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
-const KEY_SPECS: Readonly<Record<string, number>> = {
-  RSA_2048: 2048,
-  RSA_3072: 3072,
-  RSA_4096: 4096,
-};
+const KEY_SPECS: ReadonlyMap<unknown, number> = new Map([
+  ["RSA_2048", 2048],
+  ["RSA_3072", 3072],
+  ["RSA_4096", 4096],
+]);
 const BODY_LIMIT = 16 * 1024;
 /** Error codes a message may name; KMS defines more, and any other is reported as unrecognised. */
 const ERROR_CODES: ReadonlySet<string> = new Set([
@@ -203,10 +202,9 @@ async function replyPublicKey(text: string | undefined): Promise<Uint8Array<Arra
   if (reply.KeyUsage !== "SIGN_VERIFY") {
     throw new KeyError("KMS key must have key usage SIGN_VERIFY");
   }
-  const spec = reply.KeySpec;
-  const bits =
-    typeof spec === "string" && Object.hasOwn(KEY_SPECS, spec) ? (KEY_SPECS[spec] ?? 0) : 0;
-  if (bits === 0) throw new KeyError("KMS key must have key spec RSA_2048, RSA_3072 or RSA_4096");
+  const bits = KEY_SPECS.get(reply.KeySpec);
+  if (bits === undefined)
+    throw new KeyError("KMS key must have key spec RSA_2048, RSA_3072 or RSA_4096");
   const algorithms = reply.SigningAlgorithms;
   if (!Array.isArray(algorithms) || !algorithms.includes(ALGORITHM)) {
     throw new KeyError(`KMS key must allow the signing algorithm ${ALGORITHM}`);

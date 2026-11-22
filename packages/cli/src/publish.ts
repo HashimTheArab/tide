@@ -284,6 +284,22 @@ export function parsed<T>(usage: string, parse: () => T): T {
   }
 }
 
+type Options<K extends string> = Readonly<Partial<Record<K, readonly string[] | undefined>>>;
+
+/** Returns the value of a `multiple` option given at most once. */
+export function once<K extends string>(values: Options<K>, name: K): string | undefined {
+  const list = values[name];
+  if (list !== undefined && list.length > 1) throw new PublishError(`--${name} is given twice`);
+  return list?.[0];
+}
+
+/** Returns the value of a `multiple` option given exactly once. */
+export function requiredOnce<K extends string>(values: Options<K>, name: K, usage: string): string {
+  const value = once(values, name);
+  if (value === undefined) throw new PublishError(`--${name} is required; ${usage}`);
+  return value;
+}
+
 function configuredBase(env: Env, name: string): string {
   const value = env[name];
   if (value === undefined || value === "") {
