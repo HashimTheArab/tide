@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-22
+updated: 2026-11-23
 ---
 
 # Deploying
@@ -146,8 +146,8 @@ Once per environment, in this order.
      replace each rollout, since a stored reply keeps the chain it was signed with.
    - **Renewal.** An expired root or intermediate breaks every build that embeds or is served it. A new certificate
      never outlives one above it, so in an ancestor's last year issue leaves with `--validity-days`. The bucket binds
-     its `keyid` to the root's exact certificate, so a reissued root, even with the same key, ships with a new
-     `keyid` and bucket.
+     its `keyid` to the root's exact certificate, so a reissued root, even with the same key, is a new signing
+     identity: a new `keyid` and runtimeVersion on the same bucket ([Adding a signing identity](#adding-a-signing-identity)).
 6. **Publisher credential.** An R2 Object Read & Write token scoped to the bucket, given to the publish workflow as
    the five `TIDE_S3_*` variables in a protected CI secret (`design.md`, Bucket configuration). The publisher's
    `TIDE_SERVER_URL` is the server origin and `TIDE_ASSET_URL` the asset origin.
@@ -307,6 +307,47 @@ tide rollout complete --channel main --runtime-version 1.0.0
 - `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side, and `tide status` prints each
   rollout's percentage and both sides.
 
+### Adding a signing identity
+
+A new signing identity is a new direct key or certificate, a new chain root (a reissued one included), or a move
+between direct and chain mode; a new leaf under the same root is not (Leaf rotation). It ships in a new store build
+with a new `keyid` and a new runtimeVersion, on the same bucket and `updates.url`
+([0003](decisions/0003-one-identity-per-runtime.md)). Never reuse a runtimeVersion another identity has published
+to: a device verifies an update only when it downloads it, so a build that kept the runtimeVersion could launch the
+old identity's update it already holds.
+
+1. **Upgrade first.** Deploy a server that reads a version-3 `reply/no-update` to every server sharing the bucket,
+   and raise the CLI pin of every writer job sharing it, not only the new identity's ([Upgrade order](#upgrade-order)).
+2. **The new identity's writer job** joins the bucket's concurrency group, with its own key, build pins
+   (`TIDE_BUILD_KEYID` and the new certificate or root) and, in chain mode, served chain.
+3. **First publish** an export at the new runtimeVersion with `tide publish --from <dir> --channel <name>
+   --add-identity`. It adds the identity's entry to `reply/no-update`, keeping every other entry byte for byte, before
+   any pointer. A writer whose keyid has no entry is refused without the flag; with it, an entry already there or an
+   empty bucket makes it a no-op, so the retry loop reruns it with the same arguments.
+4. **Then** `tide register-build` for the new store build and `tide probe` with its pins. Ship the build only after
+   that first publish exits 0: until then the bucket may not serve its identity.
+5. **Keep the old identity's writer job** for the old runtime while its builds are installed.
+
+- **The runtime check.** Every writer and `register-build` refuses a runtime and platform that another keyid's
+  pointer holds on any channel, so a build that reused one is caught before it ships. It reads; it does not fence: a
+  delayed write from another job can still land after its listing. One concurrency group and a new runtimeVersion
+  per identity are the rule.
+- **Cached replies.** A private cache can outlive an app upgrade. If the app's `requestHeaders` allow stale responses
+  (`max-stale`), the build that moves to the new identity must also send `cache-control: no-cache`.
+- **No rollback.** Once `reply/no-update` is version 3, never roll a server or a writer's CLI pin back below the
+  release that reads it: an older server answers 503 wherever a request needs it, and an older CLI refuses to write.
+- **Recovery of a lost `reply/no-update`.** No writer can sign another identity's entry, so a lost version-3 record is
+  restored, never recreated. Turn on object versioning, or keep a backup of `reply/no-update` after each identity's
+  first publish.
+  - When pointers of another keyid exist, every writer refuses, naming one, and says to restore it. Restore the last
+    `reply/no-update` object, every keyid's entry, from object versioning or the backup; the writers then run as
+    before.
+  - When the new identity's first publish converted `reply/no-update` but stopped before its first pointer, the
+    pointers look like a bucket that never converted, and the old identity's next write would recreate version 1
+    without the new entry. If you know the conversion landed (that publish exited 1 after writing `reply/no-update`),
+    restore that version-3 object before any writer runs again. If version 1 was recreated anyway, no build of the
+    new identity is in the field yet; its next publish is refused until it runs with `--add-identity` again.
+
 ## Routine deploys
 
 Staging deploys from `main`; production deploys a commit only after staging has run it. Wrangler runs in the
@@ -340,8 +381,12 @@ release, so deploy that server everywhere before using any CLI that writes versi
 pinned CLI back below that release while any pointer holds the version, a complete or reverted rollout included: an
 older server answers 503 for that pointer and an older CLI refuses to write over it, so first replace each such
 pointer with a plain publish, republish or rollback.
-Version 3 (several signing identities) is read by servers before any CLI writes it: deploy a server that reads it
-everywhere first.
+Version 3 (one entry per signing identity, only in `reply/no-update`) is converted from version 1 only by
+`tide publish --add-identity` ([Adding a signing identity](#adding-a-signing-identity)). Once it is version 3, writers
+rewrite it without the flag whenever they renew their own entry: a chained `publish`, `republish` or `rollback` whose
+served chain changed. So before the first `--add-identity`, deploy a server that reads version 3 everywhere and raise
+the CLI pin of every writer job sharing the bucket, not only the new identity's: an older CLI refuses to write a
+version-3 `reply/no-update`, and an older server answers 503 wherever a request needs it.
 
 ## The container
 

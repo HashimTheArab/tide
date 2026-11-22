@@ -195,8 +195,8 @@ and exit codes.
   validating and signing. Even so, a stock client verifies every signature and asset hash, so bytes that were not
   signed by your key never run.
 - **The key lives in CI, ideally in KMS.** A leaked signing key can ship code to every installed app, so publish
-  only from CI and prefer AWS KMS, where the key cannot be exported. One signing identity serves one bucket; a
-  new key means a new bucket and a new updates URL.
+  only from CI and prefer AWS KMS, where the key cannot be exported. A new key ships in a new store build with its
+  own keyid and runtime version, on the same bucket and updates URL.
 - **Report problems privately.** See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## What's in this repository

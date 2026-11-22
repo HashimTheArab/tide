@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-22
+updated: 2026-11-23
 ---
 
 # Releasing
@@ -56,6 +56,11 @@ A failed step stops the release until a fix lands on `main`.
      one ([deploy.md](deploy.md#upgrade-order));
    - not roll any server back below the release that reads it while a pointer holds that version: an older server
      answers 503 for that pointer.
+
+   Version 3 lives only in `reply/no-update`: `tide publish --add-identity` converts it, and any later chained
+   `publish`, `republish` or `rollback` that renews its own entry rewrites it without the flag. So servers and the CLI
+   pin of every writer job sharing the bucket must read it before the first conversion, and neither rolls back below
+   that release once `reply/no-update` is version 3 ([deploy.md](deploy.md#adding-a-signing-identity)).
 
 ## Publishing a release
 
