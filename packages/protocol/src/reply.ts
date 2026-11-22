@@ -16,12 +16,30 @@ export type StoredReply =
       readonly body: Uint8Array<ArrayBuffer>;
     }
   | {
-      readonly kind: "rollBackToEmbedded" | "noUpdateAvailable";
+      readonly kind: "rollBackToEmbedded";
+      readonly boundary: string;
+      readonly body: Uint8Array<ArrayBuffer>;
+    }
+  | {
+      readonly kind: "noUpdateAvailable";
       readonly boundary: string;
       readonly body: Uint8Array<ArrayBuffer>;
     };
 
 type Kind = StoredReply["kind"];
+type ManifestReply = Extract<StoredReply, { kind: "manifest" }>;
+type RollbackReply = Extract<StoredReply, { kind: "rollBackToEmbedded" }>;
+
+/**
+ * A pointer that serves `new` to `percent` of devices and `earlier` to the rest; an absent earlier reply means the
+ * stored `reply/no-update`. Both bodies are the exact signed bytes.
+ */
+export interface Rollout {
+  readonly kind: "rollout";
+  readonly percent: number; // 0 to 100 in steps of 0.01.
+  readonly new: ManifestReply;
+  readonly earlier: ManifestReply | RollbackReply | undefined;
+}
 
 /** The key of the signed noUpdateAvailable reply served when no pointer applies. */
 export const NO_UPDATE_KEY = "reply/no-update";
@@ -33,6 +51,8 @@ export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 export const MAX_FILTERS_BYTES = 4096;
 
 const VERSION = 1;
+const ROLLOUT_VERSION = 2;
+const BUCKETS = 10_000; // One per 0.01 percentage point.
 // Fields each kind's record may hold; a directive has no update ID or filters.
 const RECORD_FIELDS: Record<Kind, readonly string[]> = {
   manifest: ["version", "kind", "updateId", "contentType", "manifestFilters", "body"],
@@ -54,31 +74,117 @@ const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Returns the record bytes for `reply`: one JSON object, keys in a fixed order, the body as a string. */
 export function encodeStoredReply(reply: StoredReply): Uint8Array<ArrayBuffer> {
-  let body: string;
-  try {
-    body = utf8.decode(reply.body);
-  } catch {
-    throw new ProtocolError("body", "is not UTF-8");
-  }
-  const contentType = `multipart/mixed; boundary=${reply.boundary}`;
-  const record =
-    reply.kind === "manifest"
-      ? {
-          version: VERSION,
-          kind: reply.kind,
-          updateId: reply.updateId,
-          contentType,
-          manifestFilters: reply.manifestFilters,
-          body,
-        }
-      : { version: VERSION, kind: reply.kind, contentType, body };
-  const bytes = new Uint8Array(encoder.encode(JSON.stringify(record)));
+  const bytes = new Uint8Array(
+    encoder.encode(JSON.stringify({ version: VERSION, ...replyFields(reply) })),
+  );
   decodeStoredReply(bytes); // Encode never writes what decode refuses.
   return bytes;
 }
 
-/** Returns the reply a record holds, with the body's exact bytes; a record encode would refuse is rejected. */
+/** Returns the version-2 record bytes for `rollout`, keys in a fixed order and both bodies as strings. */
+export function encodeRollout(rollout: Rollout): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(encoder.encode(serializeRollout(rollout)));
+  decodePointer(bytes); // Encode never writes what decode refuses.
+  return bytes;
+}
+
+/** Returns the reply a version-1 record holds, with the body's exact bytes; a record encode would refuse is rejected. */
 export function decodeStoredReply(bytes: Uint8Array): StoredReply {
+  const { record, version } = parseRecord(bytes);
+  if (version !== VERSION) throw new ProtocolError("version", "is not supported");
+  return readReply(record);
+}
+
+/** Returns what a pointer key holds: a version-1 reply or a version-2 rollout. */
+export function decodePointer(bytes: Uint8Array): StoredReply | Rollout {
+  const { record, text, version } = parseRecord(bytes);
+  if (version === VERSION) return readReply(record);
+  if (version === ROLLOUT_VERSION) return readRollout(record, text);
+  throw new ProtocolError("version", "is not supported");
+}
+
+/** Returns `header` lowercased when it is exactly one UUID, else undefined. */
+export function rolloutClientId(header: string | undefined): string | undefined {
+  const id = header?.toLowerCase();
+  return id !== undefined && UUID.test(id) ? id : undefined;
+}
+
+/** Returns the bucket, 0 to 9999, of a `rolloutClientId` result in the rollout of `updateId`. */
+export async function rolloutBucket(clientId: string, updateId: string): Promise<number> {
+  const input = encoder.encode(`${updateId}:${clientId}`);
+  const digest = await crypto.subtle.digest("SHA-256", input);
+  return new DataView(digest).getUint32(0) % BUCKETS;
+}
+
+/**
+ * Returns the side of `rollout` a request with this `EAS-Client-ID` value gets. 100% is `new` for every request;
+ * otherwise a request without a usable client ID gets `earlier`.
+ */
+export async function rolloutSide(
+  rollout: Rollout,
+  clientIdHeader: string | undefined,
+): Promise<"new" | "earlier"> {
+  if (rollout.percent === 100) return "new";
+  const id = rolloutClientId(clientIdHeader);
+  if (id === undefined) return "earlier";
+  const bucket = await rolloutBucket(id, rollout.new.updateId);
+  return bucket < Math.round(rollout.percent * 100) ? "new" : "earlier";
+}
+
+/** A reply's record fields without `version`, in the fixed order; `body` defaults to the reply's bytes decoded. */
+function replyFields(reply: StoredReply, body = bodyText(reply.body)): Record<string, unknown> {
+  const contentType = `multipart/mixed; boundary=${reply.boundary}`;
+  return reply.kind === "manifest"
+    ? {
+        kind: reply.kind,
+        updateId: reply.updateId,
+        contentType,
+        manifestFilters: reply.manifestFilters,
+        body,
+      }
+    : { kind: reply.kind, contentType, body };
+}
+
+function bodyText(body: Uint8Array): string {
+  try {
+    return utf8.decode(body);
+  } catch {
+    throw new ProtocolError("body", "is not UTF-8");
+  }
+}
+
+/**
+ * The exact version-2 record text for `rollout`; an absent reply is written as null. `bodies` are the replies' bodies
+ * as strings when the caller already holds them, so a read does not decode the bytes it just encoded.
+ */
+function serializeRollout(
+  rollout: Rollout,
+  bodies?: { new: string; earlier: string | undefined },
+): string {
+  // `unknown`: a JavaScript caller may pass null or a missing reply, which decode then refuses.
+  const nested = (field: string, reply: unknown, body: string | undefined) => {
+    if (typeof reply !== "object" || reply === null) return null;
+    try {
+      return replyFields(reply as StoredReply, body);
+    } catch (e) {
+      throw prefixed(field, e);
+    }
+  };
+  return JSON.stringify({
+    version: ROLLOUT_VERSION,
+    kind: "rollout",
+    percent: rollout.percent,
+    new: nested("new", rollout.new, bodies?.new),
+    earlier: nested("earlier", rollout.earlier, bodies?.earlier),
+  });
+}
+
+/** Parses a record up to its version; every decoder starts here. */
+function parseRecord(bytes: Uint8Array): {
+  record: Record<string, unknown>;
+  text: string;
+  version: number;
+} {
   if (bytes.length > MAX_REPLY_BYTES) {
     throw new ProtocolError("record", `is too large: over ${MAX_REPLY_BYTES} bytes`);
   }
@@ -94,20 +200,19 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   } catch {
     throw new ProtocolError("record", "is not JSON");
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new ProtocolError("record", "must be a JSON object");
-  }
-  const r = parsed as Record<string, unknown>;
+  if (!isObject(parsed)) throw new ProtocolError("record", "must be a JSON object");
   // Version first, so a later layout is reported as unsupported rather than as malformed.
-  const version = present(r, "version");
+  const version = present(parsed, "version");
   if (!Number.isInteger(version)) throw new ProtocolError("version", "must be an integer");
-  if (version !== VERSION) throw new ProtocolError("version", "is not supported");
+  return { record: parsed, text, version: version as number };
+}
 
+/** Reads a version-1 reply, or a reply inside a rollout, whose exact-text check refuses a nested `version`. */
+function readReply(r: Record<string, unknown>): StoredReply {
   const kind = checkKind(present(r, "kind"));
   for (const key of Object.keys(r)) {
-    if (!RECORD_FIELDS[kind].includes(key)) {
+    if (!RECORD_FIELDS[kind].includes(key))
       throw new ProtocolError(key, `is not a field of a ${kind} reply`);
-    }
   }
   const contentType = present(r, "contentType");
   const boundary =
@@ -131,6 +236,67 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
     manifestFilters: checkFilters(present(r, "manifestFilters")),
     body: bodyBytes,
   };
+}
+
+/**
+ * Reads a version-2 record, which must be exactly what `serializeRollout` writes for it; that comparison refuses any
+ * other key, kind, order or spelling.
+ */
+function readRollout(r: Record<string, unknown>, text: string): Rollout {
+  const percent = present(r, "percent");
+  if (
+    typeof percent !== "number" ||
+    !(percent >= 0 && percent <= 100) ||
+    Math.round(percent * 100) / 100 !== percent
+  ) {
+    throw new ProtocolError("percent", "must be a number from 0 to 100 in steps of 0.01");
+  }
+  const [next, newBody] = nestedReply(present(r, "new"), "new", ["manifest"]);
+  const earlierValue = present(r, "earlier");
+  const [earlier, earlierBody] =
+    earlierValue === null
+      ? []
+      : nestedReply(earlierValue, "earlier", ["manifest", "rollBackToEmbedded"]);
+  if (earlier?.kind === "manifest" && earlier.updateId === next.updateId) {
+    throw new ProtocolError("earlier.updateId", "must differ from new.updateId");
+  }
+  const rollout: Rollout = { kind: "rollout", percent, new: next, earlier };
+  // Refuses another key order, whitespace, escape or number spelling.
+  if (serializeRollout(rollout, { new: newBody, earlier: earlierBody }) !== text) {
+    throw new ProtocolError("record", "must be exactly what encodeRollout writes");
+  }
+  return rollout;
+}
+
+/** Reads the reply at rollout field `field`, which must be one of `kinds`, and returns it with its body string. */
+function nestedReply<K extends Kind>(
+  value: unknown,
+  field: string,
+  kinds: readonly K[],
+): [Extract<StoredReply, { kind: K }>, string] {
+  const expected = `must be a ${kinds.join(" or ")} reply`;
+  if (!isObject(value)) throw new ProtocolError(field, expected);
+  let reply: StoredReply;
+  try {
+    reply = readReply(value);
+  } catch (e) {
+    throw prefixed(field, e);
+  }
+  if (!(kinds as readonly Kind[]).includes(reply.kind)) {
+    throw new ProtocolError(`${field}.kind`, expected);
+  }
+  // readReply has checked that `body` is a well-formed string.
+  return [reply as Extract<StoredReply, { kind: K }>, value.body as string];
+}
+
+/** Returns `e` with its field under `field`, or `e` itself when it is not a ProtocolError. */
+function prefixed(field: string, e: unknown): unknown {
+  if (!(e instanceof ProtocolError)) return e;
+  return new ProtocolError(`${field}.${e.field}`, e.message.slice(e.field.length + 1));
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Returns the pointer key for a channel, runtime version and platform; names outside the grammar are rejected. */

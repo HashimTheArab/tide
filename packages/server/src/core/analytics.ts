@@ -15,12 +15,16 @@ export interface ManifestPoint {
   doubles: number[];
 }
 
+/** The rollout side a request was assigned; `none` when the pointer holds no rollout or the reply is a 503. */
+export type RolloutSide = "new" | "earlier" | "none";
+
 /** Receives one point per `/manifest` request that reaches the reply decision; it is never awaited. */
 export type AnalyticsSink = (point: ManifestPoint) => void;
 
 /** `channel` and `runtime` must already match the reply key grammar; every other value is read raw from `header`. */
 export function manifestPoint(
   reply: StoredReply["kind"] | "503",
+  side: RolloutSide,
   platform: "ios" | "android",
   channel: string,
   runtime: string,
@@ -35,6 +39,7 @@ export function manifestPoint(
       updateId(header("expo-current-update-id")),
       updateId(header("expo-embedded-update-id")),
       failedUpdateIds(header("expo-recent-failed-update-ids")),
+      side,
     ],
     // Only presence: the value is the client's error message, which may hold user data.
     doubles: [header("expo-fatal-error") === undefined ? 0 : 1],

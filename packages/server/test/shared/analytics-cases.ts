@@ -4,7 +4,7 @@ import { NO_UPDATE_KEY, replyKey } from "@tide-ota/protocol";
 
 import type { ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "./server-cases.ts";
-import { fixture } from "./fixtures.ts";
+import { CLIENT_HIGH, CLIENT_LOW, fixture } from "./fixtures.ts";
 
 export type Fault = "throw" | "reject" | "hang";
 
@@ -31,6 +31,7 @@ export function faultySink(fault: Fault): () => unknown {
 const RUNTIME = "1.0.0";
 const UPDATE_ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90"; // manifest.json's id
 const EMBEDDED_ID = "6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c";
+const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // manifest-next.json's id, every rollout's new side
 const ID = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
 const encoder = new TextEncoder();
 
@@ -94,7 +95,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     );
     expect(point).toEqual({
       indexes: ["an-manifest"],
-      blobs: ["manifest", "ios", RUNTIME, EMBEDDED_ID, EMBEDDED_ID, `${ID(1)},${ID(2)}`],
+      blobs: ["manifest", "ios", RUNTIME, EMBEDDED_ID, EMBEDDED_ID, `${ID(1)},${ID(2)}`, "none"],
       doubles: [1],
     });
   });
@@ -104,7 +105,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     const point = await onePoint(() => get("an-rollback", { "expo-platform": "android" }));
     expect(point).toEqual({
       indexes: ["an-rollback"],
-      blobs: ["rollBackToEmbedded", "android", RUNTIME, "", "", ""],
+      blobs: ["rollBackToEmbedded", "android", RUNTIME, "", "", "", "none"],
       doubles: [0],
     });
   });
@@ -118,7 +119,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     const point = await onePoint(() => get(channel, { "expo-current-update-id": current }));
     expect(point).toEqual({
       indexes: [channel],
-      blobs: ["noUpdateAvailable", "ios", RUNTIME, current ?? "", "", ""],
+      blobs: ["noUpdateAvailable", "ios", RUNTIME, current ?? "", "", "", "none"],
       doubles: [0],
     });
   });
@@ -132,7 +133,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     expect(status).toBe(503);
     expect(point).toEqual({
       indexes: ["an-fault"],
-      blobs: ["503", "ios", RUNTIME, "", "", ""],
+      blobs: ["503", "ios", RUNTIME, "", "", "", "none"],
       doubles: [0],
     });
   });
@@ -190,7 +191,65 @@ export function analyticsCases(harness: AnalyticsHarness): void {
         "expo-recent-failed-update-ids": values.failed,
       }),
     );
-    expect(point.blobs.slice(3)).toEqual(blobs);
+    expect(point.blobs.slice(3, 6)).toEqual(blobs);
+  });
+
+  test.each<[string, string, Record<string, string | undefined>, [string, string]]>([
+    ["the new side", "rollout-manifest", { client: CLIENT_LOW }, ["manifest", "new"]],
+    ["the earlier side", "rollout-manifest", { client: CLIENT_HIGH }, ["manifest", "earlier"]],
+    [
+      "an absent earlier side",
+      "rollout-none",
+      { client: CLIENT_HIGH },
+      ["noUpdateAvailable", "earlier"],
+    ],
+    [
+      "the new side under the new-update guard",
+      "rollout-manifest",
+      { client: CLIENT_LOW, current: NEW_ID },
+      ["noUpdateAvailable", "new"],
+    ],
+    ["no client ID", "rollout-manifest", {}, ["manifest", "earlier"]],
+  ])("a rollout records %s", async (_, golden, values, [reply, side]) => {
+    await pointer(`an-${golden}`, fixture(`${golden}.reply.json`));
+    const point = await onePoint(() =>
+      get(`an-${golden}`, {
+        "eas-client-id": values.client,
+        "expo-current-update-id": values.current,
+      }),
+    );
+    expect([point.blobs[0], point.blobs[6]]).toEqual([reply, side]);
+    // The client ID itself is never recorded.
+    for (const id of [CLIENT_LOW, CLIENT_HIGH]) expect(point.blobs.join(",")).not.toContain(id);
+  });
+
+  test("a malformed rollout records side none with reply 503", async () => {
+    await pointer("an-bad-rollout", new Uint8Array(encoder.encode('{"version":2,')));
+    const point = await onePoint(() => get("an-bad-rollout", { "eas-client-id": CLIENT_LOW }));
+    expect([point.blobs[0], point.blobs[6]]).toEqual(["503", "none"]);
+  });
+
+  // The largest point: an earlier-side rollback with every bounded field at its longest.
+  test("the largest point is 352 bytes of blobs, 7 of them the side", async () => {
+    const runtime = "r".repeat(64);
+    await harness.put(
+      replyKey("an-largest", runtime, "android"),
+      fixture("rollout-rollback.reply.json"),
+    );
+    const point = await onePoint(() =>
+      get("an-largest", {
+        "expo-platform": "android",
+        "expo-runtime-version": runtime,
+        "eas-client-id": CLIENT_HIGH,
+        "expo-current-update-id": EMBEDDED_ID,
+        "expo-embedded-update-id": EMBEDDED_ID,
+        "expo-recent-failed-update-ids": [1, 2, 3, 4, 5].map((n) => `"${ID(n)}"`).join(", "),
+      }),
+    );
+    expect(point.blobs[0]).toBe("rollBackToEmbedded");
+    expect(point.blobs[6]).toBe("earlier");
+    expect(encoder.encode(point.blobs[6]).length).toBe(7);
+    expect(point.blobs.reduce((n, b) => n + encoder.encode(b).length, 0)).toBe(352);
   });
 
   test("an oversized fatal error records only the flag", async () => {

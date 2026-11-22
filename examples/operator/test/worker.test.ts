@@ -38,7 +38,11 @@ test("/manifest serves the environment's bucket and records one point through it
     new Uint8Array(fixtures.noUpdateMultipart),
   );
   expect(spy.mock.calls.map(([point]) => point)).toEqual([
-    { indexes: ["main"], blobs: ["noUpdateAvailable", "ios", "1", "", "", ""], doubles: [0] },
+    {
+      indexes: ["main"],
+      blobs: ["noUpdateAvailable", "ios", "1", "", "", "", "none"],
+      doubles: [0],
+    },
   ]);
 });
 

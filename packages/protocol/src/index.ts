@@ -12,7 +12,7 @@ export { HEADER_VALUE, encodeMultipart, parseMultipart } from "./multipart.ts";
 export { bzip2CrcStep } from "./bzip2.ts";
 export type { BaseAsset, BaseRecord } from "./patch.ts";
 export { MAX_BASE_BYTES, applyBsdiff, decodeBaseRecord, encodeBaseRecord } from "./patch.ts";
-export type { StoredReply } from "./reply.ts";
+export type { Rollout, StoredReply } from "./reply.ts";
 export {
   CONTENT_KEY,
   MAX_FILTERS_BYTES,
@@ -20,13 +20,18 @@ export {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   baseKey,
+  decodePointer,
   decodeStoredReply,
   diskKey,
   diskPath,
   unescapeDiskPath,
+  encodeRollout,
   encodeStoredReply,
   patchKey,
   replyKey,
+  rolloutBucket,
+  rolloutClientId,
+  rolloutSide,
 } from "./reply.ts";
 export type { S3Config, S3Operation, S3Request, SigV4Credentials } from "./s3.ts";
 export {
