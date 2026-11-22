@@ -72,7 +72,7 @@ export const hexOf = async (bytes: Uint8Array) =>
   contentKey(await sha256Base64Url(new Uint8Array(bytes)));
 
 interface FakeState {
-  running: Record<string, { pid?: number; avd?: string }>;
+  running: Record<string, { pid?: number; avd?: string; phone?: boolean }>;
   installed: string[];
   reverse: string[];
 }

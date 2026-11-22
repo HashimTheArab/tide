@@ -22,7 +22,17 @@ import {
   retarget,
   tools,
 } from "./build.ts";
-import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, writeResults } from "./measure.ts";
+import { checkOnEmulator } from "./emulator.ts";
+import {
+  BASES,
+  KEEP_RULE,
+  STEADY_BASES,
+  TARGETS,
+  describe,
+  measureTargets,
+  patchesTo,
+  writeResults,
+} from "./measure.ts";
 import { USAGE, UsageError, parseOptions } from "./options.ts";
 
 const OUT = fileURLToPath(new URL("../../../docs/assets/hermes-delta/", import.meta.url));
@@ -61,11 +71,14 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   const plainJs = await exportJs(tree);
   const noBytecode = Buffer.from(plainJs).equals(start.js);
   const older = await compile(tree, start.hermesc, start.js);
+  const olderSteady = await compile(tree, start.hermesc, start.js, embedded.hbc);
 
   await step("previous update: OTA base", [pin.patches.previous]);
   const previous = await exportState("previous");
   const ota = await compile(tree, previous.hermesc, previous.js);
+  const otaSteady = await compile(tree, previous.hermesc, previous.js, embedded.hbc);
   const bases = { ota: ota.hbc, embedded: embedded.hbc, "older-ota": older.hbc };
+  const steadyBases = { ota: otaSteady.hbc, "older-ota": olderSteady.hbc };
 
   const changes: Partial<Record<ChangeId, ChangeResult>> = {};
   let deltaArgs: string[] = [];
@@ -83,7 +96,13 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
       "delta-ota": deltaOta.hbc,
       "delta-embedded": deltaEmbedded.hbc,
     });
-    changes[change] = { patch, ...stat, targets };
+    const steady = await patchesTo(
+      steadyBases,
+      deltaEmbedded.hbc,
+      targets["delta-embedded"].gzip9,
+      "delta-embedded",
+    );
+    changes[change] = { patch, ...stat, targets, steady };
   }
 
   const shapes = new Set(
@@ -143,11 +162,15 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
       embedded: describe(bases.embedded),
       "older-ota": describe(bases["older-ota"]),
     },
+    steadyBases: {
+      ota: describe(steadyBases.ota),
+      "older-ota": describe(steadyBases["older-ota"]),
+    },
     changes: changes as Record<ChangeId, ChangeResult>,
   };
 }
 
-/** Exit 0 for help or a finished run, 2 for a usage error, 1 when a build or measurement fails. */
+/** Exit 0 for help or a finished run, 2 for a usage error, 1 when a build, measurement or emulator path fails. */
 async function main(args: readonly string[]): Promise<number> {
   let options;
   try {
@@ -162,16 +185,23 @@ async function main(args: readonly string[]): Promise<number> {
     return 0;
   }
   try {
+    if (options.emulator) {
+      const { written, passed } = await checkOnEmulator(options.apps, options.avd, OUT, say);
+      for (const json of written) say(`wrote ${json} and its table`);
+      return passed ? 0 : 1;
+    }
     for (const id of options.apps) {
       const app = await measureApp(id, WORK);
       const json = writeResults(OUT, {
-        schema: 2,
+        schema: 3,
         about:
           "Android bundles. Bases: the embedded bundle and an OTA export of the app's start tree, and an OTA export " +
           "one update later (the OTA base); each change is a patch onto that update. Plain bundles are expo " +
-          "export's hermesc command recompiled on fixed relative names; delta bundles add -base-bytecode.",
+          "export's hermesc command recompiled on fixed relative names; delta bundles add -base-bytecode. Steady " +
+          "bases compile the OTA base's and the older OTA update's JS against the embedded bundle.",
         keepRule: KEEP_RULE,
         bases: BASES,
+        steadyBases: STEADY_BASES,
         targets: TARGETS,
         app,
       });

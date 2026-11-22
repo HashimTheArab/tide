@@ -19,6 +19,13 @@ export const BASES = {
 } as const;
 export type BaseKind = keyof typeof BASES;
 
+/** The OTA bases once every update is compiled against the embedded bundle; that base never changes, so no chain. */
+export const STEADY_BASES = {
+  ota: "the previous OTA update, itself delta-compiled against the embedded base",
+  "older-ota": "the older OTA update, itself delta-compiled against the embedded base",
+} as const;
+type SteadyBaseKind = keyof typeof STEADY_BASES;
+
 /** The new bundle, built three ways from the same JS. */
 export const TARGETS = {
   plain: "what expo export writes",
@@ -67,22 +74,31 @@ export async function measureTargets(
 ): Promise<Record<TargetKind, MeasuredTarget>> {
   const out: Partial<Record<TargetKind, MeasuredTarget>> = {};
   for (const kind of Object.keys(TARGETS) as TargetKind[]) {
-    const bytes = targets[kind];
-    const bundle = describe(bytes);
-    const hash = await sha256Base64Url(bytes);
-    const from: Partial<Record<BaseKind, PatchSize>> = {};
-    for (const base of Object.keys(BASES) as BaseKind[]) {
-      if (Buffer.from(bases[base]).equals(bytes)) {
-        from[base] = base === "embedded" ? { noPatch: true } : { reused: true };
-        continue;
-      }
-      const patch = makeBsdiff(bases[base], bytes);
-      await checkPatch(bases[base], patch, { bytes, hash }, `${base} to ${kind}`);
-      from[base] = { bytes: patch.length, keep: keepsPatch(patch.length, bundle.gzip9) };
-    }
-    out[kind] = { ...bundle, from: from as Record<BaseKind, PatchSize> };
+    const bundle = describe(targets[kind]);
+    out[kind] = { ...bundle, from: await patchesTo(bases, targets[kind], bundle.gzip9, kind) };
   }
   return out as Record<TargetKind, MeasuredTarget>;
+}
+
+/** Returns the patch to `target` from each base, measured and checked as `measureTargets` does. */
+export async function patchesTo<K extends BaseKind>(
+  bases: Readonly<Record<K, Uint8Array<ArrayBuffer>>>,
+  target: Uint8Array<ArrayBuffer>,
+  gzip9: number,
+  label: string,
+): Promise<Record<K, PatchSize>> {
+  const hash = await sha256Base64Url(target);
+  const from: Partial<Record<K, PatchSize>> = {};
+  for (const base of Object.keys(bases) as K[]) {
+    if (Buffer.from(bases[base]).equals(target)) {
+      from[base] = base === "embedded" ? { noPatch: true } : { reused: true };
+      continue;
+    }
+    const patch = makeBsdiff(bases[base], target);
+    await checkPatch(bases[base], patch, { bytes: target, hash }, `${base} to ${label}`);
+    from[base] = { bytes: patch.length, keep: keepsPatch(patch.length, gzip9) };
+  }
+  return from as Record<K, PatchSize>;
 }
 
 /** One app's measurements and the facts needed to rerun and read them. */
@@ -97,6 +113,7 @@ export interface AppResult {
   readonly embedded: unknown;
   readonly delta: { readonly hermescArgs: readonly string[] };
   readonly bases: Readonly<Record<BaseKind, Bundle>>;
+  readonly steadyBases: Readonly<Record<SteadyBaseKind, Bundle>>;
   readonly changes: Readonly<Record<ChangeId, ChangeResult>>;
 }
 
@@ -107,14 +124,16 @@ export interface ChangeResult {
   readonly added: number;
   readonly removed: number;
   readonly targets: Readonly<Record<TargetKind, MeasuredTarget>>;
+  readonly steady: Readonly<Record<SteadyBaseKind, PatchSize>>; // To delta-embedded.
 }
 
 /** One app's results file: each run writes only its own apps' files, so runs of other apps never race on one. */
 export interface Results {
-  readonly schema: 2;
+  readonly schema: 3;
   readonly about: string;
   readonly keepRule: string;
   readonly bases: typeof BASES;
+  readonly steadyBases: typeof STEADY_BASES;
   readonly targets: typeof TARGETS;
   readonly app: AppResult;
 }
@@ -184,6 +203,49 @@ export function renderTable(results: Results): string {
         `${cell(OTHER[base])} | ${cell("older-ota")} | | |`,
     );
   }
-  lines.push("");
+  // What the client downloads: a patch Tide does not keep costs the full bundle, as no patch does.
+  const fetched = (t: MeasuredTarget, p: PatchSize) =>
+    "reused" in p ? 0 : "noPatch" in p || !p.keep ? t.gzip9 : p.bytes;
+  const rows = (Object.keys(CHANGES) as ChangeId[]).map((change) => {
+    const c = app.changes[change];
+    const { plain } = c.targets;
+    const delta = c.targets["delta-embedded"];
+    return {
+      name: `${change} (+${c.added} −${c.removed})`,
+      plain: (["embedded", "ota", "older-ota"] as const).map((b) => fetched(plain, plain.from[b])),
+      delta: [
+        fetched(delta, delta.from.embedded),
+        fetched(delta, c.steady.ota),
+        fetched(delta, c.steady["older-ota"]),
+      ],
+    };
+  });
+  const column = (k: "plain" | "delta", i: number) =>
+    rows.reduce((sum, r) => sum + (r[k][i] ?? 0), 0);
+  lines.push(
+    "",
+    "With the embedded compile base, once every OTA update is itself delta-compiled against the embedded bundle:",
+    "plain bundles from plain bases, then the delta-embedded bundle from the embedded bundle and from those bases.",
+    "Each cell is what the client downloads: the patch, or the bundle's gzip-9 size when Tide keeps no patch.",
+    "",
+    "| Change | From embedded | From OTA base | From older OTA | All bases | Saved |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ...rows.map((r) => steadyRow(r.name, r.plain, r.delta)),
+    steadyRow(
+      "all changes",
+      [0, 1, 2].map((i) => column("plain", i)),
+      [0, 1, 2].map((i) => column("delta", i)),
+    ),
+    "",
+  );
   return lines.join("\n");
+}
+
+function steadyRow(name: string, plain: number[], delta: number[]): string {
+  const all = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const cells = plain.map((p, i) => `${n(p)} → ${n(delta[i] ?? 0)}`);
+  return (
+    `| ${name} | ${cells.join(" | ")} | ${n(all(plain))} → ${n(all(delta))} | ` +
+    `${saved(all(plain), all(delta))} |`
+  );
 }
