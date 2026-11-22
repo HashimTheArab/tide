@@ -985,6 +985,16 @@ describe("lifetimes", () => {
 });
 
 describe("chain forms and KMS", () => {
+  const SUBJECT_IS_CA =
+    "--subject-key is the key of a certificate in --issuer: give a key of its own";
+  const rootEnv = () => SOURCES.TIDE_SIGNING_KEY!(2048);
+  const root2048 = async () => expectIssued(await chainIssue(rootEnv(), ROOT_ARGS));
+  /** An intermediate for the 3072-bit key under a root of the 2048-bit key, then that root. */
+  const intermediateUnderRoot = async () => {
+    const root = await root2048();
+    const args = issuedArgs(root, keys[3072], INTERMEDIATE_ARGS);
+    return expectIssued(await chainIssue(rootEnv(), args)) + root;
+  };
   test("a leaf calls GetPublicKey, then Sign of the TBS digest, and runs no probe", async () => {
     const root = expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ROOT_ARGS));
     const before = kms.received.length;
@@ -1077,6 +1087,21 @@ describe("chain forms and KMS", () => {
         ...LEAF_ARGS,
       ],
       "--subject-key must be one PEM PUBLIC KEY block",
+    ],
+    [
+      "a leaf for the root's own key",
+      async () => issuedArgs(await root2048(), keys[2048], LEAF_ARGS),
+      SUBJECT_IS_CA,
+    ],
+    [
+      "a leaf for the intermediate's key",
+      async () => issuedArgs(await intermediateUnderRoot(), keys[3072], LEAF_ARGS),
+      SUBJECT_IS_CA,
+    ],
+    [
+      "an intermediate for the key of the root above its issuer",
+      async () => issuedArgs(await intermediateUnderRoot(), keys[2048], INTERMEDIATE_ARGS),
+      SUBJECT_IS_CA,
     ],
   ])("%s is refused before any KMS request", async (_, args, message) => {
     const before = kms.received.length;

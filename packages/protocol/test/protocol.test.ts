@@ -2366,11 +2366,11 @@ describe("issuerPath", () => {
     expect(path.served).toBeUndefined();
     expect(path.root).toBe(rootText);
     expect(hex(path.subject)).toBe(hex(tbsOf(rootText).subject));
-    expect(hex(path.spki)).toBe(hex(tbsOf(rootText).spki));
+    expect(path.spkis.map(hex)).toEqual([hex(tbsOf(rootText).spki)]);
     expect(path.notAfter).toBe(CHAIN_VALIDITY.notAfter.getTime());
   });
 
-  test("a three-block path gives the first certificate's names, the earliest notAfter and canonical PEMs", async () => {
+  test("a three-block path gives the first certificate's names, every key, the earliest notAfter and canonical PEMs", async () => {
     const earliest = new Date("2040-06-01T00:00:00Z");
     const { top, middle, low, keys } = await threeLevels({ middle: { notAfter: earliest } });
     // CRLF line ends and no final line end are read, and re-encoded canonically.
@@ -2382,8 +2382,9 @@ describe("issuerPath", () => {
     expect(path.root).toBe(top);
     expect(path.notAfter).toBe(earliest.getTime());
     expect(hex(path.subject)).toBe(hex(tbsOf(low).subject));
-    expect(hex(path.spki)).toBe(
-      hex(new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey))),
+    expect(path.spkis.map(hex)).toEqual([low, middle, top].map((c) => hex(tbsOf(c).spki)));
+    expect(path.spkis[0]).toEqual(
+      new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey)),
     );
   });
 
