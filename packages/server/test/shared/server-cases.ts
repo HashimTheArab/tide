@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
-import type { StoredReply } from "@tide-ota/protocol";
+import type { Rollout, StoredReply } from "@tide-ota/protocol";
 import {
   MAX_BASE_BYTES,
   MAX_REPLY_BYTES,
@@ -10,8 +10,10 @@ import {
   certificatePublicKey,
   contentKey,
   decodeBaseRecord,
+  decodePointer,
   decodeStoredReply,
   encodeBaseRecord,
+  encodeRollout,
   encodeStoredReply,
   parseMultipart,
   patchKey,
@@ -20,7 +22,7 @@ import {
   verifyExpoSignature,
 } from "@tide-ota/protocol";
 
-import { fixture } from "./fixtures.ts";
+import { CLIENT_HIGH, CLIENT_LOW, fixture } from "./fixtures.ts";
 
 /** One runtime's real entry, configured with app ID `tide-test`, and its native way to seed the bucket. */
 export interface Harness {
@@ -466,6 +468,7 @@ export function bundleCases(harness: Harness): void {
 const RUNTIME = "1.0.0";
 const BOUNDARY = "tide_fixture_boundary";
 const UPDATE_ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90"; // manifest.json's id
+const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // manifest-next.json's id, every rollout's new side
 const EMBEDDED_ID = "6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c";
 const STOCK_ACCEPT = "multipart/mixed,application/expo+json,application/json";
 
@@ -502,7 +505,7 @@ export function manifestCases(harness: Harness): void {
     const reply = decodeStoredReply(record);
     expect(res.status).toBe(200);
     expect(body).toEqual(reply.body);
-    expect(res.headers.get("content-type")).toBe(`multipart/mixed; boundary=${BOUNDARY}`);
+    expect(res.headers.get("content-type")).toBe(`multipart/mixed; boundary=${reply.boundary}`);
     expect(res.headers.get("expo-protocol-version")).toBe("1");
     expect(res.headers.get("expo-sfv-version")).toBe("0");
     expect(res.headers.get("cache-control")).toBe("private, max-age=0");
@@ -696,7 +699,7 @@ export function manifestCases(harness: Harness): void {
 
     const utf8 = (text: string) => new Uint8Array(new TextEncoder().encode(text));
     const unknownVersion = utf8(
-      new TextDecoder().decode(MANIFEST).replace('"version":1', '"version":2'),
+      new TextDecoder().decode(MANIFEST).replace('"version":1', '"version":3'),
     );
     test.each<[string, Uint8Array<ArrayBuffer>]>([
       ["malformed JSON", utf8('{"version":1,')],
@@ -738,5 +741,186 @@ export function manifestCases(harness: Harness): void {
     const got = await get("at-limit");
     expect(got.res.status).toBe(200);
     expect(got.body).toEqual(body);
+  });
+
+  describe("a rollout pointer", () => {
+    const NEXT = fixture("manifest-next.reply.json");
+    const ON_MANIFEST = fixture("rollout-manifest.reply.json"); // 12.5%, earlier manifest.reply.json
+    const ON_ROLLBACK = fixture("rollout-rollback.reply.json"); // 50%, earlier rollback.reply.json
+    const ON_NONE = fixture("rollout-none.reply.json"); // 0.01%, no earlier reply
+    // Each earlier variant: the rollout golden and the version-1 record a plain pointer would hold instead.
+    const EARLIER: readonly [
+      string,
+      Uint8Array<ArrayBuffer>,
+      Uint8Array<ArrayBuffer> | undefined,
+    ][] = [
+      ["manifest", ON_MANIFEST, MANIFEST],
+      ["rollback", ON_ROLLBACK, ROLLBACK],
+      ["absent", ON_NONE, undefined],
+    ];
+    /** `record` with its percentage replaced; the codec only re-encodes the same sides. */
+    const atPercent = (record: Uint8Array, percent: number) =>
+      encodeRollout({ ...(decodePointer(record) as Rollout), percent });
+    /** A reply as bytes: status, every header but `date`, which marks when it was sent, and the body. */
+    const wire = async (channel: string, change: Record<string, string | undefined>) => {
+      const { res, body } = await get(channel, change);
+      const headers = [...res.headers].filter(([name]) => name !== "date");
+      return { status: res.status, headers, body };
+    };
+    const ids = (client: string | undefined, current: string | undefined) => ({
+      "eas-client-id": client,
+      "expo-current-update-id": current,
+    });
+
+    test.each(EARLIER)(
+      "at 0%% with an earlier %s, every request gets what the earlier record would give",
+      async (name, rollout, earlier) => {
+        await pointer(`r0-${name}`, atPercent(rollout, 0));
+        if (earlier !== undefined) await pointer(`r0-${name}-v1`, earlier);
+        for (const client of [CLIENT_LOW, CLIENT_HIGH, undefined]) {
+          for (const current of [undefined, EMBEDDED_ID, UPDATE_ID]) {
+            const change = ids(client, current);
+            expect([client, current, await wire(`r0-${name}`, change)]).toEqual([
+              client,
+              current,
+              await wire(`r0-${name}-v1`, change),
+            ]);
+          }
+        }
+      },
+    );
+
+    // The new-update guard: a device on the new update must not be moved back by the earlier reply.
+    test.each(EARLIER)(
+      "at 0%% with an earlier %s, a device on the new update gets no-update",
+      async (name, rollout, earlier) => {
+        await pointer(`r0-guard-${name}`, atPercent(rollout, 0));
+        if (earlier !== undefined) await pointer(`r0-guard-${name}-v1`, earlier);
+        for (const client of [CLIENT_LOW, CLIENT_HIGH, undefined]) {
+          const change = ids(client, NEW_ID);
+          const got = await get(`r0-guard-${name}`, change);
+          expectReply(got, NO_UPDATE);
+          const plain = await get(`r0-guard-${name}-v1`, change);
+          if (earlier === undefined) expectReply(plain, NO_UPDATE);
+          else expect(plain.body).not.toEqual(got.body);
+        }
+      },
+    );
+
+    test.each(EARLIER)(
+      "at 100%% with an earlier %s, every request gets what a plain pointer to the new reply gives",
+      async (name, rollout) => {
+        await pointer(`r100-${name}`, atPercent(rollout, 100));
+        await pointer(`r100-${name}-v1`, NEXT);
+        for (const client of [CLIENT_LOW, CLIENT_HIGH, undefined, "not-a-uuid"]) {
+          for (const current of [undefined, UPDATE_ID, NEW_ID]) {
+            const change = ids(client, current);
+            expect([client, current, await wire(`r100-${name}`, change)]).toEqual([
+              client,
+              current,
+              await wire(`r100-${name}-v1`, change),
+            ]);
+          }
+        }
+      },
+    );
+
+    test("each device gets its side's body, content-type and filters", async () => {
+      await pointer("r-sides", ON_MANIFEST);
+      const low = await get("r-sides", ids(CLIENT_LOW, EMBEDDED_ID));
+      expectReply(low, NEXT);
+      expect(low.body).toEqual(fixture("manifest-next.multipart"));
+      expect(low.res.headers.get("content-type")).toBe(
+        "multipart/mixed; boundary=tide_fixture_next",
+      );
+      expect(low.res.headers.get("expo-manifest-filters")).toBe('branch="next"');
+      const high = await get("r-sides", ids(CLIENT_HIGH, EMBEDDED_ID));
+      expectReply(high, MANIFEST);
+      expect(high.body).toEqual(fixture("manifest.multipart"));
+      expect(high.res.headers.get("expo-manifest-filters")).toBe('branch="main"');
+      expectReply(await get("r-sides", ids(CLIENT_LOW.toUpperCase(), EMBEDDED_ID)), NEXT);
+    });
+
+    test.each<[string, string | undefined]>([
+      ["no", undefined],
+      ["an empty", ""],
+      ["a malformed", "not-a-uuid"],
+      ["a repeated", `${CLIENT_LOW}, ${CLIENT_LOW}`], // Each part alone is on the new side.
+    ])("%s EAS-Client-ID gets the earlier side", async (_, client) => {
+      await pointer("r-unusable", ON_MANIFEST);
+      expectReply(await get("r-unusable", ids(client, EMBEDDED_ID)), MANIFEST);
+    });
+
+    test.each([CLIENT_LOW, CLIENT_HIGH])(
+      "a device on the new update gets no-update on either side (%s)",
+      async (client) => {
+        await pointer("r-on-new", ON_MANIFEST);
+        expectReply(await get("r-on-new", ids(client, NEW_ID)), NO_UPDATE);
+        expectReply(await get("r-on-new", ids(client, NEW_ID.toUpperCase())), NO_UPDATE);
+      },
+    );
+
+    test("a device on the earlier manifest gets no-update on the earlier side and the new one on the new side", async () => {
+      await pointer("r-on-earlier", ON_MANIFEST);
+      expectReply(await get("r-on-earlier", ids(CLIENT_HIGH, UPDATE_ID)), NO_UPDATE);
+      expectReply(await get("r-on-earlier", ids(CLIENT_LOW, UPDATE_ID)), NEXT);
+    });
+
+    test("an earlier rollback is served to the earlier side, even to a device on its embedded update", async () => {
+      await pointer("r-rollback", ON_ROLLBACK);
+      expectReply(await get("r-rollback", ids(CLIENT_HIGH, undefined)), ROLLBACK);
+      const embedded = {
+        ...ids(CLIENT_HIGH, EMBEDDED_ID),
+        "expo-embedded-update-id": EMBEDDED_ID,
+      };
+      const got = await get("r-rollback", embedded);
+      expectReply(got, ROLLBACK);
+      expect(got.body).toEqual(fixture("rollback.multipart"));
+      expectReply(await get("r-rollback", ids(CLIENT_LOW, EMBEDDED_ID)), NEXT);
+    });
+
+    test("an absent earlier reply serves no-update to the earlier side", async () => {
+      await pointer("r-none", ON_NONE);
+      const got = await get("r-none", ids(CLIENT_HIGH, EMBEDDED_ID));
+      expectReply(got, NO_UPDATE);
+      expect(got.body).toEqual(fixture("no-update.multipart"));
+    });
+
+    const text = new TextDecoder();
+    const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
+    /** The 12.5% golden as a JSON object a case can break, then its UTF-8 bytes. */
+    const broken = (change: (o: Record<string, unknown>) => Record<string, unknown>) =>
+      utf8(JSON.stringify(change(JSON.parse(text.decode(ON_MANIFEST)) as Record<string, unknown>)));
+    const noUpdateFields = () => {
+      const { version: _, ...fields } = JSON.parse(text.decode(NO_UPDATE)) as Record<
+        string,
+        unknown
+      >;
+      return fields;
+    };
+    test.each<[string, () => Uint8Array<ArrayBuffer>]>([
+      ["malformed version-2 JSON", () => utf8('{"version":2,')],
+      ["an earlier no-update", () => broken((o) => ({ ...o, earlier: noUpdateFields() }))],
+      ["another key order", () => broken(({ kind, ...rest }) => ({ ...rest, kind }))],
+      [
+        "one byte over the limit",
+        () => {
+          const bytes = new Uint8Array(MAX_REPLY_BYTES + 1).fill(0x20);
+          bytes.set(ON_MANIFEST);
+          return bytes;
+        },
+      ],
+    ])("%s at the pointer is 503 and not cached", async (_, record) => {
+      await pointer("r-bad", record());
+      for (const client of [CLIENT_LOW, CLIENT_HIGH, undefined]) {
+        expectFailure(await get("r-bad", ids(client, EMBEDDED_ID)), 503);
+      }
+    });
+
+    test("a side that needs reply/no-update when it is missing is 503 and not cached", async () => {
+      await pointer("r-no-fallback", ON_NONE);
+      await harness.remove(NO_UPDATE_KEY);
+      expectFailure(await get("r-no-fallback", ids(CLIENT_HIGH, EMBEDDED_ID)), 503);
+    });
   });
 }

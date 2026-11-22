@@ -13,12 +13,14 @@ import {
   baseKey,
   contentKey,
   decodeBaseRecord,
+  decodePointer,
   decodeStoredReply,
   patchKey,
   replyKey,
+  rolloutSide,
 } from "@tide-ota/protocol";
 
-import type { AnalyticsSink } from "./analytics.ts";
+import type { AnalyticsSink, RolloutSide } from "./analytics.ts";
 import type { Store, StoredObject } from "./store.ts";
 import { manifestPoint } from "./analytics.ts";
 import { abortable, discard, readBounded } from "./store.ts";
@@ -117,13 +119,27 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
 
     const signal = replyDeadline();
     let reply: StoredReply | undefined;
+    let side: RolloutSide = "none";
     try {
-      const pointer = await readRecord(key, MAX_REPLY_BYTES, decodeStoredReply, signal);
+      const pointer = await readRecord(key, MAX_REPLY_BYTES, decodePointer, signal);
       if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
-      // A rollback is always served: the client applies it only when its commitTime is newer than what it runs.
       const current = header("expo-current-update-id")?.toLowerCase();
-      if (pointer !== undefined && (pointer.kind !== "manifest" || current !== pointer.updateId)) {
-        reply = pointer;
+      let candidate: StoredReply | undefined;
+      if (pointer?.kind === "rollout") {
+        side = await rolloutSide(pointer, header("eas-client-id"));
+        // A device on the new update gets no-update on either side: a reply whose filters it fails would move it back.
+        if (current !== pointer.new.updateId) {
+          candidate = side === "new" ? pointer.new : pointer.earlier;
+        }
+      } else {
+        candidate = pointer;
+      }
+      // A rollback is always served; the client's selection policy decides whether it applies.
+      if (
+        candidate !== undefined &&
+        (candidate.kind !== "manifest" || current !== candidate.updateId)
+      ) {
+        reply = candidate;
       } else {
         const noUpdate = await readRecord(
           NO_UPDATE_KEY,
@@ -138,11 +154,12 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
         reply = noUpdate;
       }
     } catch (e) {
+      side = "none";
       console.error(`/manifest for ${key} failed`, e);
     }
     try {
       const written: unknown = analytics(
-        manifestPoint(reply?.kind ?? "503", platform, channel, runtime, header),
+        manifestPoint(reply?.kind ?? "503", side, platform, channel, runtime, header),
       );
       // An async sink still type-checks; its rejection is logged, never awaited.
       Promise.resolve(written).catch(sinkFailed);
