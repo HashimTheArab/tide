@@ -212,10 +212,12 @@ export async function exportUpdate(
   app: App,
   marker: string,
   runtimeVersion?: string,
+  base?: string, // A bundle to delta-compile the launch bundle against.
 ) {
   writeMarker(app, marker);
   const out = join(stack.dir, `export-${app.version}-${marker}`);
-  await cli.export(app.dir, out, [app.platform], runtimeVersion);
+  const bases = base === undefined ? {} : { [app.platform]: base };
+  await cli.export(app.dir, out, [app.platform], runtimeVersion, bases);
   return out;
 }
 
