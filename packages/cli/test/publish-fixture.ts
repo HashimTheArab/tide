@@ -129,21 +129,23 @@ export interface HermescRun {
 
 /**
  * Installs react-native and hermes-compiler under `dir/node_modules`, with a fake hermesc shim where react-native 0.83
- * and later put it or, for `sdks`, where older ones do. Returns the reader of its log, kept in `dir`.
+ * and later put it, for `sdks` where older ones do, or for `override` under `dir/hermes-override/build/bin` with its
+ * own log. Returns the reader of its log, kept in `dir`.
  */
-export function installFakeHermes(dir: string, at: "compiler" | "sdks" = "compiler") {
+export function installFakeHermes(dir: string, at: "compiler" | "sdks" | "override" = "compiler") {
   const modules = join(dir, "node_modules");
   for (const name of ["react-native", "hermes-compiler"]) {
     mkdirSync(join(modules, name), { recursive: true });
     writeFileSync(join(modules, name, "package.json"), JSON.stringify({ name, version: "0.0.0" }));
   }
   const host = process.platform === "darwin" ? "osx-bin" : "linux64-bin";
-  const bin =
-    at === "compiler"
-      ? join(modules, "hermes-compiler", "hermesc", host)
-      : join(modules, "react-native", "sdks", "hermesc", host);
+  const bin = {
+    compiler: join(modules, "hermes-compiler", "hermesc", host),
+    sdks: join(modules, "react-native", "sdks", "hermesc", host),
+    override: join(dir, "hermes-override", "build", "bin"),
+  }[at];
   mkdirSync(bin, { recursive: true });
-  const log = join(dir, "fake-hermesc.log");
+  const log = join(dir, at === "override" ? "fake-hermesc-override.log" : "fake-hermesc.log");
   writeFileSync(
     join(bin, "hermesc"),
     `#!/bin/sh\nexec '${process.execPath}' '${FAKE_HERMESC}' '${log}' "$@"\n`,

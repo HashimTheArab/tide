@@ -431,8 +431,9 @@ bytes are unchanged.
 1. Before any child: the file (against the caller's directory) is a regular file opening with the HBC magic
    `c6 1f bc 03 c1 03 19 1f` and a u32 little-endian bytecode version at offset 8.
 2. Before any Expo tool and before `<dir>` exists: the app's hermesc, found as `@expo/metro-config`'s
-   `exportHermes.js` finds it without its override: `react-native/package.json` resolved from the real project
-   directory, `hermes-compiler/package.json` from react-native's, then the first of
+   `exportHermes.js` finds it: `react-native/package.json` resolved from the real project directory,
+   `hermes-compiler/package.json` from react-native's, then the first of `<override>/build/bin/hermesc` when
+   `--pass-env` passes `REACT_NATIVE_OVERRIDE_HERMES_DIR` (against the real project directory),
    `<react-native>/ReactAndroid/hermes-engine/build/hermes/bin/hermesc`, `<hermes-compiler>/hermesc/<host>/hermesc` and
    `<react-native>/sdks/hermesc/<host>/hermesc` (`osx-bin` or `linux64-bin`; no Windows). Its `-version` must print
    `HBC bytecode version: <n>` equal to the base's.

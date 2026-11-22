@@ -74,7 +74,10 @@ async function run(
   const runner: Runner = (command, path, args, dir, stdout) =>
     runChild(command, path, args, dir, childEnv, stdout);
   // Before any Expo tool runs, so a missing compiler or a base it cannot read leaves no trace.
-  const compiler = base === undefined ? undefined : await appHermesc(projectRoot, base, runner);
+  const compiler =
+    base === undefined
+      ? undefined
+      : await appHermesc(projectRoot, base, runner, childEnv[OVERRIDE_VARIABLE]);
 
   const config = await expoJson(projectRoot, childEnv, ["config", "--json"], "expo");
   const updates = member(config, "updates");

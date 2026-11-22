@@ -594,6 +594,22 @@ describe("--base-bytecode", () => {
     expect(hermes().map((r) => r.args)).toEqual([["-version"], DELTA_COMPILE]);
   });
 
+  const BASED = (base: string) => ["--platform", "android", "--base-bytecode", `android=${base}`];
+  test("a hermesc selected with --pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR is the one checked and wrapped", async () => {
+    const { app, hermes } = hermesProject();
+    const selected = installFakeHermes(app.root, "override");
+    const result = await exportIn(
+      app.root,
+      ["--pass-env", "REACT_NATIVE_OVERRIDE_HERMES_DIR", ...BASED(file(EMBEDDED))],
+      // Relative, as Expo reads it: against the project directory.
+      { ...PATH, REACT_NATIVE_OVERRIDE_HERMES_DIR: "hermes-override" },
+    );
+    expect(result).toMatchObject({ code: 0, err: [] });
+    expect(read(result.dir, BUNDLE)).toEqual(fakeHbc(js("android", "one"), EMBEDDED));
+    expect(selected().map((r) => r.args)).toEqual([["-version"], DELTA_COMPILE]);
+    expect(hermes()).toEqual([]);
+  });
+
   const ONE_PLATFORM =
     "--base-bytecode compiles one platform: give one base and one --platform, and export each platform on its own";
   test.each<[string, (base: string) => string[], string]>([
@@ -657,7 +673,6 @@ describe("--base-bytecode", () => {
     expect(existsSync(result.dir)).toBe(false);
   });
 
-  const BASED = (base: string) => ["--platform", "android", "--base-bytecode", `android=${base}`];
   const modules = (root: string, ...path: string[]) => join(root, "node_modules", ...path);
   test.each<[string, (root: string) => void, string]>([
     [
