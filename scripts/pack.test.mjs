@@ -1,4 +1,4 @@
-// Installs the packed packages into a fresh npm project and uses them as a consumer would.
+// Installs each packed package alone into a fresh npm project and uses it as a consumer would.
 // Usage: node scripts/pack.test.mjs [protocol.tgz server.tgz cli.tgz]; with no tarballs it packs the workspace.
 // @tide-ota/* resolve only from the tarballs: the scope's registry is unreachable during the install.
 import assert from "node:assert/strict";
@@ -28,10 +28,35 @@ function ok(cmd, args, options) {
 }
 
 const work = mkdtempSync(join(tmpdir(), "tide-pack-"));
-const project = join(work, "consumer");
-/** @typedef {{ name: string, version: string, private?: boolean, dependencies?: Record<string, string>, exports?: Record<string, string>, bin?: Record<string, string> }} Manifest */
+/** @typedef {{ name: string, private?: boolean, exports?: Record<string, string>, bin?: Record<string, string> }} Manifest */
 /** @type {Map<string, { file: string, entries: string[], manifest: Manifest }>} */
 const tarballs = new Map();
+/** @type {Record<"protocol" | "server" | "cli", string>} */
+const projects = { protocol: "", server: "", cli: "" };
+
+/**
+ * Installs `name` alone; the overrides only redirect @tide-ota/* deps its packed manifest declares.
+ * @param {string} name @param {string} typesNode
+ */
+function consumer(name, typesNode) {
+  const dir = join(work, name.split("/")[1]);
+  mkdirSync(dir);
+  const tgz = (/** @type {string} */ n) => `file:${tarballs.get(n)?.file}`;
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "consumer",
+      private: true,
+      type: "module",
+      dependencies: { [name]: tgz(name), "@types/node": typesNode },
+      overrides: Object.fromEntries(NAMES.map((n) => [n, tgz(n)])),
+    }),
+  );
+  // A @tide-ota/* package missing from the tarballs fails the install instead of coming from npm.
+  writeFileSync(join(dir, ".npmrc"), "@tide-ota:registry=http://127.0.0.1:9/\nfetch-retries=0\n");
+  ok("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"], { cwd: dir });
+  return dir;
+}
 
 before(() => {
   let files = process.argv.slice(2).map((f) => resolve(f));
@@ -54,26 +79,12 @@ before(() => {
   }
   assert.deepEqual([...tarballs.keys()].sort(), [...NAMES].sort());
 
-  mkdirSync(project);
   const typesNode = /** @type {{ version: string }} */ (
     JSON.parse(readFileSync(join(root, "node_modules/@types/node/package.json"), "utf8"))
   ).version;
-  const dependencies = Object.fromEntries(NAMES.map((n) => [n, `file:${tarballs.get(n)?.file}`]));
-  writeFileSync(
-    join(project, "package.json"),
-    JSON.stringify({
-      name: "consumer",
-      private: true,
-      type: "module",
-      dependencies: { ...dependencies, "@types/node": typesNode },
-    }),
-  );
-  // A @tide-ota/* package missing from the tarballs fails the install instead of coming from npm.
-  writeFileSync(
-    join(project, ".npmrc"),
-    "@tide-ota:registry=http://127.0.0.1:9/\nfetch-retries=0\n",
-  );
-  ok("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts"], { cwd: project });
+  projects.protocol = consumer("@tide-ota/protocol", typesNode);
+  projects.server = consumer("@tide-ota/server", typesNode);
+  projects.cli = consumer("@tide-ota/cli", typesNode);
 });
 
 // Not an after hook: with awaited top-level tests it runs as soon as the first ones finish.
@@ -100,27 +111,8 @@ await test("tarballs hold only dist, LICENSE, README and a manifest pointing int
   }
 });
 
-await test("each tarball depends on the packed version of every @tide-ota package its source does", () => {
-  // Installed side by side, a missing dependency still resolves; installed alone, it would not.
-  for (const [name, { manifest }] of tarballs) {
-    const source = /** @type {Manifest} */ (
-      JSON.parse(readFileSync(join(root, "packages", name.split("/")[1], "package.json"), "utf8"))
-    );
-    const internal = Object.keys(source.dependencies ?? {}).filter((d) =>
-      d.startsWith("@tide-ota/"),
-    );
-    for (const dep of internal) {
-      assert.equal(
-        manifest.dependencies?.[dep],
-        tarballs.get(dep)?.manifest.version,
-        `${name} does not depend on the packed ${dep}`,
-      );
-    }
-  }
-});
-
 await test("the tide bin prints usage and exits 2", () => {
-  const r = run(join(project, "node_modules/.bin/tide"), [], { cwd: project });
+  const r = run(join(projects.cli, "node_modules/.bin/tide"), [], { cwd: projects.cli });
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /^usage: tide status\n/);
 });
@@ -128,15 +120,16 @@ await test("the tide bin prints usage and exits 2", () => {
 await test("@tide-ota/protocol imports and hashes", () => {
   const bytes = "tide";
   writeFileSync(
-    join(project, "protocol.mjs"),
+    join(projects.protocol, "protocol.mjs"),
     `import { sha256Base64Url } from "@tide-ota/protocol";\n` +
       `process.stdout.write(await sha256Base64Url(new TextEncoder().encode(${JSON.stringify(bytes)})));\n`,
   );
   const want = createHash("sha256").update(bytes).digest("base64url");
-  assert.equal(ok("node", ["protocol.mjs"], { cwd: project }), want);
+  assert.equal(ok("node", ["protocol.mjs"], { cwd: projects.protocol }), want);
 });
 
 await test("@tide-ota/server/node serves /hc over a disk store and stops cleanly", async () => {
+  const project = projects.server;
   mkdirSync(join(project, "bucket"));
   writeFileSync(
     join(project, "server.mjs"),
@@ -158,7 +151,9 @@ await test("@tide-ota/server/node serves /hc over a disk store and stops cleanly
   assert.equal(out, "200 ok closed");
 });
 
+// Protocol reaches this project only through the server's declared dependency.
 await test("a TypeScript consumer type-checks against the published declarations", () => {
+  const project = projects.server;
   writeFileSync(
     join(project, "consumer.ts"),
     [

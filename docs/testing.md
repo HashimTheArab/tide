@@ -40,8 +40,9 @@ update, rollback, patch from an OTA update and from the embedded bundle, missing
 
 ## Packages
 
-`pnpm test:pack` installs the packed tarballs into a fresh npm project, with the `@tide-ota` registry unreachable,
-and runs the `tide` bin, the Node server and a TypeScript consumer from them. It runs as its own CI job.
+`pnpm test:pack` installs each packed tarball alone into a fresh npm project, with the `@tide-ota` registry
+unreachable, and runs the `tide` bin, the Node server and a TypeScript consumer from them, so an internal dependency a
+manifest leaves out fails the run. It runs as its own CI job.
 
 ## Reviewers reject
 
