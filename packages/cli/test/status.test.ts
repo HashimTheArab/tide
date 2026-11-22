@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from "vitest";
 
-import type { NoUpdateReply, PointerEntry, Rollout, StoredReply } from "@tide-ota/protocol";
+import type { NoUpdateReply, Rollout, StoredReply } from "@tide-ota/protocol";
 import {
   MAX_IDENTITIES_BYTES,
   MAX_REPLY_BYTES,
@@ -13,7 +13,6 @@ import {
   decodeStoredReply,
   diskPath,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeRollout,
   encodeStoredReply,
 } from "@tide-ota/protocol";
@@ -72,14 +71,6 @@ const noUpdateWith = (edit: (multipart: string) => string) =>
     body: utf8(edit(ascii(fixture("no-update.multipart")))),
   });
 
-/** A version-3 pointer holding each version-1 or version-2 record under its keyid. */
-const pointerOf = (records: Record<string, Uint8Array>) =>
-  encodeIdentityPointer(
-    new Map(Object.entries(records).map(([k, r]) => [k, decodePointer(r) as PointerEntry])),
-  );
-/** The golden manifest's multipart with `pad` characters in its signed JSON; signatures are not status's concern. */
-const paddedManifest = (pad: number) =>
-  utf8(ascii(fixture("manifest.multipart")).replace('{"id"', `{"pad":"${"a".repeat(pad)}","id"`));
 const paddedNoUpdate = (pad: number) =>
   utf8(
     ascii(fixture("no-update.multipart")).replace('{"type"', `{"pad":"${"a".repeat(pad)}","type"`),
@@ -182,17 +173,27 @@ describe.each(stores)("tide status on %s", (_, open) => {
   // Each sorts before the readable pointer at reply/zz/1.0.0/ios.
   test.each<[string, string, Uint8Array<ArrayBuffer>, string]>([
     ["a garbage record", "reply/a/1.0.0/ios", utf8("garbage"), "not a stored reply"],
+    // Only reply/no-update holds one entry per keyid.
     [
-      "a version-3 entry with a bad body",
+      "a version-3 record at a pointer key",
       "reply/a/1.0.0/ios",
-      pointerOf({ main: manifestWith((m) => m.replace(/expo-signature: [^\r]*\r\n/, "")) }),
-      "an entry's manifest part has no expo-signature",
+      fixture("identities-no-update.reply.json"),
+      "not a stored reply",
     ],
     [
-      "a version-3 entry signed under another keyid",
-      "reply/a/1.0.0/ios",
-      pointerOf({ main: MANIFEST, other: MANIFEST }),
-      "an entry is signed under another keyid",
+      "a version-3 reply/no-update entry with a bad body",
+      "reply/no-update",
+      encodeIdentityNoUpdate(
+        new Map([
+          [
+            "main",
+            decodeStoredReply(
+              noUpdateWith((m) => m.replace(/expo-signature: [^\r]*\r\n/, "")),
+            ) as NoUpdateReply,
+          ],
+        ]),
+      ),
+      "an entry's directive part has no expo-signature",
     ],
     [
       "a version-3 reply/no-update entry signed under another keyid",
@@ -278,10 +279,10 @@ describe.each(stores)("tide status on %s", (_, open) => {
     expect(stdout.endsWith(`reply/no-update: ${noUpdate}\n`)).toBe(true);
   });
 
-  test("a version-3 record prints one line per keyid, quoted", async () => {
+  test("a version-3 reply/no-update prints one line per keyid, quoted; pointers print no keyid", async () => {
     const { bucket, env } = open();
-    await bucket.put("reply/a/1.0.0/ios", fixture("identities-manifest.reply.json"));
-    await bucket.put("reply/b/1.0.0/ios", fixture("identities-rollout.reply.json"));
+    await bucket.put("reply/a/1.0.0/ios", MANIFEST);
+    await bucket.put("reply/b/1.0.0/ios", fixture("rollout-manifest.reply.json"));
     // Status reads the keyid a signature names and checks no signature.
     const quoted = ascii(NO_UPDATE).replace('keyid=\\"main\\"', 'keyid=\\"x\\\\\\"y\\"');
     const noUpdate = new Map([
@@ -292,10 +293,8 @@ describe.each(stores)("tide status on %s", (_, open) => {
     expect(await tide(env)).toEqual({
       code: 0,
       stdout: lines(
-        `a 1.0.0 ios keyid "main" manifest ${UPDATE_ID} ${CREATED_AT}`,
-        `a 1.0.0 ios keyid "root" manifest ${NEXT_ID} ${NEXT_AT}`,
-        `b 1.0.0 ios keyid "main" rollout 12.5 new ${NEXT_ID} ${NEXT_AT} earlier manifest ${UPDATE_ID} ${CREATED_AT}`,
-        `b 1.0.0 ios keyid "root" rollBackToEmbedded - ${COMMIT_TIME}`,
+        `a 1.0.0 ios manifest ${UPDATE_ID} ${CREATED_AT}`,
+        `b 1.0.0 ios rollout 12.5 new ${NEXT_ID} ${NEXT_AT} earlier manifest ${UPDATE_ID} ${CREATED_AT}`,
         'reply/no-update keyid "main": present',
         'reply/no-update keyid "x\\"y": present',
       ),
@@ -303,14 +302,8 @@ describe.each(stores)("tide status on %s", (_, open) => {
     });
   });
 
-  test("version-3 records over MAX_REPLY_BYTES, within their limit, are read", async () => {
+  test("a version-3 reply/no-update over MAX_REPLY_BYTES, within its limit, is read", async () => {
     const { bucket, env } = open();
-    const manifest = decodeStoredReply(MANIFEST);
-    const pointer = sized(MAX_REPLY_BYTES + 1000, (n) =>
-      encodeIdentityPointer(
-        new Map([["main", { ...manifest, body: paddedManifest(n) } as PointerEntry]]),
-      ),
-    );
     const noUpdate = sized(MAX_REPLY_BYTES + 1000, (n) =>
       encodeIdentityNoUpdate(
         new Map([
@@ -318,14 +311,10 @@ describe.each(stores)("tide status on %s", (_, open) => {
         ]),
       ),
     );
-    await bucket.put("reply/a/1.0.0/ios", pointer);
     await bucket.put("reply/no-update", noUpdate);
     expect(await tide(env)).toEqual({
       code: 0,
-      stdout: lines(
-        `a 1.0.0 ios keyid "main" manifest ${UPDATE_ID} ${CREATED_AT}`,
-        'reply/no-update keyid "main": present',
-      ),
+      stdout: lines('reply/no-update keyid "main": present'),
       stderr: "",
     });
   });

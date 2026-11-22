@@ -8,7 +8,6 @@ import type {
   NoUpdateReply,
   Part,
   PartName,
-  PointerEntry,
   Signer,
   Rollout,
   StoredReply,
@@ -54,7 +53,6 @@ import {
   encodeMultipart,
   encodeBaseRecord,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeRollout,
   encodeSfvDictionary,
   encodeStoredReply,
@@ -2723,7 +2721,7 @@ describe("stored reply", () => {
     const all = [
       ...Object.keys(TIDE_REPLY_GOLDEN),
       ...Object.keys(TIDE_ROLLOUT_GOLDEN),
-      ...Object.keys(TIDE_IDENTITIES_GOLDEN),
+      TIDE_IDENTITIES_GOLDEN.file,
     ];
     expect(Object.keys(files)).toEqual(all);
     for (const file of all) expect(files[file]).toEqual(fixture(file));
@@ -3142,10 +3140,10 @@ describe("rollout record", () => {
     await rejects(() => decodeStoredReply(bytes), "version", message);
   });
 
-  test("version 3 is unsupported to decodeStoredReply, and decodePointer reads it as version 3", async () => {
+  test("version 3 is unsupported to decodeStoredReply and decodePointer", async () => {
     const bytes = record((o) => (o.version = 3));
     await rejects(() => decodeStoredReply(bytes), "version", "is not supported");
-    await rejects(() => decodePointer(bytes), "identities", "is missing");
+    await rejects(() => decodePointer(bytes), "version", "is not supported");
   });
 
   // The version-1 reader stays as loose as before: key order and whitespace are not checked.
@@ -3336,20 +3334,14 @@ describe("rollout record", () => {
 });
 
 describe("version-3 record", () => {
-  const IDENTITIES = Object.keys(TIDE_IDENTITIES_GOLDEN);
-  const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // manifest-next.json's id
+  const N = TIDE_IDENTITIES_GOLDEN.file;
   const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
-  const isPointer = (file: string) => TIDE_IDENTITIES_GOLDEN[file]!.key === "pointer";
-  const decoderOf = (file: string) => (isPointer(file) ? decodePointer : decodeNoUpdate);
-  const encode = (file: string, entries: ReadonlyMap<string, unknown>) =>
-    isPointer(file)
-      ? encodeIdentityPointer(loose(entries))
-      : encodeIdentityNoUpdate(loose(entries));
+  const encode = (entries: ReadonlyMap<string, unknown>) => encodeIdentityNoUpdate(loose(entries));
   type Fields = Record<string, unknown>;
-  type Shape = Fields & { identities: (Fields & { new: Fields; earlier: Fields })[] };
-  /** Golden `file` as a JSON object a case can break, then its UTF-8 bytes. */
-  const record = (file: string, change: (o: Shape) => void, space?: number) => {
-    const o = JSON.parse(text(fixture(file))) as Shape;
+  type Shape = Fields & { identities: Fields[] };
+  /** The golden as a JSON object a case can break, then its UTF-8 bytes. */
+  const record = (change: (o: Shape) => void, space?: number) => {
+    const o = JSON.parse(text(fixture(N))) as Shape;
     change(o);
     return utf8(JSON.stringify(o, null, space));
   };
@@ -3361,51 +3353,35 @@ describe("version-3 record", () => {
   const reply = (file: string) => goldenReplyOf(file, fixture);
   const QUOTES = '"'.repeat(MAX_KEYID_BYTES / 2); // A keyid of escaped length MAX_KEYID_BYTES.
 
-  test.each(IDENTITIES)("encoding %s's fields gives its bytes", (file) => {
-    expect(encode(file, goldenIdentities(file, fixture).entries)).toEqual(fixture(file));
+  test("encoding the golden's fields gives its bytes", () => {
+    expect(encode(goldenIdentities(fixture).entries)).toEqual(fixture(N));
   });
 
-  test.each(IDENTITIES)(
-    "decoding %s gives its entries in keyid order and every body byte for byte",
-    (file) => {
-      const decoded = decoderOf(file)(fixture(file)) as Identities<PointerEntry | NoUpdateReply>;
-      const golden = goldenIdentities(file, fixture);
-      expect(decoded).toEqual(golden);
-      expect([...decoded.entries.keys()]).toEqual(["main", "root"]);
-      for (const [keyid, entry] of decoded.entries) {
-        const expected = golden.entries.get(keyid)!;
-        const bodies = (e: PointerEntry | NoUpdateReply) =>
-          e.kind === "rollout" ? [e.new.body, e.earlier?.body] : [e.body];
-        expect(bodies(entry)).toEqual(bodies(expected));
-      }
-    },
-  );
+  test("decoding the golden gives its entries in keyid order and every body byte for byte", () => {
+    const decoded = decodeNoUpdate(fixture(N)) as Identities;
+    const golden = goldenIdentities(fixture);
+    expect(decoded).toEqual(golden);
+    expect([...decoded.entries.keys()]).toEqual(["main", "root"]);
+    for (const [keyid, entry] of decoded.entries) {
+      expect(entry.body).toEqual(golden.entries.get(keyid)!.body);
+    }
+  });
 
-  test("the goldens hold main's golden replies and the second identity's under root", () => {
+  test("the golden holds main's no-update and the second identity's under root", () => {
     const second = (name: string) => decodeStoredReply(encodeStoredReply(reply(name))).body;
-    expect(second("second-manifest")).toEqual(fixture("second-manifest.multipart"));
+    expect(second("second-no-update")).toEqual(fixture("second-no-update.multipart"));
     expect(TIDE_IDENTITIES_GOLDEN).toEqual({
-      "identities-manifest.reply.json": {
-        key: "pointer",
-        entries: { main: "manifest.reply.json", root: "second-manifest" },
-      },
-      "identities-rollout.reply.json": {
-        key: "pointer",
-        entries: { main: "rollout-manifest.reply.json", root: "second-rollback" },
-      },
-      "identities-no-update.reply.json": {
-        key: "noUpdate",
-        entries: { main: "no-update.reply.json", root: "second-no-update" },
-      },
+      file: "identities-no-update.reply.json",
+      entries: { main: "no-update.reply.json", root: "second-no-update" },
     });
   });
 
   // Near the size limit a second decode of any body costs CPU a Workers Free request cannot spare.
-  test.each(IDENTITIES)("decoding %s decodes the record's bytes once and no body again", (file) => {
-    const bytes = fixture(file);
+  test("decoding the golden decodes the record's bytes once and no body again", () => {
+    const bytes = fixture(N);
     const decode = vi.spyOn(TextDecoder.prototype, "decode");
     try {
-      decoderOf(file)(bytes);
+      decodeNoUpdate(bytes);
       expect(decode.mock.calls.map(([input]) => (input as Uint8Array).byteLength)).toEqual([
         bytes.length,
       ]);
@@ -3414,8 +3390,19 @@ describe("version-3 record", () => {
     }
   });
 
-  test.each(IDENTITIES)("decodeStoredReply refuses %s as unsupported", async (file) => {
-    await rejects(() => decodeStoredReply(fixture(file)), "version", "is not supported");
+  // An older CLI reads reply/no-update with the version-1 decoder, so it refuses a converted record.
+  test("decodeStoredReply refuses the golden as unsupported", async () => {
+    await rejects(() => decodeStoredReply(fixture(N)), "version", "is not supported");
+  });
+
+  // Only reply/no-update holds one entry per keyid; a pointer serves one identity.
+  test("decodePointer refuses a version-3 record as unsupported", async () => {
+    const pointer = record(
+      (o) => (o.identities[0] = { keyid: "main", ...nested("manifest.reply.json") }),
+    );
+    for (const bytes of [fixture(N), pointer]) {
+      await rejects(() => decodePointer(bytes), "version", "is not supported");
+    }
   });
 
   test("decodeNoUpdate reads a version-1 no-update and refuses every other reply", async () => {
@@ -3431,82 +3418,59 @@ describe("version-3 record", () => {
       "version",
       "is not supported",
     );
-    await rejects(
-      () => decodeNoUpdate(fixture("identities-manifest.reply.json")),
-      "identities[0].kind",
-      "must be noUpdateAvailable",
-    );
-    await rejects(
-      () => decodePointer(fixture("identities-no-update.reply.json")),
-      "identities[0].kind",
-      "must be manifest or rollBackToEmbedded or rollout",
-    );
   });
 
-  const M = "identities-manifest.reply.json";
-  const R = "identities-rollout.reply.json";
-  const N = "identities-no-update.reply.json";
-  const replaceText = (file: string, from: string, to: string) => () => {
-    const t = text(fixture(file));
+  const replaceText = (from: string, to: string) => () => {
+    const t = text(fixture(N));
     expect(t).toContain(from);
     return utf8(t.replace(from, to));
   };
   const seventeen = () =>
-    record(M, (o) => {
+    record((o) => {
       const entry = o.identities[0]!;
       o.identities = Array.from({ length: MAX_IDENTITIES + 1 }, (_, i) => ({
         ...entry,
         keyid: `k${String(i).padStart(2, "0")}`,
       }));
     });
-  test.each<[string, string, () => Uint8Array, string, string]>([
+  test.each<[string, () => Uint8Array, string, string]>([
     [
       "swapped top-level keys",
-      M,
-      () => record(M, (o) => (o.version = (delete o.version, 3))),
+      () => record((o) => (o.version = (delete o.version, 3))),
       "record",
       "must be exactly what encode writes",
     ],
     [
       "swapped entry keys",
-      M,
-      () => record(M, (o) => (o.identities[0]!.kind = (delete o.identities[0]!.kind, "manifest"))),
+      () =>
+        record(
+          (o) => (o.identities[0]!.kind = (delete o.identities[0]!.kind, "noUpdateAvailable")),
+        ),
       "record",
       "must be exactly",
     ],
-    ["whitespace", M, () => record(M, () => undefined, 1), "record", "must be exactly"],
+    ["whitespace", () => record(() => undefined, 1), "record", "must be exactly"],
     [
       "an escaped keyid",
-      M,
-      replaceText(M, '"keyid":"main"', '"keyid":"m\\u0061in"'),
+      replaceText('"keyid":"main"', '"keyid":"m\\u0061in"'),
       "record",
       "must be exactly",
     ],
     [
       "a repeated JSON key",
-      M,
-      replaceText(M, '{"version":3,', '{"version":3,"identities":[],'),
+      replaceText('{"version":3,', '{"version":3,"identities":[],'),
       "record",
       "must be exactly",
     ],
     [
-      "a rollout percent spelled 12.50",
-      R,
-      replaceText(R, '"percent":12.5', '"percent":12.50'),
-      "record",
-      "must be exactly what encode writes",
-    ],
-    [
       "unsorted keyids",
-      M,
-      () => record(M, (o) => void o.identities.reverse()),
+      () => record((o) => void o.identities.reverse()),
       "identities[1].keyid",
       "is out of order",
     ],
     [
       "a repeated keyid",
-      M,
-      () => record(M, (o) => (o.identities[1]!.keyid = "main")),
+      () => record((o) => (o.identities[1]!.keyid = "main")),
       "identities[1].keyid",
       "is repeated",
     ],
@@ -3520,329 +3484,193 @@ describe("version-3 record", () => {
       ([name, keyid]) =>
         [
           name,
-          M,
-          () => record(M, (o) => (o.identities[0]!.keyid = keyid)),
+          () => record((o) => (o.identities[0]!.keyid = keyid)),
           "identities[0].keyid",
           "must be non-empty printable ASCII",
-        ] as [string, string, () => Uint8Array, string, string],
+        ] as [string, () => Uint8Array, string, string],
     ),
     [
       "a plain keyid one byte over the limit",
-      M,
-      () => record(M, (o) => (o.identities[0]!.keyid = "a".repeat(MAX_KEYID_BYTES + 1))),
+      () => record((o) => (o.identities[0]!.keyid = "a".repeat(MAX_KEYID_BYTES + 1))),
       "identities[0].keyid",
       `is longer than ${MAX_KEYID_BYTES} bytes escaped`,
     ],
     [
       "a keyid of quotes one escaped byte over the limit",
-      M,
-      () => record(M, (o) => (o.identities[0]!.keyid = `${QUOTES}a`)),
+      () => record((o) => (o.identities[0]!.keyid = `${QUOTES}a`)),
       "identities[0].keyid",
       "is longer than",
     ],
     [
       "a missing keyid",
-      M,
-      () => record(M, (o) => delete o.identities[0]!.keyid),
+      () => record((o) => delete o.identities[0]!.keyid),
       "identities[0].keyid",
       "is missing",
     ],
-    [
-      "an unknown top-level field",
-      M,
-      () => record(M, (o) => (o.extra = 1)),
-      "record",
-      "must be exactly",
-    ],
+    ["an unknown top-level field", () => record((o) => (o.extra = 1)), "record", "must be exactly"],
     [
       "a missing identities",
-      M,
-      () => record(M, (o) => Reflect.deleteProperty(o, "identities")),
+      () => record((o) => Reflect.deleteProperty(o, "identities")),
       "identities",
       "is missing",
     ],
     [
       "an unknown entry field",
-      M,
-      () => record(M, (o) => (o.identities[0]!.createdAt = "now")),
-      "identities[0].createdAt",
-      "is not a field of a manifest reply",
+      () => record((o) => (o.identities[0]!.updateId = "now")),
+      "identities[0].updateId",
+      "is not a field of a noUpdateAvailable reply",
     ],
     [
       "a missing entry body",
-      M,
-      () => record(M, (o) => delete o.identities[0]!.body),
+      () => record((o) => delete o.identities[0]!.body),
       "identities[0].body",
       "is missing",
     ],
     [
       "a missing entry kind",
-      M,
-      () => record(M, (o) => delete o.identities[0]!.kind),
+      () => record((o) => delete o.identities[0]!.kind),
       "identities[0].kind",
       "is missing",
     ],
     [
       "a version in an entry",
-      M,
-      () => record(M, (o) => (o.identities[0]!.version = 1)),
+      () => record((o) => (o.identities[0]!.version = 1)),
       "record",
       "must be exactly",
     ],
     [
       "identities as an object",
-      M,
-      () => record(M, (o) => (o.identities = loose({}))),
+      () => record((o) => (o.identities = loose({}))),
       "identities",
       `must be an array of 1 to ${MAX_IDENTITIES} entries`,
     ],
-    [
-      "no identities",
-      M,
-      () => record(M, (o) => (o.identities = [])),
-      "identities",
-      "must be an array",
-    ],
-    ["17 identities", M, seventeen, "identities", "must be an array of 1 to 16"],
+    ["no identities", () => record((o) => (o.identities = [])), "identities", "must be an array"],
+    ["17 identities", seventeen, "identities", "must be an array of 1 to 16"],
     [
       "an entry that is not an object",
-      M,
-      () => record(M, (o) => (o.identities[0] = loose("x"))),
+      () => record((o) => (o.identities[0] = loose("x"))),
       "identities[0]",
       "must be an object",
     ],
-    [
-      "a noUpdate entry in a pointer",
-      M,
-      () =>
-        record(
-          M,
-          (o) => (o.identities[0] = loose({ keyid: "main", ...nested("no-update.reply.json") })),
-        ),
-      "identities[0].kind",
-      "must be manifest or rollBackToEmbedded or rollout",
-    ],
-    [
-      "an unknown rollout field",
-      R,
-      () => record(R, (o) => (o.identities[0]!.extra = 1)),
-      "record",
-      "must be exactly",
-    ],
-    [
-      "a rollout percent of 12.345",
-      R,
-      () => record(R, (o) => (o.identities[0]!.percent = 12.345)),
-      "identities[0].percent",
-      "steps of 0.01",
-    ],
-    [
-      "a rollout whose earlier manifest has the new update ID",
-      R,
-      () => record(R, (o) => (o.identities[0]!.earlier.updateId = NEW_ID)),
-      "identities[0].earlier.updateId",
-      "must differ from new.updateId",
-    ],
-    [
-      "a rollout whose new side is a rollback",
-      R,
-      () => record(R, (o) => (o.identities[0]!.new = nested("rollback.reply.json"))),
-      "identities[0].new.kind",
-      "must be a manifest reply",
-    ],
-    ...["manifest.reply.json", "rollback.reply.json", "rollout-manifest.reply.json"].map(
+    ...[
+      "manifest.reply.json",
+      "rollback.reply.json",
+      "rollout-manifest.reply.json",
+      "rollout-none.reply.json",
+    ].map(
       (file) =>
         [
-          `a ${file} entry in a no-update record`,
-          N,
-          () => record(N, (o) => (o.identities[0] = loose({ keyid: "main", ...nested(file) }))),
+          `a ${file} entry`,
+          () => record((o) => (o.identities[0] = loose({ keyid: "main", ...nested(file) }))),
           "identities[0].kind",
           "must be noUpdateAvailable",
-        ] as [string, string, () => Uint8Array, string, string],
+        ] as [string, () => Uint8Array, string, string],
     ),
-  ])("decode refuses %s", async (_, file, bytes, field, message) => {
-    await rejects(() => decoderOf(file)(bytes()), field, message);
+  ])("decode refuses %s", async (_, bytes, field, message) => {
+    await rejects(() => decodeNoUpdate(bytes()), field, message);
   });
 
-  const entries = (file: string) =>
-    new Map<string, unknown>(goldenIdentities(file, fixture).entries);
+  const entries = () => new Map<string, unknown>(goldenIdentities(fixture).entries);
   // Encode checks its output with decode, so each failure names the field decode reports.
-  test.each<[string, string, () => Map<string, unknown>, string]>([
-    ["no entries", M, () => new Map(), "identities"],
+  test.each<[string, () => Map<string, unknown>, string]>([
+    ["no entries", () => new Map(), "identities"],
     [
       "17 entries",
-      M,
-      () => new Map(Array.from({ length: 17 }, (_, i) => [`k${i}`, reply("manifest.reply.json")])),
+      () => new Map(Array.from({ length: 17 }, (_, i) => [`k${i}`, reply("no-update.reply.json")])),
       "identities",
     ],
     [
       "an empty keyid",
-      M,
-      () => entries(M).set("", reply("manifest.reply.json")),
+      () => entries().set("", reply("no-update.reply.json")),
       "identities[0].keyid",
     ],
     [
       "a keyid over the limit",
-      M,
-      () => entries(M).set(`${QUOTES}a`, reply("manifest.reply.json")),
+      () => entries().set(`${QUOTES}a`, reply("no-update.reply.json")),
       "identities[0].keyid",
     ],
+    ["a numeric keyid", () => new Map([[5, reply("no-update.reply.json")]]), "identities[0].keyid"],
     [
-      "a numeric keyid",
-      M,
-      () => new Map([[5, reply("manifest.reply.json")]]),
-      "identities[0].keyid",
-    ],
-    [
-      "a noUpdate entry",
-      M,
-      () => entries(M).set("x", reply("no-update.reply.json")),
+      "a manifest entry",
+      () => entries().set("x", reply("manifest.reply.json")),
       "identities[2].kind",
     ],
-    ["an entry that is not an object", M, () => entries(M).set("x", "x"), "identities[2].kind"],
-    [
-      "a rollout of 12.345%",
-      R,
-      () =>
-        entries(R).set("main", {
-          ...goldenRollout("rollout-manifest.reply.json", fixture),
-          percent: 12.345,
-        }),
-      "identities[0].percent",
-    ],
+    ["an entry that is not an object", () => entries().set("x", "x"), "identities[2].kind"],
     [
       "a body that is not UTF-8",
-      M,
       () =>
-        entries(M).set("main", { ...reply("manifest.reply.json"), body: new Uint8Array([0xc3]) }),
+        entries().set("main", { ...reply("no-update.reply.json"), body: new Uint8Array([0xc3]) }),
       "identities[0].body",
     ],
-    [
-      "a manifest in a no-update record",
-      N,
-      () => entries(N).set("x", reply("manifest.reply.json")),
-      "identities[2].kind",
-    ],
-  ])("encode refuses %s", async (_, file, value, field) => {
-    await rejects(() => encode(file, value()), field);
+  ])("encode refuses %s", async (_, value, field) => {
+    await rejects(() => encode(value()), field);
   });
 
   test("a keyid of escaped length MAX_KEYID_BYTES, and one of 257 bytes, round-trip", () => {
     for (const keyid of [QUOTES, "k".repeat(257), "a\\b"]) {
-      const map = new Map([[keyid, reply("manifest.reply.json") as PointerEntry]]);
-      const decoded = decodePointer(encodeIdentityPointer(map));
-      expect(decoded).toEqual({ kind: "identities", entries: map });
+      const map = new Map([[keyid, reply("no-update.reply.json") as NoUpdateReply]]);
+      expect(decodeNoUpdate(encodeIdentityNoUpdate(map))).toEqual({
+        kind: "identities",
+        entries: map,
+      });
     }
   });
 
-  test("every percent from 0 to 100 in steps of 0.01 is spelled in at most 5 characters", () => {
-    const longest = Math.max(
-      ...Array.from({ length: 10_001 }, (_, k) => JSON.stringify(k / 100).length),
-    );
-    expect(longest).toBe(5);
-  });
-
   describe("size", () => {
-    const v1Manifest = reply("manifest.reply.json") as Extract<StoredReply, { kind: "manifest" }>;
-    /** `fields` with an ASCII body sized so encode writes exactly `size` bytes. */
-    const sized = <T extends StoredReply>(
-      fields: T,
-      size: number,
-      write: (r: T) => Uint8Array,
-    ): T => {
-      const overhead = write({ ...fields, body: ascii("a") }).length - 1;
-      return { ...fields, body: ascii("a".repeat(size - overhead)) };
+    const noUpdate = reply("no-update.reply.json") as NoUpdateReply;
+    /** `noUpdate` with an ASCII body sized so `write` writes exactly `size` bytes. */
+    const sized = (size: number, write: (r: NoUpdateReply) => Uint8Array): NoUpdateReply => {
+      const overhead = write({ ...noUpdate, body: ascii("a") }).length - 1;
+      return { ...noUpdate, body: ascii("a".repeat(size - overhead)) };
     };
+    /** Two entries whose record is `size` bytes, padding the second entry's body. */
+    const twoEntries = (size: number) =>
+      new Map([
+        ["a", noUpdate],
+        [
+          "b",
+          sized(size, (r) =>
+            encodeIdentityNoUpdate(
+              new Map([
+                ["a", noUpdate],
+                ["b", r],
+              ]),
+            ),
+          ),
+        ],
+      ]);
     /** The single-entry record a writer converts `legacy` into under `keyid`, byte for byte. */
     const converted = (legacy: Uint8Array, keyid: string) =>
       `{"version":3,"identities":[{"keyid":${JSON.stringify(keyid)},${text(legacy).slice('{"version":1,'.length)}]}`;
 
-    test.each(["manifest.reply.json", "no-update.reply.json"])(
-      "the largest version-1 %s converts under the longest keyid, keeping its body",
-      (file) => {
-        const legacyReply = sized(reply(file), MAX_REPLY_BYTES, encodeStoredReply);
-        const legacy = encodeStoredReply(legacyReply);
-        expect(legacy.length).toBe(MAX_REPLY_BYTES);
-        for (const keyid of [QUOTES, "k".repeat(257)]) {
-          const map = new Map([[keyid, legacyReply]]);
-          const bytes =
-            legacyReply.kind === "noUpdateAvailable"
-              ? encodeIdentityNoUpdate(map as Map<string, NoUpdateReply>)
-              : encodeIdentityPointer(map as Map<string, PointerEntry>);
-          expect(text(bytes)).toBe(converted(legacy, keyid));
-          const decoded = (
-            legacyReply.kind === "noUpdateAvailable" ? decodeNoUpdate : decodePointer
-          )(bytes) as Identities<StoredReply>;
-          expect(decoded.entries.get(keyid)?.body).toEqual(legacyReply.body);
-        }
-      },
-    );
-
-    test("the largest version-2 rollout at a one-character percent converts, and any later percent still fits", () => {
-      const r = { ...goldenRollout("rollout-manifest.reply.json", fixture), percent: 5 };
-      const overhead = encodeRollout({ ...r, new: { ...r.new, body: ascii("a") } }).length - 1;
-      const rollout = {
-        ...r,
-        new: { ...r.new, body: ascii("a".repeat(MAX_REPLY_BYTES - overhead)) },
-      };
-      expect(encodeRollout(rollout).length).toBe(MAX_REPLY_BYTES);
-      for (const percent of [5, 12.34, 100]) {
-        const map = new Map([[QUOTES, { ...rollout, percent }]]);
-        const decoded = decodePointer(encodeIdentityPointer(map)) as Identities<PointerEntry>;
-        expect(decoded.entries.get(QUOTES)).toEqual({ ...rollout, percent });
+    test("the largest version-1 no-update converts under the longest keyid, keeping its body", () => {
+      const legacyReply = sized(MAX_REPLY_BYTES, encodeStoredReply);
+      const legacy = encodeStoredReply(legacyReply);
+      expect(legacy.length).toBe(MAX_REPLY_BYTES);
+      for (const keyid of [QUOTES, "k".repeat(257)]) {
+        const bytes = encodeIdentityNoUpdate(new Map([[keyid, legacyReply]]));
+        expect(text(bytes)).toBe(converted(legacy, keyid));
+        const decoded = decodeNoUpdate(bytes) as Identities;
+        expect(decoded.entries.get(keyid)?.body).toEqual(legacyReply.body);
       }
     });
 
-    /** Two rollout entries at `percent` whose record is `size` bytes, padding the second entry's new body. */
-    const twoRollouts = (percent: number, size: number) => {
-      const r = { ...goldenRollout("rollout-manifest.reply.json", fixture), percent };
-      const map = (body: Uint8Array<ArrayBuffer>) =>
-        new Map<string, PointerEntry>([
-          ["a", r],
-          ["b", { ...r, new: { ...v1Manifest, updateId: NEW_ID, body } }],
-        ]);
-      const overhead = encodeIdentityPointer(map(ascii("a"))).length - 1;
-      return map(ascii("a".repeat(size - overhead)));
-    };
-    /** `bytes` with `n` more characters in the padded body, past what encode would write. */
-    const grown = (bytes: Uint8Array, n: number) =>
-      utf8(text(bytes).replace('"body":"a', `"body":"${"a".repeat(n + 1)}`));
-
     test("a record of exactly the limit round-trips and one byte more is refused by both", async () => {
-      const map = twoRollouts(12.34, MAX_IDENTITIES_BYTES);
-      const bytes = encodeIdentityPointer(map);
+      const map = twoEntries(MAX_IDENTITIES_BYTES);
+      const bytes = encodeIdentityNoUpdate(map);
       expect(bytes.length).toBe(MAX_IDENTITIES_BYTES);
-      expect(decodePointer(bytes)).toEqual({ kind: "identities", entries: map });
+      expect(decodeNoUpdate(bytes)).toEqual({ kind: "identities", entries: map });
       await rejects(
-        () => encodeIdentityPointer(twoRollouts(12.34, MAX_IDENTITIES_BYTES + 1)),
+        () => encodeIdentityNoUpdate(twoEntries(MAX_IDENTITIES_BYTES + 1)),
         "record",
         "is too large",
       );
-      await rejects(
-        () => decodePointer(grown(bytes, 1)),
-        "record",
-        `over ${MAX_IDENTITIES_BYTES} bytes`,
-      );
+      const grown = utf8(text(bytes).replace('"body":"a', '"body":"aa'));
+      await rejects(() => decodeNoUpdate(grown), "record", `over ${MAX_IDENTITIES_BYTES} bytes`);
     });
 
-    // Both entries are padded: four characters each, so padding only the first would accept the second record.
-    test("a record that fits only before its percents are padded is refused by both", async () => {
-      const padded = 2 * (5 - 1);
-      const map = twoRollouts(5, MAX_IDENTITIES_BYTES - padded);
-      const bytes = encodeIdentityPointer(map);
-      expect(decodePointer(bytes)).toEqual({ kind: "identities", entries: map });
-      await rejects(
-        () => encodeIdentityPointer(twoRollouts(5, MAX_IDENTITIES_BYTES - padded + 1)),
-        "record",
-        "is too large",
-      );
-      const over = grown(bytes, 1);
-      expect(over.length).toBeLessThan(MAX_IDENTITIES_BYTES);
-      await rejects(() => decodePointer(over), "record", `over ${MAX_IDENTITIES_BYTES} bytes`);
-    });
-
-    test("only version 3 may pass 2 MiB, and nothing passes the version-3 limit", async () => {
-      const v1 = encodeStoredReply(sized(v1Manifest, MAX_REPLY_BYTES, encodeStoredReply));
+    test("only version 3 may pass 2 MiB at reply/no-update, and nothing passes the version-3 limit", async () => {
+      const v1 = encodeStoredReply(sized(MAX_REPLY_BYTES, encodeStoredReply));
       const cases: [Uint8Array, number][] = [
         [utf8(`${text(v1)} `), MAX_REPLY_BYTES],
         // A repeated version: parsed as version 1, then held to the version-1 limit.
@@ -3851,9 +3679,18 @@ describe("version-3 record", () => {
         [utf8(`{"version":3,${" ".repeat(MAX_IDENTITIES_BYTES)}`), MAX_IDENTITIES_BYTES],
       ];
       for (const [bytes, limit] of cases) {
-        for (const decode of [decodePointer, decodeNoUpdate]) {
-          await rejects(() => decode(bytes), "record", `is too large: over ${limit} bytes`);
-        }
+        await rejects(() => decodeNoUpdate(bytes), "record", `is too large: over ${limit} bytes`);
+      }
+    });
+
+    test("a pointer holds at most 2 MiB, whatever its version says", async () => {
+      const over = encodeIdentityNoUpdate(twoEntries(MAX_REPLY_BYTES + 1));
+      for (const bytes of [over, utf8(`{"version":3,${" ".repeat(MAX_REPLY_BYTES)}`)]) {
+        await rejects(
+          () => decodePointer(bytes),
+          "record",
+          `is too large: over ${MAX_REPLY_BYTES} bytes`,
+        );
       }
     });
   });
@@ -3861,26 +3698,6 @@ describe("version-3 record", () => {
   test(`decode(encode(entries)) returns every entry byte for byte (seed ${seed})`, () => {
     const body = fc.string({ unit: "binary", minLength: 1, maxLength: 64 }).map(utf8);
     const boundary = fc.stringMatching(/^[0-9A-Za-z_-]{1,70}$/);
-    const manifest = fc.record({
-      kind: fc.constant("manifest" as const),
-      updateId: fc.uuid(),
-      boundary,
-      manifestFilters: fc.constantFrom("", 'branch="main"'),
-      body,
-    });
-    const rollback = fc.record({
-      kind: fc.constant("rollBackToEmbedded" as const),
-      boundary,
-      body,
-    });
-    const rollout = fc
-      .record({
-        kind: fc.constant("rollout" as const),
-        percent: fc.integer({ min: 0, max: 10_000 }).map((n) => n / 100),
-        new: manifest,
-        earlier: fc.oneof(fc.constant(undefined), manifest, rollback),
-      })
-      .filter((r) => r.earlier?.kind !== "manifest" || r.earlier.updateId !== r.new.updateId);
     const noUpdate = fc.record({ kind: fc.constant("noUpdateAvailable" as const), boundary, body });
     const keyid = fc.oneof(
       fc.stringMatching(/^[\x20-\x7E]{1,12}$/),
@@ -3889,38 +3706,17 @@ describe("version-3 record", () => {
         .map((n) => `${'"'.repeat(n)}${"\\".repeat(MAX_KEYID_BYTES / 2 - n)}`),
     );
     const keyids = fc.uniqueArray(keyid, { minLength: 1, maxLength: MAX_IDENTITIES });
-    /** Asserts `decoded` holds `map`'s entries in keyid order and re-encodes to `bytes`. */
-    const check = (
-      map: Map<string, unknown>,
-      bytes: Uint8Array,
-      decoded: Identities<unknown>,
-      reencode: (entries: ReadonlyMap<string, unknown>) => Uint8Array,
-    ) => {
-      expect(decoded).toEqual({ kind: "identities", entries: map });
-      expect([...decoded.entries.keys()]).toEqual([...map.keys()].sort());
-      expect(reencode(decoded.entries)).toEqual(bytes);
-    };
-    const sized = <T>(arb: fc.Arbitrary<T>, n: number) =>
-      fc.array(arb, { minLength: n, maxLength: n });
     const value = keyids.chain((ks) =>
-      fc.tuple(
-        fc.constant(ks),
-        sized(fc.oneof(manifest, rollback, rollout), ks.length),
-        sized(noUpdate, ks.length),
-      ),
+      fc.tuple(fc.constant(ks), fc.array(noUpdate, { minLength: ks.length, maxLength: ks.length })),
     );
     fc.assert(
-      fc.property(value, ([ks, pointers, noUpdates]) => {
-        const pointer = new Map<string, PointerEntry>(ks.map((k, i) => [k, pointers[i]!]));
-        const bytes = encodeIdentityPointer(pointer);
-        check(pointer, bytes, decodePointer(bytes) as Identities<unknown>, (e) =>
-          encodeIdentityPointer(loose(e)),
-        );
-        const fallback = new Map<string, NoUpdateReply>(ks.map((k, i) => [k, noUpdates[i]!]));
-        const noUpdateBytes = encodeIdentityNoUpdate(fallback);
-        check(fallback, noUpdateBytes, decodeNoUpdate(noUpdateBytes) as Identities<unknown>, (e) =>
-          encodeIdentityNoUpdate(loose(e)),
-        );
+      fc.property(value, ([ks, noUpdates]) => {
+        const map = new Map<string, NoUpdateReply>(ks.map((k, i) => [k, noUpdates[i]!]));
+        const bytes = encodeIdentityNoUpdate(map);
+        const decoded = decodeNoUpdate(bytes) as Identities;
+        expect(decoded).toEqual({ kind: "identities", entries: map });
+        expect([...decoded.entries.keys()]).toEqual([...map.keys()].sort());
+        expect(encodeIdentityNoUpdate(decoded.entries)).toEqual(bytes);
       }),
       { seed },
     );

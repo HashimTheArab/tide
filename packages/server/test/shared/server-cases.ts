@@ -1,12 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
-import type {
-  Identities,
-  NoUpdateReply,
-  PointerEntry,
-  Rollout,
-  StoredReply,
-} from "@tide-ota/protocol";
+import type { Identities, NoUpdateReply, Rollout, StoredReply } from "@tide-ota/protocol";
 import {
   MAX_BASE_BYTES,
   MAX_IDENTITIES_BYTES,
@@ -23,7 +17,6 @@ import {
   decodeStoredReply,
   encodeBaseRecord,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeRollout,
   encodeStoredReply,
   parseMultipart,
@@ -959,11 +952,10 @@ export function manifestCases(harness: Harness): void {
     });
   });
 
-  describe("a version-3 record", () => {
+  describe("a version-3 reply/no-update", () => {
     const BY_KEYID = "Expo-Expect-Signature";
-    const IDS_MANIFEST = fixture("identities-manifest.reply.json"); // main: manifest; root: second manifest
-    const IDS_ROLLOUT = fixture("identities-rollout.reply.json"); // main: 12.5% rollout; root: second rollback
     const IDS_NO_UPDATE = fixture("identities-no-update.reply.json"); // main, root: their no-updates
+    const NEXT = fixture("manifest-next.reply.json");
     const UNUSABLE: readonly [string, string | undefined][] = [
       ["an absent", undefined],
       ["an empty", ""],
@@ -981,19 +973,11 @@ export function manifestCases(harness: Harness): void {
       "expo-expect-signature": expectation(keyid),
       ...change,
     });
-    /** Returns the entry `entries` holds for `keyid`. */
-    const only = <E>(entries: ReadonlyMap<string, E>, keyid: string): E => {
-      const entry = entries.get(keyid);
+    const noUpdateOf = (keyid: string) => {
+      const entry = (decodeNoUpdate(IDS_NO_UPDATE) as Identities).entries.get(keyid);
       if (entry === undefined) throw new Error(`no entry for ${keyid}`);
       return entry;
     };
-    const entryOf = (record: Uint8Array, keyid: string) =>
-      only((decodePointer(record) as Identities<PointerEntry>).entries, keyid);
-    const noUpdateOf = (keyid: string) =>
-      only((decodeNoUpdate(IDS_NO_UPDATE) as Identities<NoUpdateReply>).entries, keyid);
-    const SECOND_MANIFEST = entryOf(IDS_MANIFEST, "root") as StoredReply;
-    const SECOND_ROLLBACK = entryOf(IDS_ROLLOUT, "root") as StoredReply;
-    const MAIN_MANIFEST = entryOf(IDS_MANIFEST, "main") as StoredReply;
 
     /** Asserts a 200 that carries `reply`'s exact body and headers, with `vary` only when it was picked by keyid. */
     const expectServed = (
@@ -1032,7 +1016,7 @@ export function manifestCases(harness: Harness): void {
       return { status: res.status, headers, body };
     };
 
-    describe("legacy records serve every keyid the same bytes", () => {
+    describe("a version-1 reply/no-update serves every keyid the same bytes", () => {
       const VARIANTS = [
         expectation("main"),
         expectation("root"),
@@ -1041,13 +1025,13 @@ export function manifestCases(harness: Harness): void {
         'sig, keyid="main',
         "sig, keyid=main",
       ];
-      test.each<[string, string | undefined]>([
-        ["manifest.reply.json", undefined],
-        ["rollback.reply.json", undefined],
-        ["rollout-manifest.reply.json", undefined],
-        ["rollout-rollback.reply.json", undefined],
-        ["rollout-none.reply.json", undefined],
-        ["no pointer", undefined],
+      test.each([
+        "manifest.reply.json",
+        "rollback.reply.json",
+        "rollout-manifest.reply.json",
+        "rollout-rollback.reply.json",
+        "rollout-none.reply.json",
+        "no pointer",
       ])("%s", async (file) => {
         const channel = `v3-legacy-${file}`.replace(/\.reply\.json$/, "").replaceAll(" ", "-");
         if (file !== "no pointer") await pointer(channel, fixture(file));
@@ -1066,35 +1050,40 @@ export function manifestCases(harness: Harness): void {
       });
     });
 
-    describe("a version-3 pointer", () => {
+    describe("with no pointer", () => {
       beforeEach(async () => {
         await harness.put(NO_UPDATE_KEY, IDS_NO_UPDATE);
       });
 
-      test("serves each keyid its own entry, and root to a header without a keyid", async () => {
-        await pointer("v3-manifest", IDS_MANIFEST);
-        const main = await get("v3-manifest", as("main"));
-        expectServed(main, MAIN_MANIFEST);
-        expect(main.body).toEqual(fixture("manifest.multipart"));
-        expect(main.res.headers.get("expo-manifest-filters")).toBe('branch="main"');
+      test("serves each keyid its own no-update, and root to a header without a keyid", async () => {
+        const main = await get("v3-absent", as("main"));
+        expectServed(main, noUpdateOf("main"));
+        expect(main.body).toEqual(fixture("no-update.multipart"));
         for (const keyid of ["root", undefined]) {
-          const root = await get("v3-manifest", as(keyid));
-          expectServed(root, SECOND_MANIFEST);
-          expect(root.body).toEqual(fixture("second-manifest.multipart"));
+          const root = await get("v3-absent", as(keyid));
+          expectServed(root, noUpdateOf("root"));
+          expect(root.body).toEqual(fixture("second-no-update.multipart"));
           expect(root.res.headers.get("content-type")).toBe(
             "multipart/mixed; boundary=tide_fixture_second",
           );
-          expect(root.res.headers.get("expo-manifest-filters")).toBe('branch="next"');
         }
+      });
+
+      test("a keyid without an entry is 404 with a fixed body", async () => {
+        expectRefused(await get("v3-absent", as("other")), 404);
+      });
+
+      test.each(UNUSABLE)("%s expo-expect-signature is 400 with a fixed body", async (_, value) => {
+        expectRefused(await get("v3-absent", { "expo-expect-signature": value }), 400);
       });
 
       test("serves a keyid of 257 bytes its entry", async () => {
         const keyid = "k".repeat(257);
-        await pointer(
-          "v3-long",
-          encodeIdentityPointer(new Map([[keyid, MAIN_MANIFEST as PointerEntry]])),
+        await harness.put(
+          NO_UPDATE_KEY,
+          encodeIdentityNoUpdate(new Map([[keyid, noUpdateOf("main")]])),
         );
-        expectServed(await get("v3-long", as(keyid)), MAIN_MANIFEST);
+        expectServed(await get("v3-long", as(keyid)), noUpdateOf("main"));
       });
 
       // Node refuses a request head over 16 KiB with 431, before the app sees it.
@@ -1102,9 +1091,9 @@ export function manifestCases(harness: Harness): void {
         const keyid = '"\\'.repeat(MAX_KEYID_BYTES / 4);
         const escaped = keyid.replace(/["\\]/g, "\\$&");
         expect(escaped.length).toBe(MAX_KEYID_BYTES);
-        await pointer(
-          "v3-longest",
-          encodeIdentityPointer(new Map([[keyid, MAIN_MANIFEST as PointerEntry]])),
+        await harness.put(
+          NO_UPDATE_KEY,
+          encodeIdentityNoUpdate(new Map([[keyid, noUpdateOf("main")]])),
         );
         const got = await get("v3-longest", {
           "expo-expect-signature": `sig, keyid="${escaped}", alg="rsa-v1_5-sha256"`,
@@ -1118,206 +1107,109 @@ export function manifestCases(harness: Harness): void {
           "eas-client-id": CLIENT_LOW,
           "user-agent": "okhttp/4.12.0",
         });
-        expectServed(got, MAIN_MANIFEST);
+        expectServed(got, noUpdateOf("main"));
       });
 
-      test("a keyid without an entry is 404 with a fixed body, under no-update signed per keyid", async () => {
-        await pointer("v3-other", IDS_MANIFEST);
-        expectRefused(await get("v3-other", as("other")), 404);
-      });
-
-      test.each(UNUSABLE)("%s expo-expect-signature is 400 with a fixed body", async (_, value) => {
-        await pointer("v3-unusable", IDS_MANIFEST);
-        expectRefused(await get("v3-unusable", { "expo-expect-signature": value }), 400);
-      });
-
-      test("a keyid whose entry is absent gets its own no-update", async () => {
-        await pointer(
-          "v3-main-only",
-          encodeIdentityPointer(new Map([["main", MAIN_MANIFEST as PointerEntry]])),
-        );
-        const got = await get("v3-main-only", as("root"));
-        expectServed(got, noUpdateOf("root"));
-        expect(got.body).toEqual(fixture("second-no-update.multipart"));
-      });
-
-      test("the current-ID rule applies inside each entry", async () => {
-        await pointer("v3-current", IDS_MANIFEST);
-        // Root's manifest has another ID than main's, so a device on main's update still gets root's.
-        expectServed(
-          await get("v3-current", as("root", { "expo-current-update-id": UPDATE_ID })),
-          SECOND_MANIFEST,
-        );
-        const own = await get("v3-current", as("root", { "expo-current-update-id": NEW_ID }));
-        expectServed(own, noUpdateOf("root"));
-        expect(own.body).toEqual(fixture("second-no-update.multipart"));
-        const main = await get("v3-current", as("main", { "expo-current-update-id": UPDATE_ID }));
-        expect(main.body).toEqual(fixture("no-update.multipart"));
-      });
-
-      test("a rollout entry picks its side; the other identity gets its own reply", async () => {
-        await pointer("v3-rollout", IDS_ROLLOUT);
-        const ids = (client: string, current?: string) => ({
-          "eas-client-id": client,
-          "expo-current-update-id": current,
-        });
-        const low = await get("v3-rollout", as("main", ids(CLIENT_LOW, EMBEDDED_ID)));
-        expectServed(low, decodeStoredReply(fixture("manifest-next.reply.json")));
-        const high = await get("v3-rollout", as("main", ids(CLIENT_HIGH, EMBEDDED_ID)));
-        expectServed(high, MAIN_MANIFEST);
-        const onNew = await get("v3-rollout", as("main", ids(CLIENT_LOW, NEW_ID)));
-        expectServed(onNew, noUpdateOf("main"));
-        expect(onNew.body).toEqual(fixture("no-update.multipart"));
-        for (const current of [undefined, EMBEDDED_ID]) {
-          const root = await get("v3-rollout", {
-            ...as("root", ids(CLIENT_LOW, current)),
-            "expo-embedded-update-id": EMBEDDED_ID,
-          });
-          expectServed(root, SECOND_ROLLBACK);
-          expect(root.body).toEqual(fixture("second-rollback.multipart"));
-        }
-      });
-
-      test("an absent earlier reply serves that identity's no-update", async () => {
-        const rollout: Rollout = {
-          kind: "rollout",
-          percent: 0,
-          new: SECOND_MANIFEST as Rollout["new"],
-          earlier: undefined,
+      test("a record of exactly the version-3 limit is served", async () => {
+        const write = (r: NoUpdateReply) => encodeIdentityNoUpdate(new Map([["main", r]]));
+        const overhead = write({ ...noUpdateOf("main"), body: new Uint8Array([0x61]) }).length - 1;
+        const noUpdate = {
+          ...noUpdateOf("main"),
+          body: new Uint8Array(MAX_IDENTITIES_BYTES - overhead).fill(0x61),
         };
-        await pointer("v3-none", encodeIdentityPointer(new Map([["root", rollout]])));
-        const got = await get("v3-none", as("root", { "eas-client-id": CLIENT_LOW }));
-        expectServed(got, noUpdateOf("root"));
-        expect(got.body).toEqual(fixture("second-no-update.multipart"));
-      });
-
-      test("a pointer and a no-update of exactly the version-3 limit are served", async () => {
-        const body = (reply: StoredReply, encode: (r: StoredReply) => Uint8Array) => {
-          const overhead = encode({ ...reply, body: new Uint8Array([0x61]) }).length - 1;
-          return new Uint8Array(MAX_IDENTITIES_BYTES - overhead).fill(0x61);
-        };
-        const asPointer = (r: StoredReply) =>
-          encodeIdentityPointer(new Map([["main", r as PointerEntry]]));
-        const asNoUpdate = (r: StoredReply) =>
-          encodeIdentityNoUpdate(new Map([["main", r as NoUpdateReply]]));
-        const manifest = { ...MAIN_MANIFEST, body: body(MAIN_MANIFEST, asPointer) };
-        const noUpdate = { ...noUpdateOf("main"), body: body(noUpdateOf("main"), asNoUpdate) };
-        const [p, n] = [asPointer(manifest), asNoUpdate(noUpdate)];
-        expect([p.length, n.length]).toEqual([MAX_IDENTITIES_BYTES, MAX_IDENTITIES_BYTES]);
-        await pointer("v3-at-limit", p);
-        expectServed(await get("v3-at-limit", as("main")), manifest);
-        await harness.put(NO_UPDATE_KEY, n);
-        expectServed(await get("v3-at-limit-none", as("main")), noUpdate);
+        const bytes = write(noUpdate);
+        expect(bytes.length).toBe(MAX_IDENTITIES_BYTES);
+        await harness.put(NO_UPDATE_KEY, bytes);
+        expectServed(await get("v3-at-limit", as("main")), noUpdate);
       });
     });
 
-    describe("no pointer and a version-3 no-update", () => {
+    describe("under a version-1 or version-2 pointer", () => {
       beforeEach(async () => {
         await harness.put(NO_UPDATE_KEY, IDS_NO_UPDATE);
       });
 
-      test.each<[string, string]>([
-        ["main", "no-update.multipart"],
-        ["root", "second-no-update.multipart"],
-      ])("%s gets its own signed no-update", async (keyid, multipart) => {
-        const got = await get("v3-absent", as(keyid));
-        expectServed(got, noUpdateOf(keyid));
-        expect(got.body).toEqual(fixture(multipart));
-      });
+      // The pointer holds one identity: a request's keyid never routes it.
+      test.each<[string, string, Uint8Array, Record<string, string>]>([
+        ["manifest.reply.json", "v3-under-manifest", MANIFEST, {}],
+        ["rollback.reply.json", "v3-under-rollback", ROLLBACK, {}],
+        ["rollout-manifest.reply.json", "v3-under-new", NEXT, { "eas-client-id": CLIENT_LOW }],
+        [
+          "rollout-manifest.reply.json",
+          "v3-under-earlier",
+          MANIFEST,
+          { "eas-client-id": CLIENT_HIGH },
+        ],
+      ])(
+        "%s on %s serves every keyid the same bytes without vary",
+        async (file, channel, served, ids) => {
+          await pointer(channel, fixture(file));
+          const replied = decodeStoredReply(served);
+          for (const keyid of ["main", "root", "other", undefined]) {
+            expectServed(await get(channel, as(keyid, ids)), replied, false);
+          }
+          expectServed(await get(channel, ids), replied, false);
+        },
+      );
 
-      test("a keyid without an entry is 404, and an unusable header 400", async () => {
-        expectRefused(await get("v3-absent", as("other")), 404);
-        for (const [, value] of UNUSABLE) {
-          expectRefused(await get("v3-absent", { "expo-expect-signature": value }), 400);
-        }
-      });
-    });
-
-    describe("a version-1 pointer with a version-3 no-update", () => {
-      beforeEach(async () => {
-        await harness.put(NO_UPDATE_KEY, IDS_NO_UPDATE);
-      });
-
-      test("serves the pointer to every keyid with today's headers", async () => {
-        await pointer("mixed-v1", MANIFEST);
-        for (const keyid of ["main", "root", "other"]) {
-          expectServed(await get("mixed-v1", as(keyid)), MAIN_MANIFEST, false);
-        }
-        expectServed(await get("mixed-v1", {}), MAIN_MANIFEST, false);
-      });
-
-      test("needs no-update per keyid: each its own, 404 without an entry, 400 when unusable", async () => {
-        await pointer("mixed-v1-current", MANIFEST);
+      test("a pointer that needs no-update gives each keyid its own, 404 without an entry, 400 when unusable", async () => {
+        await pointer("v3-current", MANIFEST);
         const on = (keyid: string | undefined) =>
           as(keyid, { "expo-current-update-id": UPDATE_ID });
-        expectServed(await get("mixed-v1-current", on("main")), noUpdateOf("main"));
-        expectServed(await get("mixed-v1-current", on("root")), noUpdateOf("root"));
-        expectRefused(await get("mixed-v1-current", on("other")), 404);
-        expectRefused(await get("mixed-v1-current", { "expo-current-update-id": UPDATE_ID }), 400);
-      });
-    });
-
-    describe("a version-3 pointer with a version-1 no-update", () => {
-      test("serves an entry that applies", async () => {
-        await pointer("mixed-v3", IDS_MANIFEST);
-        expectServed(await get("mixed-v3", as("main")), MAIN_MANIFEST);
+        expectServed(await get("v3-current", on("main")), noUpdateOf("main"));
+        expectServed(await get("v3-current", on("root")), noUpdateOf("root"));
+        expectRefused(await get("v3-current", on("other")), 404);
+        expectRefused(await get("v3-current", { "expo-current-update-id": UPDATE_ID }), 400);
       });
 
-      test("is 503 wherever it needs no-update, never the version-1 body", async () => {
-        await pointer("mixed-v3-none", IDS_MANIFEST);
-        expectFailure(await get("mixed-v3-none", as("other")), 503);
-        expectFailure(
-          await get("mixed-v3-none", as("main", { "expo-current-update-id": UPDATE_ID })),
-          503,
-        );
-        const rollout: Rollout = {
-          kind: "rollout",
-          percent: 0,
-          new: SECOND_MANIFEST as Rollout["new"],
-          earlier: undefined,
-        };
-        await pointer("mixed-v3-earlier", encodeIdentityPointer(new Map([["root", rollout]])));
-        expectFailure(
-          await get("mixed-v3-earlier", as("root", { "eas-client-id": CLIENT_LOW })),
-          503,
+      test("a rollout with no earlier reply gives each keyid its own no-update on the earlier side", async () => {
+        // At 12.5%, so CLIENT_LOW is on the new side.
+        const none = decodePointer(fixture("rollout-none.reply.json")) as Rollout;
+        await pointer("v3-rollout-none", encodeRollout({ ...none, percent: 12.5 }));
+        for (const keyid of ["main", "root"]) {
+          const earlier = await get("v3-rollout-none", as(keyid, { "eas-client-id": CLIENT_HIGH }));
+          expectServed(earlier, noUpdateOf(keyid));
+          const onNew = await get(
+            "v3-rollout-none",
+            as(keyid, { "eas-client-id": CLIENT_LOW, "expo-current-update-id": NEW_ID }),
+          );
+          expectServed(onNew, noUpdateOf(keyid));
+          const fresh = await get("v3-rollout-none", as(keyid, { "eas-client-id": CLIENT_LOW }));
+          expectServed(fresh, decodeStoredReply(NEXT), false);
+        }
+        expectRefused(
+          await get("v3-rollout-none", as("other", { "eas-client-id": CLIENT_HIGH })),
+          404,
         );
       });
     });
 
     describe("503, not cached", () => {
       const utf8 = (text: string) => new Uint8Array(new TextEncoder().encode(text));
-      const edited = (record: Uint8Array, change: (o: { identities: unknown[] }) => void) => {
+      /** `record`'s first entry replaced by the version-1 golden `file`'s fields. */
+      const withEntry = (record: Uint8Array, file: string) => {
         const o = JSON.parse(new TextDecoder().decode(record)) as { identities: unknown[] };
-        change(o);
+        const { version: _, ...fields } = JSON.parse(
+          new TextDecoder().decode(fixture(file)),
+        ) as Record<string, unknown>;
+        o.identities[0] = { keyid: "main", ...fields };
         return utf8(JSON.stringify(o));
       };
-      /** The first entry of `record` as JSON. */
-      const entryFields = (record: Uint8Array) =>
-        (JSON.parse(new TextDecoder().decode(record)) as { identities: unknown[] }).identities[0];
-      const oversize = () => {
-        const bytes = new Uint8Array(MAX_IDENTITIES_BYTES + 1).fill(0x20);
-        bytes.set(IDS_MANIFEST);
-        return bytes;
-      };
+
+      // Only reply/no-update holds one entry per keyid.
       test.each<[string, () => Uint8Array<ArrayBuffer>]>([
-        ["malformed JSON", () => utf8('{"version":3,')],
-        ["unsorted keyids", () => edited(IDS_MANIFEST, (o) => void o.identities.reverse())],
-        [
-          "a noUpdate entry",
-          () => edited(IDS_MANIFEST, (o) => (o.identities[0] = entryFields(IDS_NO_UPDATE))),
-        ],
-        ["one byte over the limit", oversize],
+        ["a version-3 no-update", () => IDS_NO_UPDATE],
+        ["a version-3 manifest record", () => withEntry(IDS_NO_UPDATE, "manifest.reply.json")],
       ])("%s at the pointer", async (_, record) => {
         await harness.put(NO_UPDATE_KEY, IDS_NO_UPDATE);
-        await pointer("v3-bad", record());
-        for (const keyid of ["main", "root"]) expectFailure(await get("v3-bad", as(keyid)), 503);
+        await pointer("v3-pointer", record());
+        for (const keyid of ["main", "root", undefined]) {
+          expectFailure(await get("v3-pointer", as(keyid)), 503);
+        }
       });
 
       test.each<[string, () => Uint8Array<ArrayBuffer>]>([
-        [
-          "a manifest entry",
-          () => edited(IDS_NO_UPDATE, (o) => (o.identities[0] = entryFields(IDS_MANIFEST))),
-        ],
+        ["a manifest entry", () => withEntry(IDS_NO_UPDATE, "manifest.reply.json")],
         [
           "one byte over the limit",
           () => {
@@ -1329,12 +1221,6 @@ export function manifestCases(harness: Harness): void {
       ])("%s at reply/no-update", async (_, record) => {
         await harness.put(NO_UPDATE_KEY, record());
         expectFailure(await get("v3-bad-fallback", as("main")), 503);
-      });
-
-      test("a keyid that needs reply/no-update when it is missing", async () => {
-        await pointer("v3-no-fallback", IDS_MANIFEST);
-        await harness.remove(NO_UPDATE_KEY);
-        expectFailure(await get("v3-no-fallback", as("other")), 503);
       });
     });
   });

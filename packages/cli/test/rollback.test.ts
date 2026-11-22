@@ -23,6 +23,7 @@ import {
   IOS,
   MAIN,
   MISMATCH,
+  OWN_KEYID,
   T,
   artifact,
   diskObjects,
@@ -44,8 +45,7 @@ import {
 useFixture();
 
 const BETA = "reply/beta/1.0.0/ios";
-const OTHER_IDENTITY =
-  "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
+const OTHER_IDENTITY = OWN_KEYID(IOS);
 const UNKNOWN_ID = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
 const STALE = (key: string) =>
   `${key} was changed by another writer since it was read; it keeps theirs`;
@@ -671,8 +671,9 @@ describe("on S3", () => {
     test("an expiry after the clock sample and before any write is a refusal", async () => {
       const environment = await setup();
       const start = s3.requests;
-      // Requests: reply/no-update, the pointer, the bucket time sampled with the local clock, then the final check's.
-      const now = () => (s3.requests - start >= 4 ? expiry + 1000 : T);
+      // Requests: the binding key, reply/no-update, the pointer, the reply/ listing, the bucket time sampled with the
+      // local clock, then the final check's.
+      const now = () => (s3.requests - start >= 6 ? expiry + 1000 : T);
       expect(await cmd("rollback", [...embedded("ios")], environment, now)).toEqual({
         code: 2,
         out: [],

@@ -4,7 +4,6 @@ import type {
   NoUpdateReply,
   Part,
   PartName,
-  PointerEntry,
   Rollout,
   Signer,
   StoredReply,
@@ -12,7 +11,6 @@ import type {
 import { base64 } from "../src/hash.ts";
 import {
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeMultipart,
   encodeRollout,
   encodeSfvDictionary,
@@ -63,14 +61,6 @@ export const TIDE_GOLDEN: Readonly<Record<string, Golden>> = {
 
 /** A second direct identity's goldens, signed by the generator with keyid `root` over `second-certificate.pem`. */
 export const SECOND_GOLDEN: Readonly<Record<string, Golden>> = {
-  "second-manifest.multipart": {
-    boundary: SECOND_BOUNDARY,
-    parts: [{ name: "manifest", file: "manifest-next.json", signed: true }],
-  },
-  "second-rollback.multipart": {
-    boundary: SECOND_BOUNDARY,
-    parts: [{ name: "directive", file: "directive-rollback.json", signed: true }],
-  },
   "second-no-update.multipart": {
     boundary: SECOND_BOUNDARY,
     parts: [{ name: "directive", file: "directive-no-update.json", signed: true }],
@@ -182,19 +172,6 @@ export const TIDE_REPLY_GOLDEN: Readonly<
 const SECOND_REPLY: Readonly<
   Record<string, { readonly multipart: string; readonly reply: Fields<StoredReply> }>
 > = {
-  "second-manifest": {
-    multipart: "second-manifest.multipart",
-    reply: {
-      kind: "manifest",
-      updateId: "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14", // manifest-next.json's id
-      boundary: SECOND_BOUNDARY,
-      manifestFilters: 'branch="next"', // manifest-next.json's metadata
-    },
-  },
-  "second-rollback": {
-    multipart: "second-rollback.multipart",
-    reply: { kind: "rollBackToEmbedded", boundary: SECOND_BOUNDARY },
-  },
   "second-no-update": {
     multipart: "second-no-update.multipart",
     reply: { kind: "noUpdateAvailable", boundary: SECOND_BOUNDARY },
@@ -217,26 +194,11 @@ export const CLIENT_HIGH = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 type Read = (file: string) => Uint8Array<ArrayBuffer>;
 
-/** Each version-3 golden: the key it is for and, by keyid, the reply, rollout or second-identity golden it holds. */
-export const TIDE_IDENTITIES_GOLDEN: Readonly<
-  Record<
-    string,
-    { readonly key: "pointer" | "noUpdate"; readonly entries: Readonly<Record<string, string>> }
-  >
-> = {
-  "identities-manifest.reply.json": {
-    key: "pointer",
-    entries: { main: "manifest.reply.json", root: "second-manifest" },
-  },
-  "identities-rollout.reply.json": {
-    key: "pointer",
-    entries: { main: "rollout-manifest.reply.json", root: "second-rollback" },
-  },
-  "identities-no-update.reply.json": {
-    key: "noUpdate",
-    entries: { main: "no-update.reply.json", root: "second-no-update" },
-  },
-};
+/** The version-3 `reply/no-update` golden: by keyid, the reply golden or second-identity reply it holds. */
+export const TIDE_IDENTITIES_GOLDEN = {
+  file: "identities-no-update.reply.json",
+  entries: { main: "no-update.reply.json", root: "second-no-update" },
+} as const;
 
 /** Returns the reply golden or second-identity reply `file`'s fields with the body `read` returns for its multipart. */
 export function goldenReply(file: string, read: Read): StoredReply {
@@ -258,17 +220,12 @@ export function goldenRollout(file: string, read: Read): Rollout {
   };
 }
 
-/** Returns the version-3 golden `file`'s entries, each built from the golden it names. */
-export function goldenIdentities(
-  file: string,
-  read: Read,
-): Identities<PointerEntry> | Identities<NoUpdateReply> {
-  const golden = TIDE_IDENTITIES_GOLDEN[file];
-  if (golden === undefined) throw new Error(`${file} is not a version-3 golden`);
-  const entry = (name: string) =>
-    name in TIDE_ROLLOUT_GOLDEN ? goldenRollout(name, read) : goldenReply(name, read);
-  const entries = new Map(Object.entries(golden.entries).map(([k, name]) => [k, entry(name)]));
-  return { kind: "identities", entries } as Identities<PointerEntry> | Identities<NoUpdateReply>;
+/** Returns the version-3 golden's entries, each built from the golden it names. */
+export function goldenIdentities(read: Read): Identities {
+  const entries = Object.entries(TIDE_IDENTITIES_GOLDEN.entries).map(
+    ([k, name]) => [k, goldenReply(name, read) as NoUpdateReply] as const,
+  );
+  return { kind: "identities", entries: new Map(entries) };
 }
 
 /** Returns each stored reply, rollout and version-3 golden's bytes, wrapping the multiparts `read` returns. */
@@ -278,13 +235,7 @@ export function replyGoldens(read: Read): Record<string, Uint8Array<ArrayBuffer>
     out[file] = encodeStoredReply(goldenReply(file, read));
   for (const file of Object.keys(TIDE_ROLLOUT_GOLDEN))
     out[file] = encodeRollout(goldenRollout(file, read));
-  for (const [file, { key }] of Object.entries(TIDE_IDENTITIES_GOLDEN)) {
-    const { entries } = goldenIdentities(file, read);
-    out[file] =
-      key === "pointer"
-        ? encodeIdentityPointer(entries as ReadonlyMap<string, PointerEntry>)
-        : encodeIdentityNoUpdate(entries as ReadonlyMap<string, NoUpdateReply>);
-  }
+  out[TIDE_IDENTITIES_GOLDEN.file] = encodeIdentityNoUpdate(goldenIdentities(read).entries);
   return out;
 }
 

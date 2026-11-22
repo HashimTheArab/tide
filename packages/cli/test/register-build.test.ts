@@ -3,13 +3,7 @@ import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
 import type { BaseAsset } from "@tide-ota/protocol";
-import {
-  baseKey,
-  contentKey,
-  encodeBaseRecord,
-  encodeIdentityPointer,
-  sha256Base64Url,
-} from "@tide-ota/protocol";
+import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide-ota/protocol";
 
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { publish } from "../src/publish.ts";
@@ -25,10 +19,11 @@ import {
   PNG_MD5,
   SERVER_URL,
   T,
+  NOT_ADDED,
+  OTHER_RUNTIME,
+  OWN_KEYID,
   artifact,
-  directBinding,
   diskObjects,
-  entryOf,
   env,
   identitiesNoUpdate,
   identity,
@@ -113,8 +108,8 @@ function build({
   return { root, manifest, bundle: join(root, "index.android.bundle"), assets };
 }
 
-const args = (b: ReturnType<typeof build>, platform = "android") => [
-  ...["--platform", platform, "--runtime-version", "1.0.0"],
+const args = (b: ReturnType<typeof build>, platform = "android", runtime = "1.0.0") => [
+  ...["--platform", platform, "--runtime-version", runtime],
   ...["--manifest", b.manifest, "--bundle", b.bundle, "--assets-dir", b.assets],
 ];
 
@@ -288,9 +283,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     expect(await register(args(build()), store)).toEqual({
       code: 2,
       out: [],
-      err: [
-        "tide: this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
-      ],
+      err: [`tide: ${OWN_KEYID("reply/no-update")}`],
     });
     expect(store.snapshot()).toEqual(before);
   });
@@ -517,26 +510,23 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
   );
 
   describe("several keyids", () => {
-    const IOS = "reply/main/1.0.0/ios";
+    const ANDROID_1 = "reply/beta/1.0.0/android";
+    const ANDROID_2 = "reply/main/2.0.0/android";
     const rootPins = () => ({
       TIDE_BUILD_KEYID: "root",
       TIDE_BUILD_CERTIFICATE: otherIdentity.certificate,
     });
-    /** main and root in reply/no-update and a pointer, both bound; `change` replaces objects before the snapshot. */
+    /**
+     * main on runtime 1.0.0 (channel beta) and root on 2.0.0, both in reply/no-update; `change` replaces objects
+     * before the snapshot.
+     */
     async function twoIdentities(change: Record<string, Uint8Array<ArrayBuffer>> = {}) {
       const store = STORES[kind]();
       const bucket = bucketFromEnv(store.env);
-      const pointer = new Map([
-        ["main", entryOf(await seededPointer("manifest", T, main))],
-        ["root", entryOf(await seededPointer("rollback", T, otherIdentity, "root"))],
-      ]);
       const seed = {
         "reply/no-update": await identitiesNoUpdate({ main, root: otherIdentity }),
-        [IOS]: encodeIdentityPointer(pointer),
-        ...Object.fromEntries([
-          await directBinding(main),
-          await directBinding(otherIdentity, "root"),
-        ]),
+        [ANDROID_1]: await seededPointer("manifest", T, main),
+        [ANDROID_2]: await seededPointer("rollback", T, otherIdentity, "root"),
         ...change,
       };
       for (const [key, bytes] of Object.entries(seed)) await bucket.put(key, bytes);
@@ -546,11 +536,12 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     const replies = (store: Store) =>
       [...store.objects()].filter(([key]) => key.startsWith("reply/"));
 
-    test("main and root each register on a version-3 bucket, and every reply keeps its bytes", async () => {
+    test("main and root each register their own runtime, and every reply keeps its bytes", async () => {
       const store = await twoIdentities();
       const before = replies(store);
       expect((await register(args(build()), store)).code).toBe(0);
-      expect((await register(args(build({ id: OTHER_ID })), store, rootPins())).code).toBe(0);
+      const rootBuild = args(build({ id: OTHER_ID }), "android", "2.0.0");
+      expect((await register(rootBuild, store, rootPins())).code).toBe(0);
       expect(replies(store)).toEqual(before);
     });
 
@@ -558,12 +549,12 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       [
         "main's reply/no-update entry under another certificate",
         async () => ({ "reply/no-update": await identitiesNoUpdate({ main: otherIdentity }) }),
-        'reply/no-update: keyid "main" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid',
+        OWN_KEYID("reply/no-update"),
       ],
       [
         "a reply/no-update without main's entry",
         async () => ({ "reply/no-update": await identitiesNoUpdate({ root: otherIdentity }) }),
-        'reply/no-update holds no reply for keyid "main": tide publish, republish or rollback writes it',
+        NOT_ADDED("main"),
       ],
     ])("%s is refused", async (_, change, message) => {
       const store = await twoIdentities(await change());
@@ -576,31 +567,31 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       expect(store.snapshot()).toEqual(before);
     });
 
-    test("a version-1 reply/no-update beside a version-3 pointer is refused: the server cannot serve it", async () => {
-      const store = await twoIdentities({ "reply/no-update": await noUpdateBy(main) });
+    test.each<[string, string, string, Record<string, Uint8Array<ArrayBuffer>>]>([
+      ["root on main's runtime, held on channel beta", "1.0.0", ANDROID_1, {}],
+      ["main on root's runtime", "2.0.0", ANDROID_2, {}],
+      ["root on a runtime whose pointer is unreadable", "3.0.0", "reply/x/3.0.0/android", {}],
+    ])("%s is refused before the build ships", async (name, runtime, key) => {
+      const unreadable = name.includes("unreadable");
+      const store = await twoIdentities(unreadable ? { [key]: utf8("garbage") } : {});
       const before = store.snapshot();
-      expect(await register(args(build()), store)).toEqual({
+      const as = runtime === "2.0.0" ? pins() : rootPins();
+      expect(await register(args(build(), "android", runtime), store, as)).toEqual({
         code: 2,
         out: [],
         err: [
-          `tide: ${IOS} holds replies for several keyids, but reply/no-update holds one reply for every keyid`,
+          `tide: ${unreadable ? `${key} is unreadable: not a stored reply` : OTHER_RUNTIME(key)}`,
         ],
       });
       expect(store.snapshot()).toEqual(before);
     });
 
-    test("root is refused while a legacy pointer serves main's reply to every keyid", async () => {
-      const store = await twoIdentities({ [IOS]: await seededPointer("manifest", T, main) });
-      const before = store.snapshot();
-      expect(await register(args(build()), store, rootPins())).toEqual({
-        code: 2,
-        out: [],
-        err: [
-          `tide: ${IOS} still serves another keyid's reply to every keyid: keyid "root" is served only once tide publish has converted every pointer`,
-        ],
+    test("another runtime's or platform's pointers, unreadable ones included, do not block it", async () => {
+      const store = await twoIdentities({
+        "reply/x/1.0.0/ios": utf8("garbage"),
+        "reply/x/2.0.0/ios": await seededPointer("rollback", T, otherIdentity, "root"),
       });
-      expect(store.snapshot()).toEqual(before);
-      expect((await register(args(build()), store)).code).toBe(0);
+      expect((await register(args(build(), "android", "3.0.0"), store, rootPins())).code).toBe(0);
     });
   });
 

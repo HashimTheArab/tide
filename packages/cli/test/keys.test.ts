@@ -4,17 +4,15 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import type { NoUpdateReply, PointerEntry, Signer } from "@tide-ota/protocol";
+import type { NoUpdateReply, Signer } from "@tide-ota/protocol";
 import {
   MAX_IDENTITIES_BYTES,
   MAX_KEYID_BYTES,
   MAX_REPLY_BYTES,
   certificatePublicKey,
   cryptoKeySigner,
-  decodePointer,
   decodeStoredReply,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeMultipart,
   encodeRollout,
   encodeStoredReply,
@@ -43,7 +41,7 @@ import {
   tempRoot,
   utf8,
 } from "./helpers.ts";
-import { BOUND_ELSEWHERE, UNBOUND, directBinding } from "./publish-fixture.ts";
+import { CHAIN_ROOT, NOT_ADDED, OWN_KEYID, RESTORE } from "./publish-fixture.ts";
 
 type KeyPair = Awaited<ReturnType<typeof generate>>;
 
@@ -53,14 +51,6 @@ const PROBE = utf8("tide signing probe");
 const DAY = 86_400_000;
 const PART = fixture("manifest.json");
 const MISMATCH = "the signing key does not match the app's code-signing certificate";
-const OTHER_IDENTITY =
-  "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
-const SEVERAL = (key: string) =>
-  `${key} holds replies for several keyids, which tide publish, rollback and republish do not write`;
-const OWN_KEYID = (key: string, keyid = "main") =>
-  `${key}: keyid "${keyid}" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid`;
-const STILL_LEGACY = (key: string, keyid: string) =>
-  `${key} still serves another keyid's reply to every keyid: keyid "${keyid}" is served only once tide publish has converted every pointer`;
 
 /** A key pair generated for this run, its certificate and the forms each key source takes. */
 interface Identity {
@@ -512,13 +502,13 @@ describe.each(["disk", "s3"] as const)("refusals before the bucket on %s", (kind
     opened.unchanged(0);
   });
 
-  test("a valid setup reads reply/no-update once and writes nothing", async () => {
+  test("a valid setup reads the keyid's binding key and reply/no-update once each and writes nothing", async () => {
     const opened = await store(kind, await seed());
     await openWriter(
       { ...pins(main), ...keyFile(main.pkcs8), ...opened.env },
       { app: app(main.certificate) },
     );
-    opened.unchanged(kind === "s3" ? 1 : 0);
+    opened.unchanged(kind === "s3" ? 2 : 0);
   });
 });
 
@@ -610,14 +600,14 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
       () => noUpdateReply(main.keys.privateKey),
       () => other,
       "main",
-      OTHER_IDENTITY,
+      OWN_KEYID("reply/no-update"),
     ],
     [
       "pins and config moved to keyid mian with key A",
       () => noUpdateReply(main.keys.privateKey),
       () => main,
       "mian",
-      OTHER_IDENTITY,
+      NOT_ADDED("mian"),
     ],
     [
       "an undecodable record",
@@ -641,20 +631,23 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
       "main",
       "reply/no-update is unreadable: directive type is not noUpdateAvailable",
     ],
-  ])("%s is refused after one read", async (_, reply, id, keyid, message) => {
-    const opened = await store(kind, { "reply/no-update": await reply() });
-    const moved = id();
-    await refusal(
-      openWriter({ ...pins(moved, keyid), ...keyFile(moved.pkcs8), ...opened.env }),
-      message,
-    );
-    opened.unchanged(kind === "s3" ? 1 : 0);
-  });
+  ])(
+    "%s is refused after reading the binding key and reply/no-update",
+    async (_, reply, id, keyid, message) => {
+      const opened = await store(kind, { "reply/no-update": await reply() });
+      const moved = id();
+      await refusal(
+        openWriter({ ...pins(moved, keyid), ...keyFile(moved.pkcs8), ...opened.env }),
+        message,
+      );
+      opened.unchanged(kind === "s3" ? 2 : 0);
+    },
+  );
 
   test("key A under main passes, and so does an empty bucket", async () => {
     for (const [seed, reads] of [
-      [{ "reply/no-update": await noUpdateReply(main.keys.privateKey) }, 1],
-      [{}, 3], // reply/no-update, the empty reply/ listing, then main's binding.
+      [{ "reply/no-update": await noUpdateReply(main.keys.privateKey) }, 2],
+      [{}, 3], // main's binding key, reply/no-update, then the empty reply/ listing.
     ] as const) {
       const opened = await store(kind, seed);
       const { signer } = await openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env });
@@ -672,29 +665,33 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rollbackReply(main.keys.privateKey),
     });
-    expect((await open(opened.env)).noUpdate).toBeUndefined();
-    opened.unchanged(kind === "s3" ? 3 : 0);
+    expect((await open(opened.env)).fallback).toBeUndefined();
+    opened.unchanged(kind === "s3" ? 4 : 0);
   });
 
   test("opens when both bodies of a rollout verify under the identity", async () => {
     const opened = await store(kind, {
       "reply/main/1.0.0/ios": await rolloutReply(main.keys.privateKey, main.keys.privateKey),
     });
-    expect((await open(opened.env)).noUpdate).toBeUndefined();
-    opened.unchanged(kind === "s3" ? 3 : 0);
+    expect((await open(opened.env)).fallback).toBeUndefined();
+    opened.unchanged(kind === "s3" ? 4 : 0);
   });
 
   test.each<[string, () => Promise<Uint8Array<ArrayBuffer>>, string]>([
-    ["a pointer signed by key B", () => rollbackReply(other.keys.privateKey), OTHER_IDENTITY],
+    [
+      "a pointer signed by key B",
+      () => rollbackReply(other.keys.privateKey),
+      OWN_KEYID("reply/main/1.0.0/ios"),
+    ],
     [
       "a rollout whose new body is signed by key B",
       () => rolloutReply(other.keys.privateKey, main.keys.privateKey),
-      OTHER_IDENTITY,
+      OWN_KEYID("reply/main/1.0.0/ios"),
     ],
     [
       "a rollout whose earlier body is signed by key B",
       () => rolloutReply(main.keys.privateKey, other.keys.privateKey),
-      OTHER_IDENTITY,
+      OWN_KEYID("reply/main/1.0.0/ios"),
     ],
     [
       "an unreadable pointer",
@@ -702,9 +699,15 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
       "reply/main/1.0.0/ios is unreadable: not a stored reply",
     ],
     [
-      "a version-3 pointer whose main entry another certificate signed",
-      () => Promise.resolve(fixture("identities-manifest.reply.json")),
-      OWN_KEYID("reply/main/1.0.0/ios"),
+      "a version-3 record",
+      () => Promise.resolve(fixture("identities-no-update.reply.json")),
+      "reply/main/1.0.0/ios is unreadable: not a stored reply",
+    ],
+    // Only a version-3 reply/no-update admits another keyid, and no writer of this keyid can sign its entry.
+    [
+      "a pointer signed by key B under keyid root",
+      () => rollbackReply(other.keys.privateKey, "root"),
+      RESTORE("reply/main/1.0.0/ios"),
     ],
   ])("%s is refused, so nothing repairs another identity's bucket", async (_, reply, message) => {
     const opened = await store(kind, {
@@ -712,6 +715,17 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
       "reply/main/1.0.0/ios": await reply(),
     });
     await refusal(open(opened.env), message);
+    opened.unchanged(kind === "s3" ? 5 : 0);
+  });
+
+  test("--add-identity changes nothing: a pointer of another keyid still asks for the restore", async () => {
+    const opened = await store(kind, {
+      "reply/main/1.0.0/ios": await rollbackReply(other.keys.privateKey, "root"),
+    });
+    await refusal(
+      openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }, { addIdentity: true }),
+      RESTORE("reply/main/1.0.0/ios"),
+    );
     opened.unchanged(kind === "s3" ? 4 : 0);
   });
 });
@@ -722,24 +736,14 @@ test("a name outside the key grammar under reply/ refuses a bucket without reply
     openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }),
     "reply/ is unreadable: an object name outside the key grammar",
   );
-  opened.unchanged(2);
+  opened.unchanged(3);
 });
 
-/** A version-3 pointer holding each legacy pointer record under its keyid. */
-const pointerOf = (records: Record<string, Uint8Array>) =>
-  encodeIdentityPointer(
-    new Map(Object.entries(records).map(([k, r]) => [k, decodePointer(r) as PointerEntry])),
-  );
 /** A version-3 `reply/no-update` holding each version-1 record under its keyid. */
 const noUpdateOf = (records: Record<string, Uint8Array>) =>
   encodeIdentityNoUpdate(
     new Map(Object.entries(records).map(([k, r]) => [k, decodeStoredReply(r) as NoUpdateReply])),
   );
-/** A chain-mode binding of main, as a chain publish that failed after binding leaves it. */
-const chainBinding = async (): Promise<[string, Uint8Array<ArrayBuffer>]> => [
-  await identityKey("main"),
-  utf8(`{"version":1,"keyid":"main","root":"${"ab".repeat(32)}"}`),
-];
 
 /** The identity check a writer that signs nothing runs, for `id`'s certificate under `keyid`. */
 async function check(env: Record<string, string>, id: Identity, keyid = "main") {
@@ -747,91 +751,60 @@ async function check(env: Record<string, string>, id: Identity, keyid = "main") 
   return servingBucket(bucketFromEnv(pinned), await buildIdentity(pinned, Date.now()), "absent");
 }
 
-describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind) => {
+describe.each(["disk", "s3"] as const)("several keyids in reply/no-update on %s", (kind) => {
   const A = () => main.keys.privateKey;
   const B = () => other.keys.privateKey;
-  const IOS = "reply/main/1.0.0/ios";
-  /** main under key A and root under key B in reply/no-update and a rollout pointer, both bound. */
-  const twoIdentities = async (pointer?: Uint8Array<ArrayBuffer>) => ({
+  /** main under key A and root under key B in reply/no-update. */
+  const twoIdentities = async () => ({
     "reply/no-update": noUpdateOf({
       main: await noUpdateReply(A()),
       root: await noUpdateReply(B(), "root"),
     }),
-    [IOS]:
-      pointer ??
-      pointerOf({ main: await rolloutReply(A(), A()), root: await rollbackReply(B(), "root") }),
-    ...Object.fromEntries([await directBinding(main), await directBinding(other, "root")]),
   });
 
-  test("main under key A and root under key B each pass; publish refuses the layout once checked", async () => {
+  test("main under key A and root under key B each pass, each judged by its own entry", async () => {
     const opened = await store(kind, await twoIdentities());
-    // Each identity's bodies fail under the other's certificate, so neither judges the other's.
-    await expect(check(opened.env, main)).resolves.toBe("identities");
-    await expect(check(opened.env, other, "root")).resolves.toBe("identities");
-    await refusal(
-      openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }),
-      SEVERAL("reply/no-update"),
-    );
-    // Each: reply/no-update, the listing, the pointer, the binding.
-    opened.unchanged(kind === "s3" ? 12 : 0);
+    await expect(check(opened.env, main)).resolves.toBeUndefined();
+    await expect(check(opened.env, other, "root")).resolves.toBeUndefined();
+    const writer = await openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env });
+    expect(writer.fallback?.version).toBe(3);
+    expect([...(writer.fallback?.entries.keys() ?? [])]).toEqual(["main", "root"]);
+    // Each: the binding key and reply/no-update.
+    opened.unchanged(kind === "s3" ? 6 : 0);
   });
 
-  test("a version-3 pointer without reply/no-update is checked, then refused to publish", async () => {
+  test.each<[string, () => Promise<Record<string, Uint8Array<ArrayBuffer>>>]>([
+    [
+      "a version-1 record of keyid root",
+      async () => ({ "reply/no-update": await noUpdateReply(B(), "root") }),
+    ],
+    [
+      "a version-3 record without main",
+      async () => ({ "reply/no-update": noUpdateOf({ root: await noUpdateReply(B(), "root") }) }),
+    ],
+  ])("%s refuses main unless it is adding an identity", async (_, seed) => {
+    const opened = await store(kind, await seed());
+    await refusal(check(opened.env, main), NOT_ADDED("main"));
+    const env = { ...pins(main), ...keyFile(main.pkcs8), ...opened.env };
+    await refusal(openWriter(env), NOT_ADDED("main"));
+    const writer = await openWriter(env, { addIdentity: true });
+    expect([...(writer.fallback?.entries.keys() ?? [])]).toEqual(["root"]);
+    opened.unchanged(kind === "s3" ? 6 : 0);
+  });
+
+  test("main's entry under key B is refused, naming no key, whether adding or not", async () => {
     const opened = await store(kind, {
-      [IOS]: pointerOf({ main: await rollbackReply(A()), root: await rollbackReply(B(), "root") }),
-      ...Object.fromEntries([await directBinding(main)]),
+      "reply/no-update": noUpdateOf({
+        main: await noUpdateReply(B()),
+        root: await noUpdateReply(B(), "root"),
+      }),
     });
-    await refusal(
-      openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...opened.env }),
-      SEVERAL(IOS),
-    );
-    opened.unchanged(kind === "s3" ? 4 : 0);
-  });
-
-  test.each<[string, string, () => Promise<Record<string, Uint8Array<ArrayBuffer>>>]>([
-    [
-      "the no-update entry",
-      "reply/no-update",
-      async () => ({
-        "reply/no-update": noUpdateOf({
-          main: await noUpdateReply(B()),
-          root: await noUpdateReply(B(), "root"),
-        }),
-      }),
-    ],
-    [
-      "a pointer entry",
-      IOS,
-      async () => ({
-        [IOS]: pointerOf({
-          main: await rollbackReply(B()),
-          root: await rollbackReply(B(), "root"),
-        }),
-      }),
-    ],
-    [
-      "a rollout's earlier side",
-      IOS,
-      async () => ({ [IOS]: pointerOf({ main: await rolloutReply(A(), B()) }) }),
-    ],
-    [
-      "a legacy pointer beside a version-3 no-update",
-      IOS,
-      async () => ({ [IOS]: await rollbackReply(B()) }),
-    ],
-  ])("main's body under key B in %s is refused, naming no key", async (_, key, change) => {
-    const opened = await store(kind, { ...(await twoIdentities()), ...(await change()) });
-    const e = await refusal(check(opened.env, main), OWN_KEYID(key));
+    const e = await refusal(check(opened.env, main), OWN_KEYID("reply/no-update"));
     expectNoPem(e.message, main.certificate);
     expectNoPem(e.message, other.certificate);
-    opened.unchanged(kind === "s3" ? (key === IOS ? 3 : 1) : 0);
-  });
-
-  test("a legacy pointer beside a version-3 no-update is main's alone: root is refused until it is converted", async () => {
-    const opened = await store(kind, await twoIdentities(await rollbackReply(A())));
-    await expect(check(opened.env, main)).resolves.toBe("identities");
-    await refusal(check(opened.env, other, "root"), STILL_LEGACY(IOS, "root"));
-    opened.unchanged(kind === "s3" ? 7 : 0);
+    const env = { ...pins(main), ...keyFile(main.pkcs8), ...opened.env };
+    await refusal(openWriter(env, { addIdentity: true }), OWN_KEYID("reply/no-update"));
+    opened.unchanged(kind === "s3" ? 4 : 0);
   });
 
   test.each<[string, () => Promise<Uint8Array<ArrayBuffer>>, string]>([
@@ -840,9 +813,9 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
       () =>
         Promise.resolve(
           encodeStoredReply({
-            kind: "rollBackToEmbedded",
+            kind: "noUpdateAvailable",
             ...encodeMultipart(
-              [{ name: "directive", body: fixture("directive-rollback.json") }],
+              [{ name: "directive", body: fixture("directive-no-update.json") }],
               BOUNDARY,
             ),
           }),
@@ -851,32 +824,15 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
     ],
     [
       "a body signed under main",
-      () => rollbackReply(B()),
+      () => noUpdateReply(B()),
       "an entry is signed under another keyid",
     ],
   ])("another keyid's entry with %s is unreadable for every writer", async (_, root, reason) => {
-    const opened = await store(
-      kind,
-      await twoIdentities(pointerOf({ main: await rollbackReply(A()), root: await root() })),
-    );
-    await refusal(check(opened.env, main), `${IOS} is unreadable: ${reason}`);
-    opened.unchanged(kind === "s3" ? 3 : 0);
-  });
-
-  test("version-3 bodies bind main to its exact certificate: a same-key reissue is refused", async () => {
-    const reissued = await identity(main.keys);
-    const opened = await store(kind, await twoIdentities());
-    const key = await identityKey("main");
-    await refusal(check(opened.env, reissued), BOUND_ELSEWHERE(key));
-    opened.unchanged(kind === "s3" ? 4 : 0);
-  });
-
-  test("version-3 bodies without their binding are refused", async () => {
-    const key = await identityKey("main");
-    const seed = Object.entries(await twoIdentities()).filter(([k]) => k !== key);
-    const opened = await store(kind, Object.fromEntries(seed));
-    await refusal(check(opened.env, main), UNBOUND(key));
-    opened.unchanged(kind === "s3" ? 4 : 0);
+    const opened = await store(kind, {
+      "reply/no-update": noUpdateOf({ main: await noUpdateReply(A()), root: await root() }),
+    });
+    await refusal(check(opened.env, main), `reply/no-update is unreadable: ${reason}`);
+    opened.unchanged(kind === "s3" ? 2 : 0);
   });
 
   test("a reply/no-update over MAX_REPLY_BYTES, within the version-3 limit, is read", async () => {
@@ -892,40 +848,38 @@ describe.each(["disk", "s3"] as const)("one certificate per keyid on %s", (kind)
     const bytes = await record(size - (await record(0)).length);
     expect(bytes.length).toBe(size);
     expect(bytes.length).toBeLessThan(MAX_IDENTITIES_BYTES);
-    const opened = await store(kind, {
-      "reply/no-update": bytes,
-      ...Object.fromEntries([await directBinding(main)]),
-    });
-    await expect(check(opened.env, main)).resolves.toBe("identities");
+    const opened = await store(kind, { "reply/no-update": bytes });
+    await expect(check(opened.env, main)).resolves.toBeUndefined();
   });
 });
 
 describe.each(["disk", "s3"] as const)("a direct writer and a chain-mode binding on %s", (kind) => {
-  const open = (env: Record<string, string>) =>
-    openWriter({ ...pins(main), ...keyFile(main.pkcs8), ...env });
+  /** A chain-mode binding of main, as a chain publish that failed after binding leaves it. */
+  const chainBinding = async (): Promise<[string, Uint8Array<ArrayBuffer>]> => [
+    await identityKey("main"),
+    utf8(`{"version":1,"keyid":"main","root":"${"ab".repeat(32)}"}`),
+  ];
 
-  test("a binding left by a failed chain publish refuses a direct writer under its keyid", async () => {
-    const [key, bytes] = await chainBinding();
-    const opened = await store(kind, { [key]: bytes });
-    await refusal(open(opened.env), BOUND_ELSEWHERE(key));
-    opened.unchanged(kind === "s3" ? 3 : 0);
-  });
-
-  test.each<[string, () => Promise<Uint8Array<ArrayBuffer>>, string, number]>([
-    ["reply/no-update", () => noUpdateReply(main.keys.privateKey), "reply/no-update", 1],
+  // Only chain writers write a binding, so the keyid belongs to a chain root.
+  test.each<[string, () => Promise<Record<string, Uint8Array<ArrayBuffer>>>]>([
+    ["an empty bucket", () => Promise.resolve({})],
     [
-      "a pointer without reply/no-update",
-      () => rollbackReply(main.keys.privateKey),
-      "reply/main/1.0.0/ios",
-      3,
+      "main's direct reply/no-update",
+      async () => ({ "reply/no-update": await noUpdateReply(main.keys.privateKey) }),
+    ],
+    [
+      "another keyid's reply/no-update",
+      async () => ({ "reply/no-update": await noUpdateReply(other.keys.privateKey, "root") }),
     ],
   ])(
-    "main's direct body in %s keeps the bucket open, the stale binding unread",
-    async (_, body, key, reads) => {
-      const [binding, bytes] = await chainBinding();
-      const opened = await store(kind, { [binding]: bytes, [key]: await body() });
-      await open(opened.env);
-      opened.unchanged(kind === "s3" ? reads : 0);
+    "a binding refuses a direct writer under its keyid over %s, adding or not",
+    async (_, seed) => {
+      const [key, bytes] = await chainBinding();
+      const opened = await store(kind, { [key]: bytes, ...(await seed()) });
+      const env = { ...pins(main), ...keyFile(main.pkcs8), ...opened.env };
+      await refusal(openWriter(env), CHAIN_ROOT(key));
+      await refusal(openWriter(env, { addIdentity: true }), CHAIN_ROOT(key));
+      opened.unchanged(kind === "s3" ? 2 : 0);
     },
   );
 });
@@ -1134,7 +1088,7 @@ describe("no PEM text in output", () => {
             pins(other),
             "tide-export.json certificate differs from TIDE_BUILD_CERTIFICATE",
           ],
-          [main.pkcs8, main, { TIDE_DISK_DIR: bucket }, OTHER_IDENTITY],
+          [main.pkcs8, main, { TIDE_DISK_DIR: bucket }, OWN_KEYID("reply/no-update")],
         ];
       for (const [pem, cert, extra, message] of cases) {
         const result = await drive({ ...pins(cert), ...env(pem), ...extra }, cert.certificate);

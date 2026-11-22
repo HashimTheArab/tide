@@ -2,13 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import {
-  LEGACY_MAP_KEY,
-  baseKey,
-  contentKey,
-  encodeIdentityPointer,
-  sha256Base64Url,
-} from "@tide-ota/protocol";
+import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import { FAKE_S3 } from "../../server/test/fakes/s3.ts";
 import { byteOrder } from "../src/bucket.ts";
@@ -26,7 +20,6 @@ import {
   SERVER_URL,
   T,
   diskObjects,
-  entryOf,
   env,
   artifact,
   identitiesNoUpdate,
@@ -221,7 +214,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     expect([s3.puts.length, s3.deletes.length]).toEqual([puts, deletes]);
   });
 
-  test("two identities' releases report the same whether their replies are version 3 or not", async () => {
+  test("two identities' releases report the same whether reply/no-update is version 3 or not", async () => {
     const store = open();
     const bucket = bucketFromEnv(store.env);
     await write("publish", ["--channel", "main", "--from", artifact()], env(store.env));
@@ -235,18 +228,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     const expected = { code: 0, stdout: report([[orphanKey, orphanKey, orphan]]), stderr: "" };
     expect(await storage(store)).toEqual(expected);
 
-    const ios = store.objects().get(IOS);
-    if (ios === undefined) throw new Error(`${IOS} is absent`);
-    const root = entryOf(await seededPointer("rollback", T, other, "root"));
-    await bucket.put(
-      IOS,
-      encodeIdentityPointer(
-        new Map([
-          ["main", entryOf(ios)],
-          ["root", root],
-        ]),
-      ),
-    );
+    await bucket.put("reply/main/2.0.0/ios", await seededPointer("rollback", T, other, "root"));
     await bucket.put("reply/no-update", await identitiesNoUpdate({ main, root: other }));
     expect(await storage(store)).toEqual(expected);
   });

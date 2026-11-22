@@ -230,21 +230,28 @@ export function analyticsCases(harness: AnalyticsHarness): void {
   });
 
   const keyid = (id: string) => `sig, keyid="${id}", alg="rsa-v1_5-sha256"`;
-  test.each<[string, string, Record<string, string>, [string, string]]>([
-    ["main's new side", "main", { "eas-client-id": CLIENT_LOW }, ["manifest", "new"]],
-    ["main's earlier side", "main", { "eas-client-id": CLIENT_HIGH }, ["manifest", "earlier"]],
-    ["root's rollback", "root", {}, ["rollBackToEmbedded", "none"]],
+  test.each<[string, string, string, Record<string, string>, [string, string]]>([
+    ["main's new side", "rollout", "main", { "eas-client-id": CLIENT_LOW }, ["manifest", "new"]],
     [
-      "main's no-update on the new update",
-      "main",
+      "root's earlier side",
+      "rollout",
+      "root",
+      { "eas-client-id": CLIENT_HIGH },
+      ["manifest", "earlier"],
+    ],
+    [
+      "root's no-update on the new update",
+      "rollout",
+      "root",
       { "eas-client-id": CLIENT_LOW, "expo-current-update-id": NEW_ID },
       ["noUpdateAvailable", "new"],
     ],
-  ])("a version-3 pointer records %s", async (_, id, change, [reply, side]) => {
+    ["main's no-update with no pointer", "none", "main", {}, ["noUpdateAvailable", "none"]],
+  ])("a version-3 no-update records %s", async (_, channel, id, change, [reply, side]) => {
     await harness.put(NO_UPDATE_KEY, fixture("identities-no-update.reply.json"));
-    await pointer("an-v3", fixture("identities-rollout.reply.json"));
+    await pointer("an-v3-rollout", fixture("rollout-manifest.reply.json"));
     const point = await onePoint(() =>
-      get("an-v3", { ...change, "expo-expect-signature": keyid(id) }),
+      get(`an-v3-${channel}`, { ...change, "expo-expect-signature": keyid(id) }),
     );
     expect([point.blobs[0], point.blobs[6]]).toEqual([reply, side]);
   });
@@ -252,19 +259,19 @@ export function analyticsCases(harness: AnalyticsHarness): void {
   test.each<[number, string | undefined]>([
     [400, "sig, keyid=main"],
     [404, keyid("other")],
-  ])("a version-3 %i records no point", async (status, value) => {
+  ])("a version-3 no-update's %i records no point", async (status, value) => {
     await harness.put(NO_UPDATE_KEY, fixture("identities-no-update.reply.json"));
-    await pointer("an-v3-refused", fixture("identities-manifest.reply.json"));
     const points = harness.capture();
     const { res } = await get("an-v3-refused", { "expo-expect-signature": value });
     expect(res.status).toBe(status);
     expect(points()).toEqual([]);
   });
 
-  test("a version-3 pointer over a version-1 no-update records a 503 when it needs no-update", async () => {
-    await pointer("an-v3-mixed", fixture("identities-manifest.reply.json"));
+  test("a version-3 record at a pointer key records a 503", async () => {
+    await harness.put(NO_UPDATE_KEY, fixture("identities-no-update.reply.json"));
+    await pointer("an-v3-pointer", fixture("identities-no-update.reply.json"));
     const point = await onePoint(() =>
-      get("an-v3-mixed", { "expo-expect-signature": keyid("other") }),
+      get("an-v3-pointer", { "expo-expect-signature": keyid("main") }),
     );
     expect([point.blobs[0], point.blobs[6]]).toEqual(["503", "none"]);
   });

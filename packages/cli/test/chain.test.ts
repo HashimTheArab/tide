@@ -12,7 +12,6 @@ import {
   cryptoKeySigner,
   decodeStoredReply,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
@@ -47,10 +46,11 @@ import {
   BOUND_ELSEWHERE,
   IOS,
   T,
+  CHAIN_ROOT,
+  OWN_KEYID,
   UNBOUND,
   artifact,
   diskObjects,
-  entryOf,
   env,
   main,
   s3,
@@ -61,8 +61,7 @@ import {
 
 useFixture();
 
-const OTHER_IDENTITY =
-  "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
+const OTHER_IDENTITY = OWN_KEYID(NO_UPDATE_KEY);
 const HOUR = 3_600_000;
 const SOON = new Date(T + HOUR); // A notAfter the S3 tests' clock passes.
 const LATER = T + 2 * HOUR;
@@ -585,7 +584,7 @@ describe("another identity's bucket", () => {
     expect(await publishWith(chained, B())).toMatchObject({ code: 0 });
     expect(
       await cmd("publish", ["--channel", "main", "--from", artifact()], env(chained.env)),
-    ).toEqual({ code: 2, out: [], err: [`tide: ${OTHER_IDENTITY}`] });
+    ).toEqual({ code: 2, out: [], err: [`tide: ${CHAIN_ROOT(await identityKey("main"))}`] });
   });
 
   test("a dual-purpose root's direct-signed bodies are not its chained identity", async () => {
@@ -632,29 +631,9 @@ describe("several keyids in chain mode", () => {
     expect(await registerWith(store, w.root, "6f9619ff-8b86-4d01-b42d-00cf4fc964ff")).toEqual({
       code: 2,
       out: [],
-      err: [
-        'tide: reply/no-update: keyid "main" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid',
-      ],
+      err: [`tide: ${OTHER_IDENTITY}`],
     });
     expect(s3Snapshot()).toEqual(before);
-  });
-
-  test("a renewal of a version-1 reply/no-update refuses before any PUT while a version-3 pointer exists", async () => {
-    const store = s3Store();
-    expect(await publishWith(store, A())).toMatchObject({ code: 0 });
-    const untargeted = "reply/other/1.0.0/ios";
-    const ios = store.objects().get(IOS);
-    if (ios === undefined) throw new Error(`${IOS} is absent`);
-    s3.objects.set(untargeted, encodeIdentityPointer(new Map([["main", entryOf(ios)]])));
-    s3.puts.length = 0;
-    expect(await publishWith(store, B())).toEqual({
-      code: 2,
-      out: [],
-      err: [
-        `tide: ${untargeted} holds replies for several keyids, which tide publish, rollback and republish do not write`,
-      ],
-    });
-    expect(s3.puts).toEqual([]);
   });
 
   test("the longest keyid binds, and the next publish reads its binding", async () => {
@@ -725,14 +704,38 @@ describe("validity checks before each write", () => {
     expect(s3.puts).not.toContain(NO_UPDATE_KEY);
   });
 
-  test("a renewal another writer won is kept when it is this identity's, and refused under another root", async () => {
+  test("a renewal another writer won with the configured chain is kept", async () => {
     const store = s3Store();
     expect(await publishWith(store, A())).toMatchObject({ code: 0 });
-    const theirs = await chainedNoUpdate(B());
+    const theirs = await chainedNoUpdate(SOON_LEAF());
     s3.raceOnPut(NO_UPDATE_KEY, theirs);
     expect(await publishWith(store, SOON_LEAF())).toMatchObject({ code: 0, err: [] });
     expect(store.objects().get(NO_UPDATE_KEY)).toEqual(theirs);
+  });
 
+  // A winner still serving another chain would keep fallback requests on a chain that expires.
+  test("a renewal another writer won with another chain fails, and the rerun writes the configured chain", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, A())).toMatchObject({ code: 0 });
+    const old = await chainedNoUpdate(B());
+    s3.raceOnPut(NO_UPDATE_KEY, old);
+    s3.puts.length = 0;
+    expect(await publishWith(store, SOON_LEAF())).toEqual({
+      code: 1,
+      out: [],
+      err: [
+        "tide: reply/no-update was changed by another writer during the publish; it keeps theirs: run again",
+      ],
+    });
+    expect(store.objects().get(NO_UPDATE_KEY)).toEqual(old);
+    expect(s3.puts.filter((k) => k === IOS || k === ANDROID)).toEqual([]);
+    expect(await publishWith(store, SOON_LEAF())).toMatchObject({ code: 0, err: [] });
+    await expectServes(store, NO_UPDATE_KEY, SOON_LEAF());
+  });
+
+  test("a renewal another writer won under another root is refused", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     const foreign = await chainedNoUpdate({ root: w.root2, chain: [w.leaf2] });
     s3.raceOnPut(NO_UPDATE_KEY, foreign);
     const result = await publishWith(store, A());

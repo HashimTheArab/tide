@@ -1,7 +1,0 @@
---tide_fixture_second
-Content-Disposition: form-data; name="directive"
-Content-Type: application/json
-expo-signature: sig="UcJNBeX72kTiRpExvl5K9W2AYxdJQXITiKWHat14Mbrf+uGzsYXgVaoqn42YIQp5btI6tUz09R6EzFNh+u2JA6bIJnW+BN6daiCSdYsi1V2id8hAH6yoaArIW3+dBujJs2bW9V1SXWWxhzj8ZtQwAFbgNUu1fIAHnlQp5k0gUCcq+hf9eHfJ+Mtag5TxPYzVFEYE+EHJeVBuzzEq5hOutrFCnpqDcFXAYkwDt5fUA8TA2I1/ATHpTteYjoqgd03td2uOxH+5c+pVuF+sGgZ+N2ZzReqy/HVzpIg6AEjmT3ImdMIJWEhAl4MDO1M4Z3OIUFO5VKSZSByhB/YqmI8E4w==", keyid="root", alg="rsa-v1_5-sha256"
-
-{"type":"rollBackToEmbedded","parameters":{"commitTime":"2026-11-19T08:09:10.123Z"}}
---tide_fixture_second--

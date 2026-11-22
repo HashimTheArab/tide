@@ -35,19 +35,16 @@ export interface Entry {
   readonly sides: readonly Side[];
 }
 
-/**
- * One readable record: a version-1 or version-2 record's one entry, or a version-3 record's entries by keyid, in keyid
- * order. Otherwise why it cannot be served; every reason is fixed text, never stored data.
- */
-export type Verdict =
-  | { readonly layout: "legacy"; readonly entry: Entry }
-  | { readonly layout: "identities"; readonly entries: ReadonlyMap<string, Entry> }
-  | string;
+/** A readable `reply/no-update`: its version and its entries by the keyid each is signed under, in keyid order. */
+export interface NoUpdateRecord {
+  readonly version: 1 | 3;
+  readonly entries: ReadonlyMap<string, Entry>;
+}
 
 /**
- * Prints one line per pointer under `reply/`, and per keyid in a version-3 pointer, and whether `reply/no-update`
- * exists, reading each record's signed parts as stored. Returns 1 when any listed record is unreadable, else 0; a
- * listing failure rejects.
+ * Prints one line per pointer under `reply/` and whether `reply/no-update` exists, per keyid when it is version 3,
+ * reading each record's signed parts as stored. Returns 1 when any listed record is unreadable, else 0; a listing
+ * failure rejects.
  */
 export async function status(
   bucket: Bucket,
@@ -64,25 +61,25 @@ export async function status(
       continue;
     }
     const { key } = entry;
-    const verdict = (await readRecord(bucket, key)) ?? "absent when read";
+    const isNoUpdate = key === NO_UPDATE_KEY;
+    const verdict =
+      (isNoUpdate
+        ? await readRecord(bucket, key, checkNoUpdate)
+        : await readRecord(bucket, key, (bytes) => checkPointer(key, bytes))) ?? "absent when read";
     if (typeof verdict === "string") {
       err(`${key}: unreadable: ${verdict}`);
       unreadable = true;
-      if (key === NO_UPDATE_KEY) noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
-    } else if (key === NO_UPDATE_KEY) {
+      if (isNoUpdate) noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
+    } else if ("version" in verdict) {
       noUpdate =
-        verdict.layout === "legacy"
+        verdict.version === 1
           ? [`${NO_UPDATE_KEY}: present`]
           : [...verdict.entries.keys()].map(
               (k) => `${NO_UPDATE_KEY} keyid ${JSON.stringify(k)}: present`,
             );
     } else {
       const [, channel, runtime, platform] = key.split("/");
-      const columns = `${channel} ${runtime} ${platform}`;
-      if (verdict.layout === "legacy") out(`${columns} ${row(verdict.entry)}`);
-      else
-        for (const [k, e] of verdict.entries)
-          out(`${columns} keyid ${JSON.stringify(k)} ${row(e)}`);
+      out(`${channel} ${runtime} ${platform} ${row(verdict)}`);
     }
   }
   for (const line of noUpdate) out(line);
@@ -98,8 +95,15 @@ function row({ reply, sides }: Entry): string {
   return `rollout ${reply.percent} new ${reply.new.updateId} ${first?.time} earlier ${side(earlier)}`;
 }
 
-/** Reads and checks the record at `key`; undefined when absent. */
-export async function readRecord(bucket: Bucket, key: string): Promise<Verdict | undefined> {
+/**
+ * Reads the record at `key` and returns what `check` makes of it: every reason is fixed text, never stored data.
+ * Undefined when absent.
+ */
+export async function readRecord<T>(
+  bucket: Bucket,
+  key: string,
+  check: (bytes: Uint8Array) => T | string,
+): Promise<T | string | undefined> {
   let bytes;
   try {
     bytes = (await bucket.get(key, MAX_IDENTITIES_BYTES))?.bytes;
@@ -107,42 +111,47 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
     // The listing succeeded, so one failed read is this record's problem; later records are still read.
     return e instanceof BucketError ? e.message : "read failed";
   }
-  return bytes === undefined ? undefined : checkRecord(key, bytes);
+  return bytes === undefined ? undefined : check(bytes);
 }
 
-/**
- * Checks the bytes stored at `key` the way a signing client would receive them; a rollout checks both sides. Every
- * side of a version-3 entry must be signed under that entry's keyid.
- */
-export function checkRecord(key: string, bytes: Uint8Array): Verdict {
-  const decoded = decode(key, bytes);
-  if (decoded === undefined) return "not a stored reply";
+/** Checks a pointer's bytes the way a signing client would receive them; a rollout checks both sides. */
+export function checkPointer(key: string, bytes: Uint8Array): Entry | string {
+  let decoded;
+  try {
+    decoded = decodePointer(bytes);
+  } catch {
+    return "not a stored reply";
+  }
+  return checkEntry(key, decoded);
+}
+
+/** Checks `reply/no-update`'s bytes; every side of a version-3 entry must be signed under that entry's keyid. */
+export function checkNoUpdate(bytes: Uint8Array): NoUpdateRecord | string {
+  let decoded;
+  try {
+    // Version 1 first, so a misplaced reply keeps its reason.
+    decoded = decodeStoredReply(bytes);
+  } catch {
+    try {
+      decoded = decodeNoUpdate(bytes);
+    } catch {
+      return "not a stored reply";
+    }
+  }
   if (decoded.kind !== "identities") {
-    const entry = checkEntry(key, decoded);
-    return typeof entry === "string" ? entry : { layout: "legacy", entry };
+    const side = checkSide(NO_UPDATE_KEY, decoded);
+    if (typeof side === "string") return side;
+    const entry = { reply: decoded, time: side.time, sides: [side] };
+    return { version: 1, entries: new Map([[side.keyId, entry]]) };
   }
   const entries = new Map<string, Entry>();
   for (const [keyId, reply] of decoded.entries) {
-    const entry = checkEntry(key, reply);
+    const entry = checkEntry(NO_UPDATE_KEY, reply);
     if (typeof entry === "string") return `an entry's ${entry}`;
     if (entry.sides.some((s) => s.keyId !== keyId)) return "an entry is signed under another keyid";
     entries.set(keyId, entry);
   }
-  return { layout: "identities", entries };
-}
-
-/** Decodes a record of `key`'s kind, or undefined. Version 1 first at `reply/no-update`, so a misplaced reply keeps its reason. */
-function decode(key: string, bytes: Uint8Array) {
-  try {
-    if (key !== NO_UPDATE_KEY) return decodePointer(bytes);
-    try {
-      return decodeStoredReply(bytes);
-    } catch {
-      return decodeNoUpdate(bytes);
-    }
-  } catch {
-    return undefined;
-  }
+  return { version: 3, entries };
 }
 
 /** Checks one identity's reply or rollout at `key`. */
