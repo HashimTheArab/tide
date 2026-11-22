@@ -985,6 +985,24 @@ describe("lifetimes", () => {
 });
 
 describe("chain forms and KMS", () => {
+  const BARE_VALIDITY = { notBefore: new Date(AT - DAY_MS), notAfter: new Date(AT + DAY_MS) };
+  const BARE_LEAF_ARGS = ["--common-name", "Tide Leaf", "--validity-days", "1"];
+  const signer = (key: KeyObject) => async (tbs: Uint8Array<ArrayBuffer>) =>
+    new Uint8Array(await crypto.subtle.sign(RSA, cryptoKey(key, "sign"), tbs));
+  /** A root for `key` whose SPKI omits the NULL parameters, an encoding Web Crypto also imports. */
+  const bareRoot = (key: KeyObject) => {
+    const der = spkiOf(key);
+    const [, bitString] = children(der, readTlv(der, 0, der.length));
+    const spki = derTlv(
+      0x30,
+      derTlv(0x30, derOid("1.2.840.113549.1.1.1")),
+      der.subarray(bitString!.start, bitString!.end),
+    );
+    return signedCertificate(
+      { spki, commonName: "Bare Root", ...BARE_VALIDITY, ca: {} },
+      signer(key),
+    );
+  };
   const SUBJECT_IS_CA =
     "--subject-key is the key of a certificate in --issuer: give a key of its own";
   const rootEnv = () => SOURCES.TIDE_SIGNING_KEY!(2048);
@@ -1106,39 +1124,18 @@ describe("chain forms and KMS", () => {
     [
       "a leaf for the key of a root above its issuer that encodes it without NULL parameters",
       async () => {
-        const der = spkiOf(keys[3072]);
-        const [, bitString] = children(der, readTlv(der, 0, der.length));
-        const bare = derTlv(
-          0x30,
-          derTlv(0x30, derOid("1.2.840.113549.1.1.1")),
-          der.subarray(bitString!.start, bitString!.end),
-        );
-        const fields = { notBefore: new Date(AT - DAY_MS), notAfter: new Date(AT + DAY_MS) };
-        const signer = (key: KeyObject) => async (tbs: Uint8Array) =>
-          new Uint8Array(await crypto.subtle.sign(RSA, cryptoKey(key, "sign"), tbs));
-        const root = await signedCertificate(
-          { spki: bare, commonName: "Bare Root", ...fields, ca: {} },
-          signer(keys[3072]),
-        );
+        const root = await bareRoot(keys[3072]);
         const intermediate = await signedCertificate(
           {
             spki: spkiOf(keys[2048]),
             commonName: "Tide Intermediate CA",
-            ...fields,
-            issuer: derTlv(
-              0x30,
-              derTlv(0x31, derTlv(0x30, derOid("2.5.4.3"), derTlv(0x0c, Buffer.from("Bare Root")))),
-            ),
+            ...BARE_VALIDITY,
+            issuer: fields(root).bytes(fields(root).subject),
             ca: {},
           },
           signer(keys[3072]),
         );
-        return issuedArgs(intermediate + root, keys[3072], [
-          "--common-name",
-          "Tide Leaf",
-          "--validity-days",
-          "1",
-        ]);
+        return issuedArgs(intermediate + root, keys[3072], BARE_LEAF_ARGS);
       },
       SUBJECT_IS_CA,
     ],
@@ -1146,6 +1143,14 @@ describe("chain forms and KMS", () => {
     const before = kms.received.length;
     expectRefused(await chainIssue(kmsEnv(), await args()), message);
     expect(kms.received.length).toBe(before);
+  });
+
+  test("an --issuer that encodes the source's key without NULL parameters issues a leaf", async () => {
+    const root = await bareRoot(keys[2048]);
+    const leaf = expectIssued(
+      await chainIssue(kmsEnv(), issuedArgs(root, keys[3072], BARE_LEAF_ARGS)),
+    );
+    await expect(certificateChain(ascii(leaf), root, new Date(AT))).resolves.toBeDefined();
   });
 
   test("an --issuer whose key is not the source's is refused after GetPublicKey only", async () => {

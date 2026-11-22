@@ -576,9 +576,9 @@ bucket and no project code, and it opens no file for writing.
   - Issued forms, before any key source call: both files parse, and the issuer path passes the client's chain rules
     as a CA path (`issuerPath`): at most 8 certificates, at most 32 KiB below the root, every member valid, linked
     and a CA with `keyCertSign`, and path lengths leaving room for the issuing certificate. `--subject-key` must
-    differ from every key on the path, compared as keys rather than encodings, so a leaf never carries a CA's key.
-    Then the issuing certificate's key must be the source's, and the new certificate must not expire after any
-    certificate on the path.
+    differ from every key on the path, so a leaf never carries a CA's key. Then the issuing certificate's key must
+    be the source's, and the new certificate must not expire after any certificate on the path. Keys compare as
+    Web Crypto re-exports them, so another encoding of one key still matches.
   - After signing: a root or an intermediate, followed by its `--issuer`, passes `issuerPath` as the next
     `--issuer`; a leaf passes `certificateChain`, the client's chain-mode check, as the served part
     `leaf + intermediates` over the root. The link or root self-signature proves `Sign` and `GetPublicKey` agree,

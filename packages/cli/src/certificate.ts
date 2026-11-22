@@ -97,7 +97,7 @@ async function chained(
   const source = signingKey(env, kmsTimeoutMs);
   const spki = await source.publicKey();
   if (issued !== undefined) {
-    if (!sameBytes(issued.path.spkis[0], spki)) {
+    if (!sameBytes(issued.issuerKey, spki)) {
       throw new KeyError("the --issuer certificate's public key is not the signing key's");
     }
     if (notAfter.getTime() > issued.path.notAfter) {
@@ -142,13 +142,22 @@ async function issuedInputs({ path, subjectKey }: Issuer, date: Date) {
     (e) => `--issuer: ${e.message.slice(e.field.length + 1)}`,
   );
   const subject = await subjectPublicKey(keyBytes);
+  const [first, ...above] = parsedPath.spkis;
+  const issuerKey = await canonicalSpki(first);
+  const caKeys = [issuerKey, ...(await Promise.all(above.map(canonicalSpki)))];
   // A CA's key as the subject would hand its signing authority to whoever holds the new certificate's key.
-  if (parsedPath.spkis.some((ca) => sameBytes(ca, subject))) {
+  if (caKeys.some((ca) => sameBytes(ca, subject))) {
     throw new KeyError(
       "--subject-key is the key of a certificate in --issuer: give a key of its own",
     );
   }
-  return { bytes, path: parsedPath, subjectKey: subject };
+  return { bytes, path: parsedPath, issuerKey, subjectKey: subject };
+}
+
+/** Returns the RSA key in `spki`, which `issuerPath` has imported, as Web Crypto encodes it. */
+async function canonicalSpki(spki: Uint8Array): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey("spki", spki.slice(), RSA, true, ["verify"]);
+  return new Uint8Array(await crypto.subtle.exportKey("spki", key));
 }
 
 /** Returns what `check` resolves to, reporting a protocol refusal as `message` says. */
