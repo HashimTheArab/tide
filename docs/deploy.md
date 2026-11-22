@@ -281,6 +281,8 @@ Export and publish each platform on its own: a based export takes one `--platfor
   and that base's strings in the update.
 - Export refuses a missing base, a file that is not Hermes bytecode, and a base of another bytecode version than the
   app's hermesc, before running Expo. It runs on macOS and Linux.
+- It compiles with the app's hermesc from react-native and hermes-compiler, so it refuses `--pass-env
+  REACT_NATIVE_OVERRIDE_HERMES_DIR`.
 
 ### Staged rollouts
 

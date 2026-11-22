@@ -595,20 +595,6 @@ describe("--base-bytecode", () => {
   });
 
   const BASED = (base: string) => ["--platform", "android", "--base-bytecode", `android=${base}`];
-  test("a hermesc selected with --pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR is the one checked and wrapped", async () => {
-    const { app, hermes } = hermesProject();
-    const selected = installFakeHermes(app.root, "override");
-    const result = await exportIn(
-      app.root,
-      ["--pass-env", "REACT_NATIVE_OVERRIDE_HERMES_DIR", ...BASED(file(EMBEDDED))],
-      // Relative, as Expo reads it: against the project directory.
-      { ...PATH, REACT_NATIVE_OVERRIDE_HERMES_DIR: "hermes-override" },
-    );
-    expect(result).toMatchObject({ code: 0, err: [] });
-    expect(read(result.dir, BUNDLE)).toEqual(fakeHbc(js("android", "one"), EMBEDDED));
-    expect(selected().map((r) => r.args)).toEqual([["-version"], DELTA_COMPILE]);
-    expect(hermes()).toEqual([]);
-  });
 
   const ONE_PLATFORM =
     "--base-bytecode compiles one platform: give one base and one --platform, and export each platform on its own";
@@ -660,6 +646,11 @@ describe("--base-bytecode", () => {
     ],
     ["no file", () => ["--base-bytecode", "android="], "--base-bytecode must be <platform>=<file>"],
     ["no =", (b) => ["--base-bytecode", b], "--base-bytecode must be <platform>=<file>"],
+    [
+      "a caller's hermesc override",
+      (b) => ["--pass-env", "REACT_NATIVE_OVERRIDE_HERMES_DIR", "--base-bytecode", `android=${b}`],
+      "--base-bytecode compiles with the app's hermesc from react-native and hermes-compiler; drop --pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR",
+    ],
   ])("%s is refused before any child runs", async (_, args, message) => {
     const { app, hermes } = hermesProject();
     const result = await exportIn(

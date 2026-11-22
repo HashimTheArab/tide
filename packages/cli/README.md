@@ -23,7 +23,8 @@ every signature against your app's certificate, and writes to the bucket named b
 
 For smaller patches on Hermes apps, `tide export --platform android --base-bytecode android=<index.android.bundle>`
 compiles the update against the bundle inside your store build, the same file you give `tide register-build`. Export
-each platform on its own, and do this for every update of that runtime version
+each platform on its own, and do this for every update of that runtime version. It compiles with the app's hermesc
+from react-native and hermes-compiler, so it refuses `--pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR`
 ([publishing](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#delta-compiles)).
 
 ## Certificate

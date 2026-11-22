@@ -50,10 +50,17 @@ function bytecodeVersion(bytes: Uint8Array): number | undefined {
 export function readBase(
   values: readonly string[],
   platforms: readonly Platform[],
+  passEnv: readonly string[],
   cwd: string,
 ): Base | undefined {
   const [value] = values;
   if (value === undefined) return undefined;
+  // `--pass-env` is the only way a caller's override reaches Expo, which must find the wrapper.
+  if (passEnv.includes(OVERRIDE_VARIABLE)) {
+    throw new PublishError(
+      `--base-bytecode compiles with the app's hermesc from react-native and hermes-compiler; drop --pass-env ${OVERRIDE_VARIABLE}`,
+    );
+  }
   const at = value.indexOf("=");
   if (at === -1 || value.length === at + 1) {
     throw new PublishError("--base-bytecode must be <platform>=<file>");
@@ -80,16 +87,8 @@ export interface Compiler {
   readonly base: Base;
 }
 
-/**
- * Returns the hermesc Expo would run for the project (`exportHermes.js`), honouring a passed `override` directory as Expo
- * does, after checking that it writes the base's bytecode version.
- */
-export async function appHermesc(
-  projectRoot: string,
-  base: Base,
-  run: Runner,
-  override: string | undefined,
-): Promise<Compiler> {
+/** Returns the hermesc Expo would run for the project (`exportHermes.js`), after checking it writes the base's version. */
+export async function appHermesc(projectRoot: string, base: Base, run: Runner): Promise<Compiler> {
   const host = HOSTS[process.platform];
   if (host === undefined) {
     throw new PublishError(
@@ -106,8 +105,6 @@ export async function appHermesc(
   const rn = packageRoot(root, "react-native");
   const compiler = packageRoot(rn, "hermes-compiler");
   const hermesc = [
-    // Relative to Expo's working directory, the real project directory.
-    ...(override ? [resolve(root, `${override}/build/bin/hermesc`)] : []),
     join(rn, "ReactAndroid", "hermes-engine", "build", "hermes", "bin", "hermesc"),
     join(compiler, "hermesc", host, "hermesc"),
     join(rn, "sdks", "hermesc", host, "hermesc"),
