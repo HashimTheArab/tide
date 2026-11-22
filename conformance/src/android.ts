@@ -11,6 +11,7 @@ import {
   COMMAND_MS,
   INSTALL_MS,
   SHUTDOWN_MS,
+  ToolError,
   readReports,
   settles,
   tool,
@@ -19,6 +20,8 @@ import { hostEnv, tail } from "./stack.ts";
 
 // The tag React Native logs the app's console under.
 const JS_TAG = "ReactNativeJS";
+// adb's exit status when the device's connection drops under a running command.
+const DROPPED = 255;
 // adb finds emulators by themselves only on the even console ports 5554 to 5584.
 const FIRST_PORT = 5554;
 const LAST_PORT = 5584;
@@ -154,21 +157,33 @@ async function boot(
     }
   });
   const waiting = new AbortController();
-  const ready = tool(
-    adbPath,
-    [
-      ...["-s", serial, "wait-for-device", "shell"],
-      'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done',
-    ],
-    BOOT_MS,
-    waiting.signal,
-  );
+  const ready = waitBooted(adbPath, serial, waiting.signal);
   if (!(await Promise.race([ready.then(() => true), exited.then(() => false)]))) {
     waiting.abort();
     await ready.catch(() => undefined); // Reaps the wait, so nothing outlives the failed boot.
     throw new Error(`the emulator for ${name} exited while booting:\n${tail(logFile)}`);
   }
   return serial;
+}
+
+/**
+ * Resolves once `serial` reports boot completed, within `BOOT_MS`. A fresh AVD's first boot drops adb's connection
+ * once, ending the shell with adb's exit 255; the wait then starts again on the reconnected device.
+ */
+async function waitBooted(adbPath: string, serial: string, signal: AbortSignal): Promise<void> {
+  const deadline = Date.now() + BOOT_MS;
+  const args = [
+    ...["-s", serial, "wait-for-device", "shell"],
+    'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done',
+  ];
+  for (;;) {
+    try {
+      await tool(adbPath, args, Math.max(deadline - Date.now(), 1), signal);
+      return;
+    } catch (e) {
+      if (!(e instanceof ToolError) || e.exitCode !== DROPPED || Date.now() >= deadline) throw e;
+    }
+  }
 }
 
 /** Returns an even port in adb's emulator range whose console and adb ports are both free. */

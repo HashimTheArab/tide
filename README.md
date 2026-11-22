@@ -27,6 +27,8 @@ update in a single bucket and serves it from Cloudflare Workers or from a contai
   the store build, so even a fresh install's first update can download only what changed.
 - **Building and signing stay apart.** Only the build step runs your app's code, and it holds no secrets. The step
   that signs and uploads runs none of your code.
+- **Two runtime dependencies.** The server uses [Hono](https://hono.dev) and its Node adapter; the CLI and the
+  protocol package use none. Patching, compression, S3 signing and the AWS KMS client are built in.
 
 ## How it works
 
@@ -207,8 +209,9 @@ and exit codes.
 ## Status
 
 Pre-release. The server, the CLI, bundle diffing, the operations commands and the container image are built and
-covered by tests on both Workers and Node. Real `expo-updates` apps on an Android emulator check updates, patches
-and rollbacks against a local Tide (`pnpm conformance`, run separately from the gate). npm
+covered by tests on both Workers and Node. Real `expo-updates` apps check updates, patches and rollbacks against a
+local Tide (`pnpm conformance`, run separately from the gate): nightly on an Android emulator, and on an iOS simulator
+before each release. npm
 releases come later; [docs/roadmap.md](docs/roadmap.md) lists every phase and what remains.
 
 ## Development

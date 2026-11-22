@@ -35,8 +35,18 @@ holds.
 
 ## Conformance
 
-Real `expo-updates` clients (Android emulator nightly, iOS simulator before release) against a local Tide: update, no
-update, rollback, patch from an OTA update and from the embedded bundle, missing patch, corrupt patch.
+`pnpm conformance --platform android|ios` runs stock `expo-updates` release apps against a local Tide (the Node entry
+over a disk store) with a signing identity generated per run. The gate does not run it: it needs an emulator or
+simulator and a native build per version. `pnpm conformance --help` lists the options.
+
+- **Versions:** the oldest expo-updates line with bsdiff support (opt-in, which the app enables) and the latest
+  stable. `conformance/apps/sdk-<n>` pins each.
+- **Scenarios:** the embedded build gets no update; a first update downloads the full bundle because no patch exists;
+  a patch from the running OTA update; a tampered patch falls back to the full bundle; a rollback returns to the
+  embedded update; a patch from the embedded bundle.
+- **Android** runs nightly and on demand in `.github/workflows/conformance.yml`: one job per version on a hosted Linux
+  runner, with an AVD created in the run and a KVM-accelerated emulator. **iOS** runs on a Mac before each release
+  ([release checklist](release.md)).
 
 ## Packages
 
