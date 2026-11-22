@@ -52,7 +52,8 @@ simulator and a native build per version. `pnpm conformance --help` lists the op
 
 `pnpm test:pack` installs each packed tarball alone into a fresh npm project, with the `@tide-ota` registry
 unreachable, and runs the `tide` bin, the Node server and a TypeScript consumer from them, so an internal dependency a
-manifest leaves out fails the run. It runs as its own CI job.
+manifest leaves out fails the run. It runs as its own CI job, and the release workflow runs it on the exact
+tarballs it publishes.
 
 ## Reviewers reject
 

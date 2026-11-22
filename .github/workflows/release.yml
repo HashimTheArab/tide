@@ -1,0 +1,300 @@
+# Publishes the packages for a v<semver> tag on main. npm's trusted publishers name this file: keep the filename.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Explicit bash adds -o pipefail to every run script.
+defaults:
+  run:
+    shell: bash
+
+env:
+  FORCE_COLOR: 3
+  # Publish order: each package after the @tide-ota packages it depends on.
+  PACKAGES: protocol server cli
+
+jobs:
+  # Proves the tagged commit and packs the tarballs the later jobs publish and attach, byte for byte.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      dist-tag: ${{ steps.tag.outputs.dist-tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      node: ${{ steps.node.outputs.node }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # SemVer 2.0 without build metadata, which npm drops, within node-semver's length and integer limits.
+      - id: tag
+        name: Version from tag
+        run: |
+          node --input-type=module - <<'JS'
+          import { appendFileSync } from "node:fs";
+          const tag = process.env.GITHUB_REF_NAME ?? "";
+          const num = "(0|[1-9]\\d*)";
+          const id = "(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)";
+          const m = new RegExp(`^v${num}\\.${num}\\.${num}(-${id}(?:\\.${id})*)?$`).exec(tag);
+          const version = tag.slice(1);
+          if (!m || version.length > 256 || m.slice(1, 4).some((n) => Number(n) > Number.MAX_SAFE_INTEGER)) {
+            console.error(`::error::${tag} is not v<semver>`);
+            process.exit(1);
+          }
+          const prerelease = m[4] !== undefined;
+          appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `version=${version}\ndist-tag=${prerelease ? "next" : "latest"}\nprerelease=${prerelease}\n`,
+          );
+          JS
+
+      - id: main
+        name: Tagged commit is on main
+        run: |
+          if ! git rev-parse --verify -q refs/remotes/origin/main > /dev/null; then
+            echo "::error::origin/main was not fetched"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+
+      - id: node
+        name: Node version for publish
+        run: echo "node=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - id: setup
+        uses: ./.github/actions/setup
+
+      - id: betterleaks
+        uses: ./.github/actions/betterleaks
+
+      # Before the version write: the gate refuses a dirty tree.
+      - id: gate
+        name: Gate
+        run: |
+          status=0
+          node scripts/gate.mjs --base origin/main --out "$RUNNER_TEMP/gate.json" > /dev/null || status=$?
+          jq '{allChecksPassed, tests, checks: (.checks | map_values(.exitCode))}' "$RUNNER_TEMP/gate.json"
+          exit "$status"
+
+      # Inside the run only: the repository stays at 0.0.0 and nothing is committed.
+      - id: version
+        name: Write the version
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          for p in $PACKAGES; do
+            (cd "packages/$p" && npm pkg set "version=$VERSION")
+          done
+
+      # Fixed file names: a long version would otherwise exceed the file name limit.
+      - id: pack
+        name: Pack
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarballs"
+          for p in $PACKAGES; do
+            file="$RUNNER_TEMP/tarballs/tide-ota-$p.tgz"
+            pnpm -C "packages/$p" pack --out "$file"
+            tar -xzOf "$file" package/package.json | jq -e --arg v "$VERSION" \
+              '.version == $v and ([.dependencies // {} | to_entries[] | select(.key | startswith("@tide-ota/")) | .value] | all(. == $v))' > /dev/null \
+              || { echo "::error::$file does not carry $VERSION for itself and its @tide-ota dependencies"; exit 1; }
+          done
+
+      - id: test-pack
+        name: Packed-install test on the tarballs
+        run: pnpm test:pack "$RUNNER_TEMP"/tarballs/*.tgz
+
+      # Named per attempt: a full rerun uploads beside the earlier attempt's artifact instead of colliding with it.
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tarballs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+
+  # The only job that can mint an npm provenance token; it runs no repository code.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    # Runs for one dist-tag never interleave, so the three packages' tag always names one version.
+    concurrency:
+      group: release-publish-${{ needs.build.outputs.dist-tag }}
+      cancel-in-progress: false
+      queue: max
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+    steps:
+      # An empty ID makes the download take every artifact in the run.
+      - id: artifact-id
+        name: Build artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+        run: test -n "$ARTIFACT_ID"
+
+      # No registry input: setup-node would write an .npmrc that reads an npm token from the environment.
+      - id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ needs.build.outputs.node }}
+
+      - id: download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/tarballs
+          digest-mismatch: error
+
+      # Trusted publishing needs npm 11.5.1.
+      - id: npm-version
+        name: npm supports trusted publishing
+        run: |
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          const version = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
+          const [major, minor, patch] = version.split(".").map((n) => parseInt(n, 10));
+          if (!(major !== 11 ? major > 11 : minor !== 5 ? minor > 5 : patch >= 1)) {
+            console.error(`::error::npm ${version} is older than 11.5.1`);
+            process.exit(1);
+          }
+          JS
+
+      # Decides every package before publishing any. A version already on npm is skipped only when it holds these
+      # bytes, and only while its dist-tag still names this version: publishing the rest after a later release
+      # moved the tag would split it across versions.
+      - id: plan
+        name: Plan
+        run: |
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { appendFileSync, readFileSync } from "node:fs";
+          const { VERSION, DIST_TAG, PACKAGES, RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
+          const fail = (message) => {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          const registry = execFileSync("npm", ["config", "get", "registry"], { encoding: "utf8" }).trim().replace(/\/?$/, "/");
+          const publish = [];
+          const skipped = [];
+          for (const p of PACKAGES.split(" ")) {
+            const name = `@tide-ota/${p}`;
+            const tarball = readFileSync(`${RUNNER_TEMP}/tarballs/tide-ota-${p}.tgz`);
+            const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+            const res = await fetch(new URL(name.replace("/", "%2f"), registry), {
+              headers: { accept: "application/json" },
+            });
+            if (!res.ok) fail(`${name}: the registry answered ${res.status}`);
+            const doc = await res.json();
+            const existing = doc.versions?.[VERSION];
+            if (!existing) publish.push(p);
+            else if (existing.dist?.integrity !== integrity) fail(`${name}@${VERSION} is on npm with other bytes`);
+            else skipped.push([name, doc["dist-tags"]?.[DIST_TAG]]);
+          }
+          for (const [name, tagged] of skipped) {
+            if (publish.length > 0 && tagged !== VERSION)
+              fail(`${name}@${DIST_TAG} is ${tagged}, not ${VERSION}; publishing the rest would split the tag`);
+          }
+          console.log(`publish: ${publish.join(" ") || "nothing"}; already on npm: ${skipped.map(([n]) => n).join(" ") || "nothing"}`);
+          appendFileSync(GITHUB_OUTPUT, `publish=${publish.join(" ")}\n`);
+          JS
+
+      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere.
+      - id: publish
+        name: Publish
+        env:
+          PUBLISH: ${{ steps.plan.outputs.publish }}
+        run: |
+          for p in $PUBLISH; do
+            npm publish "$RUNNER_TEMP/tarballs/tide-ota-$p.tgz" --provenance --access public --tag "$DIST_TAG"
+          done
+
+  release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+    steps:
+      # An empty ID makes the download take every artifact in the run.
+      - id: artifact-id
+        name: Build artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+        run: test -n "$ARTIFACT_ID"
+
+      - id: download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/tarballs
+          digest-mismatch: error
+
+      # Rerunnable: keeps an asset holding the same bytes, replaces one an interrupted upload left empty, adds a
+      # missing one, and fails on different bytes before changing anything. Never --clobber: it deletes first.
+      - id: assets
+        name: GitHub Release
+        run: |
+          tag="$GITHUB_REF_NAME"
+          dir="$RUNNER_TEMP/tarballs"
+          releases=$(gh release list --limit 1000 --json tagName)
+          count=$(jq --arg t "$tag" 'map(select(.tagName == $t)) | length' <<< "$releases")
+          if [ "$count" -gt 1 ]; then
+            echo "::error::$count releases use $tag"
+            exit 1
+          fi
+          if [ "$count" -eq 0 ]; then
+            gh release create "$tag" --draft --verify-tag --generate-notes
+          fi
+          assets=$(gh release view "$tag" --json assets | jq -c .assets)
+          mkdir -p "$RUNNER_TEMP/existing"
+          upload=()
+          remove=()
+          for p in $PACKAGES; do
+            name="tide-ota-$p.tgz"
+            asset=$(jq -c --arg n "$name" 'map(select(.name == $n))[0] // empty' <<< "$assets")
+            if [ -z "$asset" ]; then
+              upload+=("$dir/$name")
+            elif [ "$(jq -r .state <<< "$asset")" != uploaded ]; then
+              remove+=("$(jq -r '.apiUrl | split("/") | last' <<< "$asset")")
+              upload+=("$dir/$name")
+            else
+              gh release download "$tag" --pattern "$name" --dir "$RUNNER_TEMP/existing"
+              if ! cmp -s "$dir/$name" "$RUNNER_TEMP/existing/$name"; then
+                echo "::error::$name on the release is not the published tarball"
+                exit 1
+              fi
+            fi
+          done
+          for id in "${remove[@]}"; do
+            gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"
+          done
+          if [ "${#upload[@]}" -gt 0 ]; then
+            gh release upload "$tag" "${upload[@]}"
+          fi
+          gh release edit "$tag" --draft=false --prerelease="$PRERELEASE"
