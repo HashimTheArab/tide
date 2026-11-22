@@ -21,6 +21,10 @@ CLI refuses to publish without a key. Without it, anyone who can write the bucke
   rollback is a new, newer publish, and a device must never be served an older reply whose filters its running
   update fails.
 - It verifies `expo-signature` over the exact bytes of the multipart part, and each asset's SHA-256.
+- In chain mode (`codeSigningIncludeManifestResponseCertificateChain`) it builds the chain from the reply's
+  `certificate_chain` part (leaf first) and the embedded certificate as root, checks every certificate's validity,
+  links and CA constraints, and ignores the signature's `keyid`. The protocol package's `certificateChain` mirrors
+  those rules, stricter where its comments say.
 - With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
   launch-asset request carries `A-IM: bsdiff`,
   `Expo-Current-Update-ID` (the running update, which can be the embedded one) and `Expo-Requested-Update-ID`.
