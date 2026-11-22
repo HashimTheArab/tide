@@ -2281,14 +2281,13 @@ describe("signedCertificate", () => {
   }) => {
     const keys = await mainKeys();
     const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey));
-    const notBefore = new Date(Math.floor(Date.now() / 1000) * 1000);
     const sign = async (tbs: Uint8Array<ArrayBuffer>) =>
       new Uint8Array(await crypto.subtle.sign(RSA_SHA256, keys.privateKey, tbs));
     return signedCertificate(
       {
         spki,
         commonName: "Tide test",
-        notBefore,
+        notBefore: CHAIN_VALIDITY.notBefore,
         notAfter: fields.notAfter ?? new Date("2049-12-31T23:59:59Z"),
         issuer: fields.issuer,
         ca: fields.ca,
@@ -2302,7 +2301,7 @@ describe("signedCertificate", () => {
     ["a 2050 notAfter as GeneralizedTime", new Date("2050-01-01T00:00:00Z"), 0x18],
   ])("its output passes codeSigningCertificate, with %s", async (_, notAfter, tag) => {
     const pemText = await issue({ notAfter });
-    const { key } = await codeSigningCertificate(pemText, new Date());
+    const { key } = await codeSigningCertificate(pemText, CHAIN_NOW);
     const keys = await mainKeys();
     const sig = await crypto.subtle.sign(RSA_SHA256, keys.privateKey, ascii("probe"));
     expect(await crypto.subtle.verify(RSA_SHA256, key, sig, ascii("probe"))).toBe(true);
@@ -2323,7 +2322,7 @@ describe("signedCertificate", () => {
     async (_, ca, basic) => {
       const pemText = await issue({ ca });
       expect(tbsOf(pemText).extensions).toEqual([basic.replace(" ", ""), CA_KEY_USAGE]);
-      await expect(issuerPath(ascii(pemText), new Date())).resolves.toBeDefined();
+      await expect(issuerPath(ascii(pemText), CHAIN_NOW)).resolves.toBeDefined();
     },
   );
 
