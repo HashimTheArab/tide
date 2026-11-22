@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -707,26 +708,94 @@ describe("checking a release", () => {
   });
 
   // Anything npm fetched beyond the checked tarballs would run unverified with the signing key.
-  test("the writer installs only the tarballs it checked, offline", () => {
+  test("every documented install takes only the tarballs it checked, offline", () => {
     const installs = commands("docs/deploy.md", "npm install --prefix");
-    expect(installs).toEqual([
-      expect.stringMatching(
+    expect(installs.length).toBeGreaterThan(0);
+    for (const install of installs)
+      expect(install).toMatch(
         /--offline .*\.\/tide-ota-cli-\S+\.tgz \.\/tide-ota-protocol-\S+\.tgz$/,
-      ),
-    ]);
+      );
   });
 
   // The certificate step holds the signing key or a kms:Sign session, so the app checkout must not pick the executable.
-  test("the deploy guide runs tide certificate from the checked install, outside the app checkout", () => {
-    const runs = read("docs/deploy.md")
-      .replaceAll(/\s*\\\n\s*/g, " ")
-      .split("\n")
-      .filter((line) => /\btide certificate --/.test(line));
-    expect(runs.length).toBeGreaterThan(0);
-    for (const run of runs)
-      expect(run).toMatch(
-        /^\s*(\w+=\S+ )*~\/tide-cli\/node_modules\/\.bin\/tide certificate .* > ~\/tide-signing\//,
+  test("no doc runs tide certificate from the app checkout", () => {
+    for (const doc of ["docs/deploy.md", "docs/design.md", "packages/cli/README.md"]) {
+      const text = read(doc).replaceAll(/\s*\\\n\s*/g, " ");
+      expect([doc, /npx\s+tide\s+certificate/.test(text)]).toEqual([doc, false]);
+      for (const run of text.split("\n").filter((l) => /\btide certificate --.* > /.test(l)))
+        expect([doc, run]).toEqual([
+          doc,
+          expect.stringMatching(
+            /^\s*(\w+=\S+ )*~\/tide-cli\/node_modules\/\.bin\/tide certificate .* > ~\/tide-signing\//,
+          ),
+        ]);
+    }
+  });
+
+  describe("the certificate step, pasted into a shell that does not stop on errors", () => {
+    const section = read("docs/deploy.md")
+      .split("- **`tide certificate`**")[1]!
+      .split("- **`expo-updates")[0]!;
+    const blocks = [...section.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) =>
+      m[1]!.replaceAll(/^ {5}/gm, ""),
+    );
+    const FAKE_NPM = `#!/bin/sh
+echo "npm $*" >> "$HOME/calls"
+if [ "$1" = pack ]; then
+  p=\${4#@tide-ota/}; touch "tide-ota-\${p%@*}-0.1.0.tgz"
+fi
+`;
+    const FAKE_GH = `#!/bin/sh
+echo "gh $*" >> "$HOME/calls"
+case "$3" in *"$FAIL_VERIFY"*) exit 1 ;; esac
+`;
+    const FAKE_TIDE = `#!/bin/sh
+echo "tide $*" >> "$HOME/calls"
+echo "-----BEGIN CERTIFICATE-----"
+`;
+    // Plain sh without -e, as an operator's terminal runs a paste.
+    const paste = (dir: string, script: string, env: Record<string, string> = {}) =>
+      spawnSync("sh", ["-c", script], {
+        cwd: dir,
+        env: { PATH: `${join(dir, "bin")}:${process.env.PATH}`, HOME: dir, ...env },
+        encoding: "utf8",
+      });
+    const calls = (dir: string) =>
+      existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8") : "";
+    const fakes = () => {
+      const dir = scratch();
+      executable(join(dir, "bin/npm"), FAKE_NPM);
+      executable(join(dir, "bin/gh"), FAKE_GH);
+      return dir;
+    };
+
+    test("is an install block, then a certificate block", () => {
+      expect(blocks).toEqual([
+        expect.stringContaining("gh attestation verify"),
+        expect.stringContaining("tide certificate"),
+      ]);
+    });
+
+    for (const pkg of ["cli", "protocol"])
+      test(`a ${pkg} package that fails verification stops the install`, () => {
+        const dir = fakes();
+        const r = paste(dir, blocks[0]!, { FAIL_VERIFY: `tide-ota-${pkg}-` });
+        expect(calls(dir)).toContain(`gh attestation verify tide-ota-${pkg}-`);
+        expect(r.status).not.toBe(0);
+        expect(calls(dir)).not.toContain("npm install");
+      });
+
+    test("checked packages install, and the certificate lands in a directory that did not exist", () => {
+      const dir = fakes();
+      expect(paste(dir, blocks[0]!, { FAIL_VERIFY: "none" }).status).toBe(0);
+      expect(calls(dir)).toMatch(/npm install --prefix \S+\/tide-cli /);
+      mkdirSync(join(dir, "tide-cli/node_modules/.bin"), { recursive: true });
+      executable(join(dir, "tide-cli/node_modules/.bin/tide"), FAKE_TIDE);
+      expect(paste(dir, blocks[1]!).status).toBe(0);
+      expect(readFileSync(join(dir, "tide-signing/main/certificate.pem"), "utf8")).toBe(
+        "-----BEGIN CERTIFICATE-----\n",
       );
+    });
   });
 });
 

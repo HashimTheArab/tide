@@ -23,15 +23,12 @@ every signature against your app's certificate, and writes to the bucket named b
 
 ## Certificate
 
-Your app trusts one code-signing certificate. `tide certificate` makes it with the same signing key, so a key created
-inside AWS KMS never leaves it:
+Your app trusts one code-signing certificate. `tide certificate --common-name <name> --validity-years <n>` makes it
+with the same signing key, so a key created inside AWS KMS never leaves it. It reads only the signing key variables,
+prints the certificate on stdout and its SHA-256 on stderr, and writes no file itself.
 
-```sh
-npx tide certificate --common-name <name> --validity-years <n> > keys/certificate.pem
-```
-
-It reads only the signing key variables, prints the certificate on stdout and its SHA-256 on stderr, and writes no
-file itself.
+It holds your signing key, so never run it with your app's own `npx tide`. Install Tide outside your app and check it
+first, as in [Signing identity](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#setting-up-an-environment).
 
 ## Other commands
 

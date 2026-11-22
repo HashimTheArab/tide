@@ -64,13 +64,30 @@ Once per environment, in this order.
 
    - **`tide certificate`**, signed by the key the writers will use: a KMS key created in KMS (`design.md`, KMS
      provisioning) or a file key kept outside every checkout. It holds that key or a `kms:Sign` session, so never run
-     the app's own `npx tide`: install Tide into `~/tide-cli` with the writer job's checked commands (Publishing,
-     Trusted CLI), a fresh directory in place of `$RUNNER_TEMP/tide`, and run it outside the app checkout. With that
-     source's variables set; for KMS, also `TIDE_KMS_ACCESS_KEY_ID`, `TIDE_KMS_SECRET_ACCESS_KEY` and
-     `TIDE_KMS_SESSION_TOKEN` from a session allowed `kms:GetPublicKey` and `kms:Sign`. Then copy only the printed
-     certificate into the app:
+     the app's own `npx tide`. Install Tide into fresh directories outside the app checkout with the writer job's
+     checks (Publishing, Trusted CLI). The subshell stops at the first failure, so npm installs nothing that failed
+     verification:
 
      ```sh
+     (
+       set -e
+       mkdir ~/tide-pkgs ~/tide-cli && cd ~/tide-pkgs
+       for p in cli protocol; do
+         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
+         gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+           --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+       done
+       npm install --prefix ~/tide-cli --offline --ignore-scripts --no-fund \
+         ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+     )
+     ```
+
+     Then run it outside the app checkout with that source's variables set; for KMS, also `TIDE_KMS_ACCESS_KEY_ID`,
+     `TIDE_KMS_SECRET_ACCESS_KEY` and `TIDE_KMS_SESSION_TOKEN` from a session allowed `kms:GetPublicKey` and
+     `kms:Sign`. Copy only the printed certificate into the app:
+
+     ```sh
+     mkdir -p ~/tide-signing/main
      TIDE_KMS_KEY_ID=alias/tide-main TIDE_KMS_REGION=us-east-1 \
        ~/tide-cli/node_modules/.bin/tide certificate --common-name "Example App" --validity-years 10 \
        > ~/tide-signing/main/certificate.pem

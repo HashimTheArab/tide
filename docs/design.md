@@ -467,7 +467,8 @@ the key-source variables: no build pins, no bucket and no project code, and it o
 - **Checks, before any output.** The PEM passes the certificate profile (Keys), its public key is the source's, and
   `tide signing probe` signed by the source verifies under it, so a KMS key whose `Sign` and `GetPublicKey` disagree
   is refused.
-- **Output.** stdout is exactly the PEM, one block of 64-column lines; redirect it where the app config reads it.
+- **Output.** stdout is exactly the PEM, one block of 64-column lines; redirect it to a file outside the app
+  checkout, then copy it into the app (`deploy.md`, Signing identity).
   stderr is `tide: certificate DER SHA-256 <hex>`, the fingerprint the identity check compares. Exit 0, or 2 on any
   refusal with nothing on stdout. No message carries a key, credential or provider text.
 
