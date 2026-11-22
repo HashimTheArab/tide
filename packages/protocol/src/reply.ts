@@ -65,11 +65,9 @@ export const MAX_IDENTITIES = 16;
 export const MAX_KEYID_BYTES = 4 * 1024;
 /**
  * The largest version-3 record at its padded size. The margin over `MAX_REPLY_BYTES` lets every valid version-1 or
- * version-2 record become a one-entry record under any keyid.
+ * version-2 record become a one-entry record under any keyid. No served body is longer than the record holding it.
  */
 export const MAX_IDENTITIES_BYTES = MAX_REPLY_BYTES + 2 * MAX_KEYID_BYTES;
-/** The largest multipart body the server serves: a body is never longer than the record that carries it. */
-export const MAX_REPLY_BODY_BYTES = MAX_IDENTITIES_BYTES;
 
 const VERSION = 1;
 const ROLLOUT_VERSION = 2;
