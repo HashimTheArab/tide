@@ -3253,7 +3253,7 @@ describe("rollout record", () => {
     ],
     [
       "a record one byte over the limit",
-      () => new Uint8Array(MAX_REPLY_BYTES + 1),
+      () => utf8(`${text(encodeRollout(rolloutOfSize(MAX_REPLY_BYTES)))} `),
       "record",
       "is too large",
     ],
@@ -3465,7 +3465,7 @@ describe("version-3 record", () => {
       M,
       () => record(M, (o) => (o.version = (delete o.version, 3))),
       "record",
-      "must be exactly what encodeIdentityPointer writes",
+      "must be exactly what encode writes",
     ],
     [
       "swapped entry keys",
@@ -3494,7 +3494,7 @@ describe("version-3 record", () => {
       R,
       replaceText(R, '"percent":12.5', '"percent":12.50'),
       "record",
-      "must be exactly what encodeIdentityPointer writes",
+      "must be exactly what encode writes",
     ],
     [
       "unsorted keyids",
@@ -3551,8 +3551,8 @@ describe("version-3 record", () => {
       "an unknown top-level field",
       M,
       () => record(M, (o) => (o.extra = 1)),
-      "extra",
-      "is not a field of a version-3 record",
+      "record",
+      "must be exactly",
     ],
     [
       "a missing identities",
@@ -3586,8 +3586,8 @@ describe("version-3 record", () => {
       "a version in an entry",
       M,
       () => record(M, (o) => (o.identities[0]!.version = 1)),
-      "identities[0].version",
-      "is not a field of an entry",
+      "record",
+      "must be exactly",
     ],
     [
       "identities as an object",
@@ -3626,8 +3626,8 @@ describe("version-3 record", () => {
       "an unknown rollout field",
       R,
       () => record(R, (o) => (o.identities[0]!.extra = 1)),
-      "identities[0].extra",
-      "is not a field of a rollout entry",
+      "record",
+      "must be exactly",
     ],
     [
       "a rollout percent of 12.345",
@@ -3841,13 +3841,13 @@ describe("version-3 record", () => {
       await rejects(() => decodePointer(over), "record", `over ${MAX_IDENTITIES_BYTES} bytes`);
     });
 
-    test("input over 2 MiB is refused before parsing unless it starts as a version-3 encoder writes", async () => {
+    test("only version 3 may pass 2 MiB, and nothing passes the version-3 limit", async () => {
       const v1 = encodeStoredReply(sized(v1Manifest, MAX_REPLY_BYTES, encodeStoredReply));
       const cases: [Uint8Array, number][] = [
-        [new Uint8Array(MAX_REPLY_BYTES + 1), MAX_REPLY_BYTES],
         [utf8(`${text(v1)} `), MAX_REPLY_BYTES],
         // A repeated version: parsed as version 1, then held to the version-1 limit.
         [utf8(text(v1).replace('{"version":1,', '{"version":3,"version":1,')), MAX_REPLY_BYTES],
+        [new Uint8Array(MAX_IDENTITIES_BYTES + 1), MAX_IDENTITIES_BYTES],
         [utf8(`{"version":3,${" ".repeat(MAX_IDENTITIES_BYTES)}`), MAX_IDENTITIES_BYTES],
       ];
       for (const [bytes, limit] of cases) {

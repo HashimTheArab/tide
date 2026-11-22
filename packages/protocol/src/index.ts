@@ -12,15 +12,7 @@ export { HEADER_VALUE, encodeMultipart, parseMultipart } from "./multipart.ts";
 export { bzip2CrcStep } from "./bzip2.ts";
 export type { BaseAsset, BaseRecord } from "./patch.ts";
 export { MAX_BASE_BYTES, applyBsdiff, decodeBaseRecord, encodeBaseRecord } from "./patch.ts";
-export type {
-  Identities,
-  ManifestReply,
-  NoUpdateReply,
-  PointerEntry,
-  RollbackReply,
-  Rollout,
-  StoredReply,
-} from "./reply.ts";
+export type { Identities, NoUpdateReply, PointerEntry, Rollout, StoredReply } from "./reply.ts";
 export {
   CONTENT_KEY,
   MAX_FILTERS_BYTES,

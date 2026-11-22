@@ -72,13 +72,10 @@ export const MAX_IDENTITIES_BYTES = MAX_REPLY_BYTES + 2 * MAX_KEYID_BYTES;
 const VERSION = 1;
 const ROLLOUT_VERSION = 2;
 const IDENTITIES_VERSION = 3;
-// What a version-3 encoder writes first; only input that starts so may pass MAX_REPLY_BYTES before parsing.
-const IDENTITIES_PREFIX = new TextEncoder().encode(`{"version":${IDENTITIES_VERSION},`);
 const LONGEST_PERCENT = 5; // "12.34": no k/100 from 0 to 100 is spelled longer.
 const KEYID = /^[\x20-\x7E]+$/;
 const POINTER_KINDS = ["manifest", "rollBackToEmbedded", "rollout"];
 const NO_UPDATE_KINDS = ["noUpdateAvailable"];
-const ROLLOUT_FIELDS = ["keyid", "kind", "percent", "new", "earlier"];
 const BUCKETS = 10_000; // One per 0.01 percentage point.
 // Fields each kind's record may hold; a directive has no update ID or filters.
 const RECORD_FIELDS: Record<Kind, readonly string[]> = {
@@ -143,19 +140,18 @@ export function encodeIdentityNoUpdate(
 
 /** Returns what a pointer key holds: a version-1 reply, a version-2 rollout or a version-3 record. */
 export function decodePointer(bytes: Uint8Array): StoredReply | Rollout | Identities<PointerEntry> {
-  const { record, text, version } = parseRecord(bytes, true);
+  const { record, text, version } = parseRecord(bytes, MAX_IDENTITIES_BYTES);
   if (version === VERSION) return readReply(record);
   if (version === ROLLOUT_VERSION) return readRollout(record, text);
   if (version === IDENTITIES_VERSION) {
-    const read = readIdentities(record, text, bytes.length, POINTER_KINDS, "encodeIdentityPointer");
-    return read as Identities<PointerEntry>;
+    return readIdentities(record, text, bytes.length, POINTER_KINDS) as Identities<PointerEntry>;
   }
   throw new ProtocolError("version", "is not supported");
 }
 
 /** Returns what `reply/no-update` holds: a version-1 noUpdateAvailable reply or a version-3 record. */
 export function decodeNoUpdate(bytes: Uint8Array): NoUpdateReply | Identities<NoUpdateReply> {
-  const { record, text, version } = parseRecord(bytes, true);
+  const { record, text, version } = parseRecord(bytes, MAX_IDENTITIES_BYTES);
   if (version === VERSION) {
     const reply = readReply(record);
     if (reply.kind !== "noUpdateAvailable") {
@@ -164,14 +160,7 @@ export function decodeNoUpdate(bytes: Uint8Array): NoUpdateReply | Identities<No
     return reply;
   }
   if (version === IDENTITIES_VERSION) {
-    const read = readIdentities(
-      record,
-      text,
-      bytes.length,
-      NO_UPDATE_KINDS,
-      "encodeIdentityNoUpdate",
-    );
-    return read as Identities<NoUpdateReply>;
+    return readIdentities(record, text, bytes.length, NO_UPDATE_KINDS) as Identities<NoUpdateReply>;
   }
   throw new ProtocolError("version", "is not supported");
 }
@@ -324,21 +313,18 @@ function entryFields(map: ReadonlyMap<string, unknown>): Entry[] {
 }
 
 /**
- * Parses a record up to its version; every decoder starts here. With `identities`, input that starts as a version-3
- * encoder writes may reach `MAX_IDENTITIES_BYTES`; its padded size is checked once decoded.
+ * Parses a record of at most `limit` bytes up to its version; every decoder starts here. Only version 3 may pass
+ * `MAX_REPLY_BYTES`; its padded size is checked once decoded.
  */
 function parseRecord(
   bytes: Uint8Array,
-  identities = false,
+  limit = MAX_REPLY_BYTES,
 ): {
   record: Record<string, unknown>;
   text: string;
   version: number;
 } {
-  const v3 = identities && startsWith(bytes, IDENTITIES_PREFIX);
-  if (bytes.length > (v3 ? MAX_IDENTITIES_BYTES : MAX_REPLY_BYTES)) {
-    tooLarge(v3 ? MAX_IDENTITIES_BYTES : MAX_REPLY_BYTES);
-  }
+  if (bytes.length > limit) tooLarge(limit);
   let text: string;
   try {
     text = utf8.decode(bytes);
@@ -355,17 +341,12 @@ function parseRecord(
   // Version first, so a later layout is reported as unsupported rather than as malformed.
   const version = present(parsed, "version");
   if (!Number.isInteger(version)) throw new ProtocolError("version", "must be an integer");
-  // Only a repeated `version` key gets an earlier version here past the version-1 limit.
   if (version !== IDENTITIES_VERSION && bytes.length > MAX_REPLY_BYTES) tooLarge(MAX_REPLY_BYTES);
   return { record: parsed, text, version: version as number };
 }
 
 function tooLarge(limit: number): never {
   throw new ProtocolError("record", `is too large: over ${limit} bytes`);
-}
-
-function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
-  return bytes.length >= prefix.length && prefix.every((b, i) => bytes[i] === b);
 }
 
 /** Reads a version-1 reply, or a reply inside a rollout, whose exact-text check refuses a nested `version`. */
@@ -438,25 +419,19 @@ function readRolloutFields(r: Record<string, unknown>): [Rollout, Bodies] {
 }
 
 /**
- * Reads a version-3 record of `size` bytes whose entries each have one of `kinds`. It must be exactly what `encoder`
- * writes, and fit `MAX_IDENTITIES_BYTES` with each rollout's percent padded to its longest spelling, so a later
- * percent change never makes a stored record too large.
+ * Reads a version-3 record of `size` bytes whose entries each have one of `kinds`. It must be exactly what encode
+ * writes, which refuses any other key, and fit `MAX_IDENTITIES_BYTES` with each rollout's percent padded to its
+ * longest spelling, so a later percent change never makes a stored record too large.
  */
 function readIdentities(
   r: Record<string, unknown>,
   text: string,
   size: number,
   kinds: readonly string[],
-  encoder: string,
 ): Identities<PointerEntry | NoUpdateReply> {
   const list = present(r, "identities");
   if (!Array.isArray(list) || list.length === 0 || list.length > MAX_IDENTITIES) {
     throw new ProtocolError("identities", `must be an array of 1 to ${MAX_IDENTITIES} entries`);
-  }
-  for (const key of Object.keys(r)) {
-    if (key !== "version" && key !== "identities") {
-      throw new ProtocolError(key, "is not a field of a version-3 record");
-    }
   }
   const entries = new Map<string, PointerEntry | NoUpdateReply>();
   const written: Entry[] = [];
@@ -470,20 +445,12 @@ function readIdentities(
       if (previous !== undefined && keyid <= previous) {
         throw new ProtocolError("keyid", keyid === previous ? "is repeated" : "is out of order");
       }
-      if (Object.hasOwn(value, "version")) {
-        throw new ProtocolError("version", "is not a field of an entry");
-      }
       const { keyid: _, ...fields } = value;
       const kind = present(fields, "kind");
       if (typeof kind !== "string" || !kinds.includes(kind)) {
         throw new ProtocolError("kind", `must be ${kinds.join(" or ")}`);
       }
       if (kind === "rollout") {
-        for (const key of Object.keys(value)) {
-          if (!ROLLOUT_FIELDS.includes(key)) {
-            throw new ProtocolError(key, "is not a field of a rollout entry");
-          }
-        }
         const [rollout, bodies] = readRolloutFields(fields);
         padded += LONGEST_PERCENT - JSON.stringify(rollout.percent).length;
         entries.set(keyid, rollout);
@@ -500,7 +467,7 @@ function readIdentities(
   }
   // Refuses another key order, whitespace, escape or number spelling, and a repeated JSON key.
   if (serializeIdentities(written) !== text) {
-    throw new ProtocolError("record", `must be exactly what ${encoder} writes`);
+    throw new ProtocolError("record", "must be exactly what encode writes");
   }
   if (padded > MAX_IDENTITIES_BYTES) tooLarge(MAX_IDENTITIES_BYTES);
   return { kind: "identities", entries };

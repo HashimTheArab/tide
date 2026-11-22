@@ -358,7 +358,7 @@ describe("refusals", () => {
     [
       "an object keyid",
       () => ({ overrides: updates({ keyid: { nested: SENTINEL } }, "./keys/certificate.pem") }),
-      "app config updates.codeSigningMetadata.keyid must be printable ASCII",
+      "app config updates.codeSigningMetadata.keyid must be non-empty printable ASCII",
     ],
     [
       "an object alg",

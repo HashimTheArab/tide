@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import type { Signer } from "@tide-ota/protocol";
 import {
+  MAX_KEYID_BYTES,
   certificatePublicKey,
   cryptoKeySigner,
   decodeStoredReply,
@@ -394,7 +395,11 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   }),
   "an unprintable TIDE_BUILD_KEYID": () => ({
     env: { TIDE_BUILD_KEYID: "ma\u00efn" },
-    message: "TIDE_BUILD_KEYID must be printable ASCII",
+    message: "TIDE_BUILD_KEYID must be non-empty printable ASCII",
+  }),
+  "a TIDE_BUILD_KEYID no version-3 record could hold": () => ({
+    env: { TIDE_BUILD_KEYID: "a".repeat(MAX_KEYID_BYTES + 1) },
+    message: `TIDE_BUILD_KEYID is longer than ${MAX_KEYID_BYTES} bytes escaped`,
   }),
   "no build certificate": () => ({
     env: { TIDE_BUILD_CERTIFICATE: "" },

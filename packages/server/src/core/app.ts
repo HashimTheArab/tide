@@ -126,20 +126,15 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     let reply: StoredReply | undefined;
     let refusal: Refusal | undefined;
     let side: RolloutSide = "none";
-    // Read only for a version-3 record, at most once; once read, the reply depends on it.
-    const keyId: { read: boolean; value?: string | undefined } = { read: false };
-    const requestKeyId = () => {
-      if (!keyId.read) keyId.value = expectedKeyId(header("expo-expect-signature"));
-      keyId.read = true;
-      return keyId.value;
-    };
+    const keyId = expectedKeyId(header("expo-expect-signature"));
+    let byKeyId = false; // A version-3 record was read, so the reply depends on the keyid.
     try {
       const pointer = await readRecord(key, MAX_IDENTITIES_BYTES, decodePointer, signal);
       let entry: StoredReply | PointerEntry | undefined;
       if (pointer?.kind === "identities") {
-        const id = requestKeyId();
-        if (id === undefined) refusal = UNUSABLE_KEYID;
-        else entry = pointer.entries.get(id);
+        byKeyId = true;
+        if (keyId === undefined) refusal = UNUSABLE_KEYID;
+        else entry = pointer.entries.get(keyId);
       } else {
         entry = pointer;
       }
@@ -168,9 +163,9 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
         );
         if (noUpdate === undefined) throw new Error(`${NO_UPDATE_KEY} is missing`);
         if (noUpdate.kind === "identities") {
-          const id = requestKeyId();
-          reply = id === undefined ? undefined : noUpdate.entries.get(id);
-          if (reply === undefined) refusal = id === undefined ? UNUSABLE_KEYID : UNSIGNED_KEYID;
+          byKeyId = true;
+          reply = keyId === undefined ? undefined : noUpdate.entries.get(keyId);
+          if (reply === undefined) refusal = keyId === undefined ? UNUSABLE_KEYID : UNSIGNED_KEYID;
         } else if (pointer?.kind === "identities") {
           // Signed for one identity, and the server cannot tell which.
           throw new Error(`${NO_UPDATE_KEY} is version 1 under a version-3 pointer`);
@@ -201,7 +196,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
       "cache-control": "private, max-age=0",
     };
     // A private cache must not give one identity's reply to another.
-    if (keyId.read) headers.vary = "Expo-Expect-Signature";
+    if (byKeyId) headers.vary = "Expo-Expect-Signature";
     // Sent even when empty: a client keeps earlier filters when the header is absent.
     if (reply.kind === "manifest") headers["expo-manifest-filters"] = reply.manifestFilters;
     return new Response(reply.body, { headers });

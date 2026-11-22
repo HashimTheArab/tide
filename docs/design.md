@@ -149,18 +149,18 @@ version-2 rollout without `version`:
   `rollBackToEmbedded` or `rollout` (every version-2 rule applies); a `reply/no-update` entry is `noUpdateAvailable`.
 - A keyid is non-empty printable ASCII whose escaped length (each `"` and `\` counts twice, the same in JSON and in
   the RFC 8941 header string) is at most 16 KiB, Node's default request head limit. So every keyid a request can
-  carry to both runtimes fits, and protocol `checkKeyId` applies the one rule to records and requests alike.
+  carry to both runtimes fits, and protocol `checkKeyId` applies the one rule to records, requests and the keyids the
+  CLI accepts.
 - Size: at most 2 MiB plus 32 KiB, measured with each rollout's percent padded to its longest spelling (5
   characters), so a later percent change never makes a stored record too large. The margin lets any valid version-1
-  or version-2 record become a one-entry record under any keyid, body bytes unchanged. Input over 2 MiB is refused
-  before parsing unless it starts with `{"version":3,`.
+  or version-2 record become a one-entry record under any keyid, body bytes unchanged.
 - Decode refuses anything encode would not write byte for byte, as for version 2, naming the field where it can.
 
 Migration rules, for the writers:
 
 - A version-1 or version-2 record counts as the one identity its signatures carry. The server never reads that
   keyid and serves the record to every request, so buckets written before version 3 keep serving the same bytes.
-  A legacy keyid over 16 KiB keeps serving but cannot become an entry.
+  A legacy keyid over 16 KiB keeps serving, but the CLI refuses to publish under it.
 - Convert `reply/no-update` to version 3 first, then every pointer, each as one entry for the existing identity. Add
   an entry for a second identity only when no version-1 or version-2 record is left: a legacy pointer would serve the
   old identity's manifest to the new identity's builds.
@@ -389,7 +389,7 @@ same user, so no environment allowlist would protect a writer that ran Expo.
 against the caller's directory; `--out` must not exist. Platforms default to both. Exit 0, or 2 on any refusal or
 tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
 
-1. `expo config --json` gives `updates.codeSigningMetadata` (`keyid` required printable ASCII, `alg` absent or
+1. `expo config --json` gives `updates.codeSigningMetadata` (`keyid` required, as `checkKeyId` allows, `alg` absent or
    `rsa-v1_5-sha256`; only those two members are kept) and `updates.codeSigningCertificate` (relative to the project
    root, a regular file of at most 64 KiB, UTF-8, passing the certificate profile, so it holds one certificate and
    nothing else). `updates.codeSigningIncludeManifestResponseCertificateChain` (the input of the app's own config
@@ -685,7 +685,7 @@ Writers call only `Sign`; `tide certificate` also calls `GetPublicKey` on the sa
 **Build pins.** The checkout can drift from what installed builds embed, so every writer and `tide probe` take the
 identity from the store builds, read from a shipped binary rather than the checkout:
 
-- `TIDE_BUILD_KEYID`: the builds' `keyid`, printable ASCII. Expo's implicit `root` is never assumed.
+- `TIDE_BUILD_KEYID`: the builds' `keyid`, as `checkKeyId` allows. Expo's implicit `root` is never assumed.
 - `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN`: `true` for chain mode; `false`, unset or empty for direct, the client's
   default; anything else is refused.
 - Exactly one of `TIDE_BUILD_CERTIFICATE_FILE` (a path, a regular file of at most 64 KiB) and
@@ -702,9 +702,9 @@ well-formed Key Usage `digitalSignature`, Extended Key Usage `codeSigning`, no r
 project-information extension, and an RSA key of 2048 to 4096 bits. A renewed certificate does not pass while the
 builds hold an expired one.
 
-**Identity.** `publish` also refuses an export whose `codeSigningMetadata` (`keyid` printable ASCII, `alg` absent or
-`rsa-v1_5-sha256`) names another `keyid`, whose mode differs from the pin, or whose certificate is not the pinned one,
-compared by DER SHA-256.
+**Identity.** `publish` also refuses an export whose `codeSigningMetadata` (`keyid` as `checkKeyId` allows, `alg`
+absent or `rsa-v1_5-sha256`) names another `keyid`, whose mode differs from the pin, or whose certificate is not the
+pinned one, compared by DER SHA-256.
 `tide export` applies the same metadata rule and the profile before writing anything, so a malformed `keyid` or a
 file holding a key never reaches an export.
 
