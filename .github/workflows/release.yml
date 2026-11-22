@@ -127,6 +127,11 @@ jobs:
     timeout-minutes: 15
     permissions:
       id-token: write
+    # Runs for one dist-tag queue in order, so the check below and the publishes after it never interleave.
+    concurrency:
+      group: release-publish-${{ needs.build.outputs.dist-tag }}
+      cancel-in-progress: false
+      queue: max
     env:
       VERSION: ${{ needs.build.outputs.version }}
       DIST_TAG: ${{ needs.build.outputs.dist-tag }}
@@ -150,18 +155,57 @@ jobs:
         run: |
           printf '%s\n' 11.5.1 "$(npm --version)" | sort -VC || { echo "::error::npm $(npm --version) is older than 11.5.1"; exit 1; }
 
-      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere. A rerun skips what
-      # npm already holds; publishing over an existing version fails, so a failed lookup cannot skip one wrongly.
+      # Checks every package before publishing any. A version npm already holds is skipped only with these exact
+      # bytes, and none is published where the dist-tag already names a later version, which --tag would move back.
+      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere.
       - id: publish
         name: Publish
         run: |
-          for p in $PACKAGES; do
-            if npm view "@tide-ota/$p@$VERSION" version > /dev/null 2>&1; then
-              echo "@tide-ota/$p@$VERSION is already on npm"
-            else
-              npm publish "$RUNNER_TEMP/tarballs/tide-ota-$p.tgz" --provenance --access public --tag "$DIST_TAG"
-            fi
-          done
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          const { VERSION, DIST_TAG, PACKAGES, RUNNER_TEMP } = process.env;
+          const fail = (message) => {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          // SemVer precedence: a < b.
+          const parts = (v) => {
+            const [core, ...pre] = v.split("+")[0].split("-");
+            return [core.split(".").map(BigInt), pre.length ? pre.join("-").split(".") : []];
+          };
+          const precedes = (a, b) => {
+            const [[ac, ap], [bc, bp]] = [parts(a), parts(b)];
+            for (let i = 0; i < 3; i++) if (ac[i] !== bc[i]) return ac[i] < bc[i];
+            if (!ap.length || !bp.length) return ap.length > bp.length;
+            for (let i = 0; i < Math.min(ap.length, bp.length); i++) {
+              const [x, y] = [ap[i], bp[i]];
+              if (x === y) continue;
+              const [nx, ny] = [/^\d+$/.test(x), /^\d+$/.test(y)];
+              return nx && ny ? BigInt(x) < BigInt(y) : nx !== ny ? nx : x < y;
+            }
+            return ap.length < bp.length;
+          };
+          const registry = execFileSync("npm", ["config", "get", "registry"], { encoding: "utf8" }).trim().replace(/\/?$/, "/");
+          const planned = [];
+          for (const p of PACKAGES.split(" ")) {
+            const name = `@tide-ota/${p}`;
+            const file = `${RUNNER_TEMP}/tarballs/tide-ota-${p}.tgz`;
+            const integrity = `sha512-${createHash("sha512").update(readFileSync(file)).digest("base64")}`;
+            const res = await fetch(new URL(name.replace("/", "%2f"), registry), { headers: { accept: "application/json" } });
+            if (!res.ok) fail(`${name}: the registry answered ${res.status}`);
+            const doc = await res.json();
+            const existing = doc.versions?.[VERSION];
+            const tagged = doc["dist-tags"]?.[DIST_TAG];
+            if (existing?.dist?.integrity === integrity) console.log(`${name}@${VERSION} is already on npm`);
+            else if (existing) fail(`${name}@${VERSION} is on npm with other bytes`);
+            else if (tagged && precedes(VERSION, tagged)) fail(`${name}@${DIST_TAG} is ${tagged}, later than ${VERSION}`);
+            else planned.push(file);
+          }
+          for (const file of planned)
+            execFileSync("npm", ["publish", file, "--provenance", "--access", "public", "--tag", DIST_TAG], { stdio: "inherit" });
+          JS
 
   release:
     needs: [build, publish]
@@ -181,15 +225,28 @@ jobs:
           path: ${{ runner.temp }}/tarballs
           digest-mismatch: error
 
-      # Rerunnable: the artifact holds the published bytes, so replacing a same-named asset is always right.
+      # Rerunnable: keeps a finished asset with these bytes, fails on one with other bytes before changing anything,
+      # and uploads missing or unfinished ones. --clobber deletes before uploading, so it only meets unfinished ones.
       - id: assets
         name: GitHub Release
         run: |
           tag="$GITHUB_REF_NAME"
-          files=("$RUNNER_TEMP"/tarballs/*.tgz)
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
-          else
-            gh release create "$tag" "${files[@]}" --verify-tag --generate-notes --draft
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --generate-notes --draft
+          fi
+          attached=$(gh release view "$tag" --json assets)
+          upload=()
+          for f in "$RUNNER_TEMP"/tarballs/*.tgz; do
+            name=$(basename "$f")
+            digest="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            found=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | "\(.state) \(.digest)"' <<< "$attached")
+            case "$found" in
+              "uploaded $digest") echo "$name is already attached" ;;
+              uploaded\ *) echo "::error::$name is attached with other bytes"; exit 1 ;;
+              *) upload+=("$f") ;;
+            esac
+          done
+          if [ "${#upload[@]}" -gt 0 ]; then
+            gh release upload "$tag" "${upload[@]}" --clobber
           fi
           gh release edit "$tag" --draft=false --prerelease="$PRERELEASE"

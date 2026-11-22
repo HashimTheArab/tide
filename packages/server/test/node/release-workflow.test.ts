@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -32,6 +33,7 @@ interface Step {
 interface Job {
   needs?: string | string[];
   permissions?: Record<string, string>;
+  concurrency?: unknown;
   env?: Record<string, string>;
   outputs?: Record<string, string>;
   "timeout-minutes"?: number;
@@ -332,14 +334,28 @@ describe("publish", () => {
     ]);
   });
 
-  // The real npm CLI answers `view` from a local registry; `publish` goes to a fake that only records it.
+  // Runs for one dist-tag never interleave a check with another run's publishes.
+  test("publish runs queue per dist-tag and are never cancelled", () => {
+    expect(job("publish").concurrency).toEqual({
+      group: "release-publish-${{ needs.build.outputs.dist-tag }}",
+      "cancel-in-progress": false,
+      queue: "max",
+    });
+  });
+
+  // The real npm CLI reads its config; the step reads a local registry; `publish` goes to a fake that only records it.
   describe("against a local registry", () => {
-    let published = new Map<string, string[]>();
+    // Per package: each version on npm with the tarball body it was published from, and the dist-tags.
+    type OnNpm = Record<string, { versions: Record<string, string>; tags: Record<string, string> }>;
+    // Each run reads its own scenario under /<run>/, so runs can overlap.
+    const scenarios = new Map<string, OnNpm>();
     let registry = "";
+    const integrity = (body: string) =>
+      `sha512-${createHash("sha512").update(body).digest("base64")}`;
     const server = createServer((req, res) => {
-      const p = /^\/@tide-ota%2f(\w+)$/.exec(req.url ?? "")?.[1];
-      const versions = p ? published.get(p) : undefined;
-      if (!versions) {
+      const [, run, p] = /^\/(\d+)\/@tide-ota%2f(\w+)$/.exec(req.url ?? "") ?? [];
+      const pkg = run && p ? scenarios.get(run)?.[p] : undefined;
+      if (!pkg) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
         return;
@@ -349,8 +365,13 @@ describe("publish", () => {
       res.end(
         JSON.stringify({
           name,
-          "dist-tags": { latest: versions.at(-1) },
-          versions: Object.fromEntries(versions.map((version) => [version, { name, version }])),
+          "dist-tags": pkg.tags,
+          versions: Object.fromEntries(
+            Object.entries(pkg.versions).map(([version, body]) => [
+              version,
+              { name, version, dist: { integrity: integrity(body) } },
+            ]),
+          ),
         }),
       );
     });
@@ -362,27 +383,37 @@ describe("publish", () => {
     });
     afterAll(() => new Promise<void>((done) => server.close(() => done())));
 
-    async function publish(onNpm: Record<string, string[]>, version: string, distTag: string) {
-      published = new Map(Object.entries(onNpm));
+    const tarball = (p: string) => `${p} tarball`;
+    const names = PACKAGES.split(" ");
+    const each = (entry: OnNpm[string]): OnNpm => Object.fromEntries(names.map((p) => [p, entry]));
+
+    let runs = 0;
+    async function publish(onNpm: OnNpm, version: string, distTag: string) {
+      const run = String(runs++);
+      scenarios.set(run, onNpm);
       const dir = scratch();
       const log = join(dir, "npm.log");
       executable(
         join(dir, "bin/npm"),
-        `#!/bin/sh\nif [ "$1" = view ]; then exec "${realNpm}" "$@"; fi\nprintf '%s\\n' "$*" >> "${log}"\n`,
+        `#!/bin/sh\nif [ "$1" != publish ]; then exec "${realNpm}" "$@"; fi\nprintf '%s\\n' "$*" >> "${log}"\n`,
       );
       writeFileSync(log, "");
+      mkdirSync(join(dir, "tarballs"));
+      for (const p of names) writeFileSync(join(dir, `tarballs/tide-ota-${p}.tgz`), tarball(p));
       const r = await runStep("publish", "publish", dir, {
         VERSION: version,
         DIST_TAG: distTag,
-        npm_config_registry: registry,
+        npm_config_registry: `${registry}${run}/`,
         npm_config_userconfig: join(dir, "npmrc"),
         npm_config_globalconfig: join(dir, "global-npmrc"),
         npm_config_cache: join(dir, "npm-cache"),
+        // Its registry check would otherwise hold each npm call open for half a second.
+        npm_config_update_notifier: "false",
       });
       const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
       return { code: r.code, calls, dir };
     }
-    const placeholders = { protocol: ["0.0.1"], server: ["0.0.1"], cli: ["0.0.1"] };
+    const placeholders = each({ versions: { "0.0.1": "placeholder" }, tags: { latest: "0.0.1" } });
     const call = (dir: string, p: string, tag: string) =>
       `publish ${dir}/tarballs/tide-ota-${p}.tgz --provenance --access public --tag ${tag}`;
 
@@ -391,28 +422,92 @@ describe("publish", () => {
       expect(r).toEqual({
         code: 0,
         dir: r.dir,
-        calls: ["protocol", "server", "cli"].map((p) => call(r.dir, p, "latest")),
+        calls: names.map((p) => call(r.dir, p, "latest")),
       });
     });
 
     test("prerelease tarballs publish under next", async () => {
       const r = await publish(placeholders, "1.2.3-rc.1", "next");
-      expect(r.calls).toEqual(["protocol", "server", "cli"].map((p) => call(r.dir, p, "next")));
+      expect(r.calls).toEqual(names.map((p) => call(r.dir, p, "next")));
     });
 
     // A rerun after protocol published resumes with the rest.
-    test("a rerun skips what npm already holds", async () => {
-      const r = await publish({ ...placeholders, protocol: ["0.0.1", "1.2.3"] }, "1.2.3", "latest");
+    test("a rerun skips a version npm holds with the same bytes", async () => {
+      const protocol = {
+        versions: { "0.0.1": "placeholder", "1.2.3": tarball("protocol") },
+        tags: { latest: "1.2.3" },
+      };
+      const r = await publish({ ...placeholders, protocol }, "1.2.3", "latest");
       expect([r.code, r.calls]).toEqual([
         0,
         ["server", "cli"].map((p) => call(r.dir, p, "latest")),
       ]);
     });
 
-    test("a fully published version publishes nothing", async () => {
-      const all = ["0.0.1", "1.2.3"];
-      const r = await publish({ protocol: all, server: all, cli: all }, "1.2.3", "latest");
+    // Nothing to publish moves no tag, so a later release does not block finishing this one's GitHub Release.
+    test("a fully published version publishes nothing, even after a later release", async () => {
+      const onNpm = Object.fromEntries(
+        names.map((p) => [
+          p,
+          { versions: { "1.2.3": tarball(p), "1.2.4": "later" }, tags: { latest: "1.2.4" } },
+        ]),
+      );
+      const r = await publish(onNpm, "1.2.3", "latest");
       expect([r.code, r.calls]).toEqual([0, []]);
+    });
+
+    // Skipping would leave npm serving other bytes than the tested tarballs the GitHub Release carries.
+    test("a version npm holds with other bytes fails before anything is published", async () => {
+      const [placeholderTag, laterPackage] = await Promise.all([
+        publish(placeholders, "0.0.1", "latest"),
+        publish(
+          {
+            ...placeholders,
+            server: { versions: { "1.2.3": "other bytes" }, tags: { latest: "1.2.3" } },
+          },
+          "1.2.3",
+          "latest",
+        ),
+      ]);
+      expect([placeholderTag, laterPackage].map((r) => [r.code, r.calls])).toEqual([
+        [1, []],
+        [1, []],
+      ]);
+    });
+
+    // An older tag's rerun after a later release finished must not move server and cli back under latest.
+    test("an older version never moves a dist-tag back", async () => {
+      const later = { versions: { "1.2.4": "later" }, tags: { latest: "1.2.4" } };
+      const protocol = {
+        versions: { "1.2.3": tarball("protocol"), "1.2.4": "later" },
+        tags: { latest: "1.2.4" },
+      };
+      const r = await publish({ protocol, server: later, cli: later }, "1.2.3", "latest");
+      expect([r.code, r.calls]).toEqual([1, []]);
+    });
+
+    const ordering = [
+      ["1.2.3-rc.2", "1.2.3-rc.10", true],
+      ["1.2.3-rc.10", "1.2.3-rc.2", false],
+      ["1.2.3-alpha", "1.2.3-alpha.1", true],
+      ["1.2.3-alpha.beta", "1.2.3-alpha.1", false],
+      ["1.2.3-rc.1", "1.2.3", true],
+      ["1.2.3", "1.2.3-rc.1", false],
+      ["1.2.4-rc.1", "1.2.3", false],
+      ["1.9.0", "1.10.0", true],
+      ["1.10.0", "1.9.0", false],
+    ] as const;
+    // SemVer precedence decides "earlier": numeric identifiers by value, a prerelease before its release.
+    test.each(ordering)("next at %s, then %s publishes: %s", async (tagged, version, publishes) => {
+      const onNpm = each({ versions: { [tagged]: "x" }, tags: { next: tagged } });
+      const r = await publish(onNpm, version, "next");
+      expect([r.code, r.calls.length]).toEqual(publishes ? [0, names.length] : [1, 0]);
+    });
+
+    test("a package the registry does not answer for fails before anything is published", async () => {
+      const { protocol: _, ...rest } = placeholders;
+      const r = await publish(rest, "1.2.3", "latest");
+      expect([r.code, r.calls]).toEqual([1, []]);
     });
   });
 });
@@ -426,17 +521,23 @@ describe("release", () => {
     });
   });
 
+  interface Asset {
+    state: string;
+    body: string;
+  }
   interface Release {
     tag: string;
     draft: boolean;
     prerelease: boolean;
-    assets: Record<string, string>;
+    assets: Record<string, Asset>;
   }
   const TAG = "v1.2.3-rc.1";
-  // One fake for the GitHub CLI: the subcommands the step uses, over a JSON state file.
+  // One fake for the GitHub CLI: the subcommands the step uses, over a JSON state file. Like gh, --clobber deletes an
+  // existing asset before uploading; FAKE_GH_UPLOAD_FAILS makes every upload fail after that.
   const FAKE_GH = `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const file = process.env.FAKE_GH_STATE;
 const state = JSON.parse(fs.readFileSync(file, "utf8"));
 const args = process.argv.slice(2);
@@ -447,14 +548,24 @@ const [group, command, tag] = args;
 const release = state.releases.find((r) => r.tag === tag);
 const attach = (r) => {
   for (const f of args.slice(3).filter((a) => !a.startsWith("--"))) {
-    if (r.assets[path.basename(f)] !== undefined && !args.includes("--clobber")) fail("asset already exists");
-    r.assets[path.basename(f)] = fs.readFileSync(f, "utf8");
+    const name = path.basename(f);
+    if (r.assets[name] !== undefined) {
+      if (!args.includes("--clobber")) fail("asset already exists");
+      delete r.assets[name];
+    }
+    if (process.env.FAKE_GH_UPLOAD_FAILS) fail("upload failed");
+    r.assets[name] = { state: "uploaded", body: fs.readFileSync(f, "utf8") };
   }
 };
+const digest = (body) => "sha256:" + crypto.createHash("sha256").update(body).digest("hex");
 if (group !== "release") fail("unexpected gh " + args.join(" "));
-else if (command === "view") release ? process.stdout.write(tag) : fail("release not found");
+else if (command === "view" && !release) fail("release not found");
+else if (command === "view" && args.includes("--json")) {
+  const assets = Object.entries(release.assets).map(([name, a]) => ({ name, state: a.state, digest: digest(a.body) }));
+  process.stdout.write(JSON.stringify({ assets }));
+} else if (command === "view") process.stdout.write(tag);
 else if (command === "create") {
-  if (release && !release.draft) fail("already exists");
+  if (release) fail("already exists");
   const created = { tag, draft: args.includes("--draft"), prerelease: false, assets: {} };
   attach(created);
   state.releases.push(created);
@@ -466,10 +577,14 @@ else if (command === "edit") {
 } else fail("unexpected gh " + args.join(" "));
 save();
 `;
+  const uploaded = (body: string): Asset => ({ state: "uploaded", body });
   const tarballs = Object.fromEntries(
     PACKAGES.split(" ").map((p) => [`tide-ota-${p}.tgz`, `${p} tarball`]),
   );
-  async function assets(releases: Release[]) {
+  const attached = Object.fromEntries(
+    Object.entries(tarballs).map(([name, body]) => [name, uploaded(body)]),
+  );
+  async function assets(releases: Release[], env: Record<string, string> = {}) {
     const dir = scratch();
     executable(join(dir, "bin/gh"), FAKE_GH);
     mkdirSync(join(dir, "tarballs"));
@@ -482,25 +597,47 @@ save();
       GH_REPO: "example/tide",
       PRERELEASE: "true",
       FAKE_GH_STATE: stateFile,
+      ...env,
     });
     const state = JSON.parse(readFileSync(stateFile, "utf8")) as { releases: Release[] };
     return { code: r.code, releases: state.releases };
   }
-  const finished = { tag: TAG, draft: false, prerelease: true, assets: tarballs };
+  const finished: Release = { tag: TAG, draft: false, prerelease: true, assets: attached };
 
   test("a first run creates the release with the tarballs and publishes it as a prerelease", async () => {
     expect(await assets([])).toEqual({ code: 0, releases: [finished] });
   });
 
   // A stopped run leaves a draft, perhaps holding an asset whose upload was cut off.
-  test("a rerun replaces what the release holds with the tarballs and publishes the draft", async () => {
-    const draft = {
+  test("a rerun keeps finished assets, replaces unfinished ones and publishes the draft", async () => {
+    const draft: Release = {
       tag: TAG,
       draft: true,
       prerelease: false,
-      assets: { "tide-ota-protocol.tgz": "" },
+      assets: {
+        "tide-ota-protocol.tgz": uploaded("protocol tarball"),
+        "tide-ota-server.tgz": { state: "open", body: "" },
+      },
     };
     expect(await assets([draft])).toEqual({ code: 0, releases: [finished] });
+  });
+
+  // Deleting a working download to upload the same bytes again risks losing it if the upload fails.
+  test("a rerun on a finished release uploads nothing, so a failing upload loses no asset", async () => {
+    expect(await assets([finished], { FAKE_GH_UPLOAD_FAILS: "1" })).toEqual({
+      code: 0,
+      releases: [finished],
+    });
+  });
+
+  test("a finished asset with other bytes fails the step before anything changes", async () => {
+    const draft: Release = {
+      tag: TAG,
+      draft: true,
+      prerelease: false,
+      assets: { "tide-ota-server.tgz": uploaded("other bytes") },
+    };
+    expect(await assets([draft])).toEqual({ code: 1, releases: [draft] });
   });
 });
 
