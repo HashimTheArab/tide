@@ -6,15 +6,17 @@ import { PROBE_USAGE, probe } from "./probe.ts";
 import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-rollback.ts";
 import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { REGISTER_BUILD_USAGE, registerBuild } from "./register-build.ts";
+import { ROLLOUT_USAGE, rollout } from "./rollout.ts";
 import { status } from "./status.ts";
 import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}`;
+const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLOUT_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}`;
 // Commands that parse arguments and read their own configuration.
 const COMMANDS = {
   export: exportProject,
   publish,
+  rollout,
   rollback,
   republish,
   "register-build": registerBuild,
