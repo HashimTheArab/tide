@@ -1,5 +1,5 @@
 import fc from "fast-check";
-import { describe, expect, inject, test } from "vitest";
+import { describe, expect, inject, test, vi } from "vitest";
 
 import type {
   BaseRecord,
@@ -1777,6 +1777,20 @@ describe("rollout record", () => {
     expect(decoded.earlier?.body).toEqual(
       earlier === undefined ? undefined : fixture(TIDE_REPLY_GOLDEN[earlier]!.multipart),
     );
+  });
+
+  // Near the size limit a second decode of both bodies costs CPU a Workers Free request cannot spare.
+  test.each(ROLLOUTS)("decoding %s decodes the record's bytes once and no body again", (file) => {
+    const bytes = fixture(file);
+    const decode = vi.spyOn(TextDecoder.prototype, "decode");
+    try {
+      decodePointer(bytes);
+      expect(decode.mock.calls.map(([input]) => (input as Uint8Array).byteLength)).toEqual([
+        bytes.length,
+      ]);
+    } finally {
+      decode.mockRestore();
+    }
   });
 
   test("the goldens cover an earlier manifest, an earlier rollback and no earlier reply", () => {

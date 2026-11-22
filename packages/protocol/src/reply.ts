@@ -131,14 +131,8 @@ export async function rolloutSide(
   return bucket < Math.round(rollout.percent * 100) ? "new" : "earlier";
 }
 
-/** A reply's record fields without `version`, in the fixed order. */
-function replyFields(reply: StoredReply): Record<string, unknown> {
-  let body: string;
-  try {
-    body = utf8.decode(reply.body);
-  } catch {
-    throw new ProtocolError("body", "is not UTF-8");
-  }
+/** A reply's record fields without `version`, in the fixed order; `body` defaults to the reply's bytes decoded. */
+function replyFields(reply: StoredReply, body = bodyText(reply.body)): Record<string, unknown> {
   const contentType = `multipart/mixed; boundary=${reply.boundary}`;
   return reply.kind === "manifest"
     ? {
@@ -151,13 +145,27 @@ function replyFields(reply: StoredReply): Record<string, unknown> {
     : { kind: reply.kind, contentType, body };
 }
 
-/** The exact version-2 record text for `rollout`; an absent reply is written as null. */
-function serializeRollout(rollout: Rollout): string {
+function bodyText(body: Uint8Array): string {
+  try {
+    return utf8.decode(body);
+  } catch {
+    throw new ProtocolError("body", "is not UTF-8");
+  }
+}
+
+/**
+ * The exact version-2 record text for `rollout`; an absent reply is written as null. `bodies` are the replies' bodies
+ * as strings when the caller already holds them, so a read does not decode the bytes it just encoded.
+ */
+function serializeRollout(
+  rollout: Rollout,
+  bodies?: { new: string; earlier: string | undefined },
+): string {
   // `unknown`: a JavaScript caller may pass null or a missing reply, which decode then refuses.
-  const nested = (field: string, reply: unknown) => {
+  const nested = (field: string, reply: unknown, body: string | undefined) => {
     if (typeof reply !== "object" || reply === null) return null;
     try {
-      return replyFields(reply as StoredReply);
+      return replyFields(reply as StoredReply, body);
     } catch (e) {
       throw prefixed(field, e);
     }
@@ -166,8 +174,8 @@ function serializeRollout(rollout: Rollout): string {
     version: ROLLOUT_VERSION,
     kind: "rollout",
     percent: rollout.percent,
-    new: nested("new", rollout.new),
-    earlier: nested("earlier", rollout.earlier),
+    new: nested("new", rollout.new, bodies?.new),
+    earlier: nested("earlier", rollout.earlier, bodies?.earlier),
   });
 }
 
@@ -243,29 +251,29 @@ function readRollout(r: Record<string, unknown>, text: string): Rollout {
   ) {
     throw new ProtocolError("percent", "must be a number from 0 to 100 in steps of 0.01");
   }
-  const next = nestedReply(present(r, "new"), "new", ["manifest"]);
+  const [next, newBody] = nestedReply(present(r, "new"), "new", ["manifest"]);
   const earlierValue = present(r, "earlier");
-  const earlier =
+  const [earlier, earlierBody] =
     earlierValue === null
-      ? undefined
+      ? []
       : nestedReply(earlierValue, "earlier", ["manifest", "rollBackToEmbedded"]);
   if (earlier?.kind === "manifest" && earlier.updateId === next.updateId) {
     throw new ProtocolError("earlier.updateId", "must differ from new.updateId");
   }
   const rollout: Rollout = { kind: "rollout", percent, new: next, earlier };
   // Refuses another key order, whitespace, escape or number spelling.
-  if (serializeRollout(rollout) !== text) {
+  if (serializeRollout(rollout, { new: newBody, earlier: earlierBody }) !== text) {
     throw new ProtocolError("record", "must be exactly what encodeRollout writes");
   }
   return rollout;
 }
 
-/** Reads the reply at rollout field `field`, which must be one of `kinds`. */
+/** Reads the reply at rollout field `field`, which must be one of `kinds`, and returns it with its body string. */
 function nestedReply<K extends Kind>(
   value: unknown,
   field: string,
   kinds: readonly K[],
-): Extract<StoredReply, { kind: K }> {
+): [Extract<StoredReply, { kind: K }>, string] {
   const expected = `must be a ${kinds.join(" or ")} reply`;
   if (!isObject(value)) throw new ProtocolError(field, expected);
   let reply: StoredReply;
@@ -277,7 +285,8 @@ function nestedReply<K extends Kind>(
   if (!(kinds as readonly Kind[]).includes(reply.kind)) {
     throw new ProtocolError(`${field}.kind`, expected);
   }
-  return reply as Extract<StoredReply, { kind: K }>;
+  // readReply has checked that `body` is a well-formed string.
+  return [reply as Extract<StoredReply, { kind: K }>, value.body as string];
 }
 
 /** Returns `e` with its field under `field`, or `e` itself when it is not a ProtocolError. */
