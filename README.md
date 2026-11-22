@@ -21,7 +21,9 @@ update in a single bucket and serves it from Cloudflare Workers or from a contai
 - **One bucket, no database.** Everything the server needs is in one R2 or S3-compatible bucket. That is the whole
   state, which is why the same server runs on Workers or in a container.
 - **Small downloads.** At publish time Tide builds bsdiff patches from earlier updates and from the bundle inside
-  the store build, so even a fresh install's first update can download only what changed.
+  the store build, so even a fresh install's first update can download only what changed. Hermes apps can also
+  compile each update against the store build's bundle; measured on Bluesky's Android app, that downloads 70%
+  less ([decision 0002](docs/decisions/0002-hermes-delta-compiles.md)).
 - **Building and signing stay apart.** Only the build step runs your app's code, and it holds no secrets. The step
   that signs and uploads runs none of your code.
 - **Two runtime dependencies.** The server uses [Hono](https://hono.dev) and its Node adapter; the CLI and the
