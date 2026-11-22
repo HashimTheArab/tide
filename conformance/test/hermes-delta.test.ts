@@ -1,10 +1,19 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 
 import { applyBsdiff } from "@tide-ota/protocol";
 
@@ -12,7 +21,15 @@ import type { Results } from "../src/hermes-delta/measure.ts";
 import { makeBsdiff } from "../../packages/cli/src/bsdiff.ts";
 import { keepsPatch } from "../../packages/cli/src/publish-patch.ts";
 import { APPS, CHANGES } from "../src/hermes-delta/apps.ts";
-import { hermescIo, kotlinArgs, numstat, retarget } from "../src/hermes-delta/build.ts";
+import {
+  claimWork,
+  compile,
+  hermescIo,
+  kotlinArgs,
+  numstat,
+  openTree,
+  retarget,
+} from "../src/hermes-delta/build.ts";
 import {
   BASES,
   KEEP_RULE,
@@ -20,6 +37,7 @@ import {
   describe as describeBundle,
   measureTargets,
   renderTable,
+  writeResults,
 } from "../src/hermes-delta/measure.ts";
 import { USAGE, UsageError, parseOptions } from "../src/hermes-delta/options.ts";
 
@@ -36,6 +54,13 @@ function noise(n: number, seed: number): Uint8Array<ArrayBuffer> {
     out[i] = x >>> 24;
   }
   return out;
+}
+
+/** Returns a new directory removed when the test finishes. */
+function scratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), "tide-hermes-delta-"));
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
 }
 
 async function bin(args: string[]) {
@@ -59,6 +84,35 @@ describe("pnpm hermes-delta options", () => {
     expect(run.stderr).toBe(
       "hermes-delta: --app must be one of sdk-55, sdk-58, bluesky; see pnpm hermes-delta --help\n",
     );
+  });
+
+  test("a --work holding files the study did not make is refused before anything is deleted", async () => {
+    const work = scratch();
+    const keep = join(work, "sdk-55", "tree", "keep.txt");
+    mkdirSync(dirname(keep), { recursive: true });
+    writeFileSync(keep, "mine");
+    const run = await bin(["--app", "sdk-55", "--work", work]);
+    expect(run).toEqual({
+      code: 2,
+      stdout: "",
+      stderr:
+        `hermes-delta: ${work} holds files hermes-delta did not create; pass a new or empty --work; ` +
+        "see pnpm hermes-delta --help\n",
+    });
+    expect(readFileSync(keep, "utf8")).toBe("mine");
+    expect(readdirSync(work)).toEqual(["sdk-55"]);
+  });
+
+  test("claimWork takes a new or empty directory and one it marked before", () => {
+    const root = scratch();
+    claimWork(join(root, "new"));
+    mkdirSync(join(root, "empty"));
+    claimWork(join(root, "empty"));
+    for (const dir of ["new", "empty"]) {
+      writeFileSync(join(root, dir, "built.txt"), "");
+      claimWork(join(root, dir));
+    }
+    expect(() => claimWork(root)).toThrow(UsageError);
   });
 
   test("defaults to every app and the gitignored cache", () => {
@@ -165,6 +219,73 @@ describe("hermesc command lines", () => {
     expect(kotlinArgs(`"-O", "-output-source-map"`)).toEqual(["-O", "-output-source-map"]);
     expect(() => kotlinArgs(`"-O", extraFlag`)).toThrow("unexpected hermesc argument");
   });
+
+  test("compile gives the same bytes under any work dir: hermesc sees only fixed relative names", async () => {
+    // A hermes-compiler whose hermesc writes the input name it was given, then the JS, as the real one embeds it.
+    const app = scratch();
+    const hermesc = join(
+      app,
+      "node_modules",
+      "hermes-compiler",
+      "hermesc",
+      process.platform === "darwin" ? "osx-bin" : "linux64-bin",
+      "hermesc",
+    );
+    mkdirSync(dirname(hermesc), { recursive: true });
+    writeFileSync(
+      hermesc,
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -out) out=$2; shift 2 ;; -*) shift ;; *) in=$1; shift ;; esac; done
+{ printf '%s\\n' "$in"; cat "$in"; } > "$out"
+`,
+    );
+    chmodSync(hermesc, 0o755);
+    for (const name of ["react-native", "hermes-compiler"]) {
+      mkdirSync(join(app, "node_modules", name), { recursive: true });
+      writeFileSync(join(app, "node_modules", name, "package.json"), JSON.stringify({ name }));
+    }
+    writeFileSync(join(app, "package.json"), JSON.stringify({ name: "app" }));
+    const js = new TextEncoder().encode("var a = 1;\n");
+
+    const built = [];
+    for (const root of [scratch(), scratch()]) {
+      const tree = {
+        pin: APPS["sdk-55"],
+        dir: app,
+        work: join(root, "sdk-55"),
+        log: join(root, "log"),
+        tmp: root,
+      };
+      built.push(await compile(tree, expo, js, js));
+    }
+
+    expect(built[1]).toEqual(built[0]);
+    expect(new TextDecoder().decode(built[0]?.hbc)).toBe("index.js\nvar a = 1;\n");
+    expect(built[0]?.args.filter((a) => isAbsolute(a.replace(/^-base-bytecode=/, "")))).toEqual([]);
+  });
+});
+
+describe("openTree", () => {
+  test("reuses a cached tree and its build temp dir, and rebuilds both when a pinned input changes", async () => {
+    const work = scratch();
+    const pin = APPS["sdk-55"];
+    if (pin.source.kind !== "tide") throw new Error("sdk-55 is pinned to this repository");
+    const first = await openTree("sdk-55", pin, work);
+    const built = [join(first.dir, "built.txt"), join(first.tmp, "metro-cache")];
+    for (const path of built) writeFileSync(path, "");
+    await openTree("sdk-55", pin, work);
+    for (const path of built) expect(existsSync(path), path).toBe(true);
+
+    const marker = 'export const MARKER = "moved";\n';
+    const moved = {
+      ...pin,
+      source: { ...pin.source, extra: { ...pin.source.extra, "marker.js": marker } },
+    };
+    const tree = await openTree("sdk-55", moved, work);
+
+    for (const path of built) expect(existsSync(path), path).toBe(false);
+    expect(readFileSync(join(tree.dir, "marker.js"), "utf8")).toBe(marker);
+  });
 });
 
 describe("measureTargets", () => {
@@ -196,64 +317,115 @@ describe("measureTargets", () => {
       }
     }
     // Noise does not compress, so a patch between unrelated bundles is about as big as the bundle: not kept.
-    expect(measured.plain.from.ota.keep).toBe(true);
-    expect(measured.plain.from.embedded.keep).toBe(false);
+    expect(measured.plain.from.ota).toMatchObject({ keep: true });
+    expect(measured.plain.from.embedded).toMatchObject({ keep: false });
+  });
+
+  test("a target identical to a base is reuse, as Tide skips a base sharing its launch hash", async () => {
+    const ota = noise(4096, 5);
+    const embedded = noise(4096, 6);
+    const changed = ota.slice();
+    changed[100] = (changed[100] ?? 0) ^ 0xff;
+    const bases = { ota, embedded, "older-ota": changed };
+
+    const measured = await measureTargets(bases, {
+      plain: ota.slice(),
+      "delta-ota": changed.slice(),
+      "delta-embedded": embedded.slice(),
+    });
+
+    expect(measured.plain.from).toEqual({
+      ota: { reused: true },
+      embedded: { bytes: makeBsdiff(embedded, ota).length, keep: false },
+      "older-ota": { bytes: makeBsdiff(changed, ota).length, keep: true },
+    });
+    expect(measured["delta-ota"].from["older-ota"]).toEqual({ reused: true });
+    expect(measured["delta-embedded"].from.embedded).toEqual({ reused: true });
   });
 });
 
-test("renderTable prints one row per change and compile base, then totals from the raw numbers", () => {
+/** One app's results: one-line and feature are `change`; the dependency bump's plain bundle is the OTA base. */
+function sample(): Results {
   const sized = { bytes: 1000, sha256: "00", gzip9: 400 };
-  const target = (ota: number, embedded: number, older: number, gzip9 = 400) => ({
+  const patch = (bytes: number, gzip9: number) => ({ bytes, keep: keepsPatch(bytes, gzip9) });
+  const target = (ota: number | "reused", embedded: number, older: number, gzip9 = 400) => ({
     ...sized,
     gzip9,
     from: {
-      ota: { bytes: ota, keep: keepsPatch(ota, gzip9) },
-      embedded: { bytes: embedded, keep: keepsPatch(embedded, gzip9) },
-      "older-ota": { bytes: older, keep: keepsPatch(older, gzip9) },
+      ota: ota === "reused" ? ({ reused: true } as const) : patch(ota, gzip9),
+      embedded: patch(embedded, gzip9),
+      "older-ota": patch(older, gzip9),
     },
   });
-  const change = {
+  const change = (plainOta: number | "reused", deltaOta: number) => ({
     patch: "x.patch",
     files: 1,
     added: 1,
     removed: 1,
     targets: {
-      plain: target(100, 300, 150),
-      "delta-ota": target(50, 320, 140),
+      plain: target(plainOta, 300, 150),
+      "delta-ota": target(deltaOta, 320, 140),
       "delta-embedded": target(120, 200, 160),
     },
-  };
-  const results: Results = {
-    schema: 1,
+  });
+  return {
+    schema: 2,
     about: "About.",
     keepRule: KEEP_RULE,
     bases: BASES,
     targets: TARGETS,
-    apps: [
-      {
-        id: "sdk-55",
-        title: "App",
-        source: { commit: "abc" },
-        platform: "android",
-        machine: {},
-        tools: {},
-        export: {},
-        embedded: {},
-        delta: { hermescArgs: [] },
-        bases: { ota: sized, embedded: sized, "older-ota": sized },
-        changes: { "one-line": change, "dependency-bump": change, feature: change },
+    app: {
+      id: "sdk-55",
+      title: "App",
+      source: { commit: "abc" },
+      platform: "android",
+      machine: {},
+      tools: {},
+      export: {},
+      embedded: {},
+      delta: { hermescArgs: [] },
+      bases: { ota: sized, embedded: sized, "older-ota": sized },
+      changes: {
+        "one-line": change(100, 50),
+        "dependency-bump": change("reused", 20),
+        feature: change(100, 50),
       },
-    ],
+    },
   };
-  const lines = renderTable(results).split("\n");
+}
+
+test("renderTable prints one row per change and compile base, then totals counting reuse as no download", () => {
+  const lines = renderTable(sample()).split("\n");
+  expect(lines[0]).toBe("# Hermes delta compiles: App");
   expect(lines).toContain(
     "| one-line (+1 −1) | ota | 100 → 50 | 50.0% | 300 → 320 | 150 → 140 | 400 / 400 | yes no yes / yes no yes |",
   );
   expect(lines).toContain(
     "| one-line (+1 −1) | embedded | 300 → 200 | 33.3% | 100 → 120 | 150 → 160 | 400 / 400 | no yes yes / yes yes yes |",
   );
-  expect(lines).toContain("| all changes | ota | 300 → 150 | 50.0% | 900 → 960 | 450 → 420 | | |");
   expect(lines).toContain(
-    "| all changes | embedded | 900 → 600 | 33.3% | 300 → 360 | 450 → 480 | | |",
+    "| dependency-bump (+1 −1) | ota | reused → 20 | n/a | 300 → 320 | 150 → 140 | 400 / 400 | reused no yes / yes no yes |",
   );
+  expect(lines).toContain(
+    "| dependency-bump (+1 −1) | embedded | 300 → 200 | 33.3% | reused → 120 | 150 → 160 | 400 / 400 | no reused yes / yes yes yes |",
+  );
+  expect(lines).toContain("| all changes | ota | 200 → 120 | 40.0% | 900 → 960 | 450 → 420 | | |");
+  expect(lines).toContain(
+    "| all changes | embedded | 900 → 600 | 33.3% | 200 → 360 | 450 → 480 | | |",
+  );
+});
+
+test("writeResults writes only its own app's files, so runs of other apps never overwrite them", () => {
+  const out = scratch();
+  writeFileSync(join(out, "bluesky.json"), "another run's results\n");
+  const results = sample();
+
+  expect(writeResults(out, results)).toBe(join(out, "sdk-55.json"));
+
+  expect(readdirSync(out).toSorted()).toEqual(["bluesky.json", "sdk-55.json", "sdk-55.md"]);
+  expect(readFileSync(join(out, "bluesky.json"), "utf8")).toBe("another run's results\n");
+  expect(readFileSync(join(out, "sdk-55.json"), "utf8")).toBe(
+    `${JSON.stringify(results, null, 2)}\n`,
+  );
+  expect(readFileSync(join(out, "sdk-55.md"), "utf8")).toBe(renderTable(results));
 });

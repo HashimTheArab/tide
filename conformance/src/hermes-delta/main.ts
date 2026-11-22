@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 // `pnpm hermes-delta`: measures Tide's patch sizes for Hermes bundles compiled with and without -base-bytecode.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, cpus, release, type } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { AppId, ChangeId } from "./apps.ts";
 import type { Hermesc } from "./build.ts";
-import type { AppResult, ChangeResult, Results } from "./measure.ts";
+import type { AppResult, ChangeResult } from "./measure.ts";
 import { APPS, CHANGES } from "./apps.ts";
 import {
   EXPORT_ENV,
   checkout,
+  claimWork,
   compile,
   embed,
   exportArgs,
@@ -23,7 +22,7 @@ import {
   retarget,
   tools,
 } from "./build.ts";
-import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, renderTable } from "./measure.ts";
+import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, writeResults } from "./measure.ts";
 import { USAGE, UsageError, parseOptions } from "./options.ts";
 
 const OUT = fileURLToPath(new URL("../../../docs/assets/hermes-delta/", import.meta.url));
@@ -32,8 +31,8 @@ const say = (line: string) => process.stderr.write(`hermes-delta: ${line}\n`);
 
 /** Builds every bundle of `id` and returns its measurements. */
 async function measureApp(id: AppId, work: string): Promise<AppResult> {
-  const tree = await openTree(id, work);
   const pin = APPS[id];
+  const tree = await openTree(id, pin, work);
   const step = async (name: string, patches: readonly string[]) => {
     say(`${id}: ${name}`);
     const stat = checkout(tree, patches);
@@ -90,7 +89,6 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   );
   if (shapes.size !== 1)
     throw new Error(`expo export ran hermesc with different flags: ${[...shapes].join(" | ")}`);
-  const scratch = join(work, "hermesc");
   return {
     id,
     title: pin.title,
@@ -137,7 +135,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
       hermescArgs: embedded.hermescArgs,
       flagsFrom: embedded.flagsFrom,
     },
-    delta: { hermescArgs: deltaArgs.map((a) => a.replaceAll(scratch, "<work>")) },
+    delta: { hermescArgs: deltaArgs },
     bases: {
       ota: describe(bases.ota),
       embedded: describe(bases.embedded),
@@ -147,17 +145,12 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   };
 }
 
-/** Returns the results file's apps, or none when it does not exist. */
-function previousApps(path: string): readonly AppResult[] {
-  if (!existsSync(path)) return [];
-  return (JSON.parse(readFileSync(path, "utf8")) as Results).apps;
-}
-
 /** Exit 0 for help or a finished run, 2 for a usage error, 1 when a build or measurement fails. */
 async function main(args: readonly string[]): Promise<number> {
   let options;
   try {
     options = parseOptions(args, process.cwd());
+    if (options !== "help") claimWork(options.work);
   } catch (e) {
     if (!(e instanceof UsageError)) throw e;
     say(`${e.message}; see pnpm hermes-delta --help`);
@@ -167,29 +160,26 @@ async function main(args: readonly string[]): Promise<number> {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
-  const json = join(OUT, "results.json");
-  const measured = new Map(previousApps(json).map((a) => [a.id, a]));
   try {
-    for (const id of options.apps) measured.set(id, await measureApp(id, options.work));
+    for (const id of options.apps) {
+      const app = await measureApp(id, options.work);
+      const json = writeResults(OUT, {
+        schema: 2,
+        about:
+          "Android bundles. Bases: the embedded bundle and an OTA export of the app's start tree, and an OTA export " +
+          "one update later (the OTA base); each change is a patch onto that update. Plain bundles are expo " +
+          "export's hermesc command recompiled on fixed relative names; delta bundles add -base-bytecode.",
+        keepRule: KEEP_RULE,
+        bases: BASES,
+        targets: TARGETS,
+        app,
+      });
+      say(`wrote ${json} and its table`);
+    }
   } catch (e) {
     say(e instanceof Error ? e.message : String(e));
     return 1;
   }
-  const results: Results = {
-    schema: 1,
-    about:
-      "Android bundles. Bases: the embedded bundle and an OTA export of each app's start tree, and an OTA export " +
-      "one update later (the OTA base); each change is a patch onto that update. Plain bundles are expo export's " +
-      "hermesc command recompiled at a fixed path; delta bundles add -base-bytecode.",
-    keepRule: KEEP_RULE,
-    bases: BASES,
-    targets: TARGETS,
-    apps: (Object.keys(APPS) as AppId[]).flatMap((id) => measured.get(id) ?? []),
-  };
-  mkdirSync(OUT, { recursive: true });
-  writeFileSync(json, `${JSON.stringify(results, null, 2)}\n`);
-  writeFileSync(join(OUT, "results.md"), renderTable(results));
-  say(`wrote ${json} and results.md`);
   return 0;
 }
 

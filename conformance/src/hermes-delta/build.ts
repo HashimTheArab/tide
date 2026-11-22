@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import type { AppId, AppPin } from "./apps.ts";
 import { tail } from "../stack.ts";
-import { APPS } from "./apps.ts";
+import { UsageError } from "./options.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const PATCHES = fileURLToPath(new URL("../../hermes-delta/patches/", import.meta.url));
@@ -41,6 +41,7 @@ export interface Tree {
   readonly dir: string;
   readonly work: string; // The app's own directory under the study's work dir.
   readonly log: string;
+  readonly tmp: string; // Builds' TMPDIR, so Metro's caches live and die with the tree.
 }
 
 /** A hermesc command line as Expo or Gradle ran it, with the input and output it names. */
@@ -50,22 +51,51 @@ export interface Hermesc {
   readonly out: string;
 }
 
-/** Returns the app's tree at the start commit, creating and pinning it the first time. */
-export async function openTree(app: AppId, work: string): Promise<Tree> {
-  const pin = APPS[app];
+const WORK_MARK = ".hermes-delta-work";
+
+/**
+ * Marks `work` as the study's own directory, creating it when missing; refuses one that holds files without the mark,
+ * since runs delete and rebuild what is under it.
+ */
+export function claimWork(work: string): void {
+  const mark = join(work, WORK_MARK);
+  if (existsSync(mark)) return;
+  if (existsSync(work) && readdirSync(work).length > 0) {
+    throw new UsageError(
+      `${work} holds files hermes-delta did not create; pass a new or empty --work`,
+    );
+  }
+  mkdirSync(work, { recursive: true });
+  writeFileSync(mark, "");
+}
+
+/** Returns the hash of everything the start commit is made from, so a changed pin rebuilds a cached tree. */
+function startKey(pin: AppPin): string {
+  return createHash("sha256")
+    .update(JSON.stringify(pin.source))
+    .update(readFileSync(patchPath(pin.patches["dependency-bump"])))
+    .digest("hex");
+}
+
+/** Returns the app's tree at the start commit, rebuilding it when missing or made from other pinned inputs. */
+export async function openTree(app: AppId, pin: AppPin, work: string): Promise<Tree> {
   const appWork = join(work, app);
   const tree = {
     pin,
     dir: join(appWork, "tree"),
     work: appWork,
     log: join(appWork, "log.txt"),
+    tmp: join(appWork, "tmp"),
   };
-  mkdirSync(appWork, { recursive: true });
-  if (existsSync(join(tree.dir, ".git")) && git(tree, ["tag", "--list", START]).trim() === START) {
-    return tree;
+  const key = startKey(pin);
+  const keyFile = join(tree.dir, ".git", "hermes-delta-start");
+  mkdirSync(tree.tmp, { recursive: true });
+  if (existsSync(keyFile) && readFileSync(keyFile, "utf8") === key) return tree;
+  // Metro's caches would otherwise name generated files the deleted tree held.
+  for (const dir of [tree.dir, tree.tmp]) {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir);
   }
-  rmSync(tree.dir, { recursive: true, force: true });
-  mkdirSync(tree.dir);
   const { source } = pin;
   if (source.kind === "tide") {
     for (const [from, to] of Object.entries(source.files)) {
@@ -88,6 +118,7 @@ export async function openTree(app: AppId, work: string): Promise<Tree> {
   git(tree, ["apply", "-R", patchPath(pin.patches["dependency-bump"])]);
   git(tree, [...GIT_USER, "commit", "-qam", "start: the pin with dependency-bump.patch reversed"]);
   git(tree, ["tag", START]);
+  writeFileSync(keyFile, key);
   return tree;
 }
 
@@ -139,7 +170,7 @@ function buildEnv(tree: Tree, extra: Record<string, string>): Record<string, str
     if (value !== undefined && INHERITED.test(name)) env[name] = value;
   }
   env.PATH = [dirname(process.execPath), env.PATH].filter(Boolean).join(delimiter);
-  return { ...env, CI: "1", ...tree.pin.env, ...extra };
+  return { ...env, TMPDIR: tree.tmp, CI: "1", ...tree.pin.env, ...extra };
 }
 
 /** The variables `tide export` sets for `expo export`. */
@@ -258,8 +289,8 @@ export async function reproduces(
 }
 
 /**
- * Compiles `js` with Expo's hermesc command at fixed paths under the work dir, against `base` when given, and returns
- * the bytecode. Fixed paths keep the source name hermesc embeds identical across states and reruns.
+ * Compiles `js` with Expo's hermesc command in a scratch dir under the work dir, against `base` when given, and returns
+ * the bytecode. hermesc embeds the input name, so it runs in that dir on fixed relative names: same bytes anywhere.
  */
 export async function compile(
   tree: Tree,
@@ -270,14 +301,16 @@ export async function compile(
   const dir = join(dirname(tree.work), "hermesc");
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir);
-  const input = join(dir, "index.js");
-  const out = join(dir, "index.hbc");
-  const basePath = join(dir, "base.hbc");
-  writeFileSync(input, js);
-  if (base !== undefined) writeFileSync(basePath, base);
-  const args = retarget(command, input, out, base === undefined ? undefined : basePath);
-  await run(tree, hermescPath(tree), args);
-  return { hbc: bytes(out), args };
+  writeFileSync(join(dir, "index.js"), js);
+  if (base !== undefined) writeFileSync(join(dir, "base.hbc"), base);
+  const args = retarget(
+    command,
+    "index.js",
+    "index.hbc",
+    base === undefined ? undefined : "base.hbc",
+  );
+  await run(tree, hermescPath(tree), args, {}, dir);
+  return { hbc: bytes(join(dir, "index.hbc")), args };
 }
 
 /**

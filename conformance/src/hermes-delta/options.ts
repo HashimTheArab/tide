@@ -23,13 +23,14 @@ sizes.
 Per app it builds the embedded bundle (as the React Native Gradle plugin does) and an OTA export of the start
 tree, an OTA export after previous.patch, and for each change the plain export and two delta compiles of its JS.
 Each patch is makeBsdiff output that passed checkPatch, measured from the OTA base, the embedded base and the
-older OTA update. Results go to docs/assets/hermes-delta/results.json and results.md.
+older OTA update. Each app's results go to docs/assets/hermes-delta/<app>.json and <app>.md.
 
 Network: only cloning a pinned app and installing locked packages. Nothing calls Cloudflare, AWS or a Tide.
 
 Options:
-  --app <id>        an app to measure (repeatable; all by default); other apps' results are kept
-  --work <dir>      working directory, kept between runs (default .cache/hermes-delta)
+  --app <id>        an app to measure (repeatable; all by default); other apps' files are left alone
+  --work <dir>      working directory, kept between runs (default .cache/hermes-delta); must be new, empty
+                    or made by an earlier run, since runs delete and rebuild what is under it
 
 Apps:
 ${list(APPS)}
