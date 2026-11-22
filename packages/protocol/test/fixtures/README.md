@@ -7,6 +7,14 @@ fresh in-memory key: `node packages/protocol/test/generate-fixtures.ts [--out <d
 committed multiparts without signing. Then check the certificate's code-signing profile
 once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.pem`.
 
+`manifest-next.multipart` (from `manifest-next.json`: another update ID, a later `createdAt`, branch `next`) is framed
+with its own boundary, `tide_fixture_next`. It is the new side of the version-2 rollout goldens
+`rollout-manifest.reply.json` (12.5%, earlier `manifest.reply.json`), `rollout-rollback.reply.json` (50%, earlier
+`rollback.reply.json`) and `rollout-none.reply.json` (0.01%, no earlier reply).
+
+`compat-v1-*.reply.json` are the version-1 stored replies as the encoder wrote them before version 2 existed. Their
+bodies are signed by an earlier certificate; they pin the version-1 bytes and are never regenerated.
+
 `expo-directive.json`, `expo-chain.pem` (leaf then intermediate) and the signature in `expo.multipart` come from
 `packages/expo-updates/ios/Tests` in [expo/expo@54c0d6f6](https://github.com/expo/expo/tree/54c0d6f6e9ef537280831b68e5c236807facb641/packages/expo-updates/ios/Tests),
 copyright 650 Industries, Inc., MIT licence in `LICENSE-expo`.

@@ -7,6 +7,7 @@ import type {
   Part,
   PartName,
   Signer,
+  Rollout,
   StoredReply,
 } from "../src/index.ts";
 import type { CertificateOptions } from "./fixtures.ts";
@@ -33,11 +34,13 @@ import {
   S3Error,
   childElements,
   decodeBaseRecord,
+  decodePointer,
   decodeStoredReply,
   diskKey,
   diskPath,
   encodeMultipart,
   encodeBaseRecord,
+  encodeRollout,
   encodeSfvDictionary,
   encodeStoredReply,
   expoSignature,
@@ -45,6 +48,9 @@ import {
   parseS3Xml,
   patchKey,
   replyKey,
+  rolloutBucket,
+  rolloutClientId,
+  rolloutSide,
   s3BodyProblem,
   s3ErrorCode,
   s3Target,
@@ -59,14 +65,20 @@ import { parseSfvDictionary } from "../src/sfv.ts";
 import {
   ALGORITHM,
   BOUNDARY,
+  CLIENT_HIGH,
+  CLIENT_LOW,
   EXPO_GOLDEN,
   EXTENSION,
   KNOWN_PATCH,
+  ROLLOUT_NEW,
   RSA_SHA256,
   TIDE_GOLDEN,
   TIDE_REPLY_GOLDEN,
+  TIDE_ROLLOUT_GOLDEN,
   certificate,
   goldenParts,
+  goldenReply as goldenReplyOf,
+  goldenRollout,
   pem,
   replyGoldens,
   signedFixtures,
@@ -596,11 +608,14 @@ const part = (name: PartName, body: Uint8Array<ArrayBuffer>): Part => ({ name, b
 const SIGNATURE = 'sig="a", keyid="main"';
 const GOLDEN_PARTS = { ...TIDE_GOLDEN, ...EXPO_GOLDEN };
 const GOLDEN = Object.keys(GOLDEN_PARTS);
+/** The boundary golden `file` is framed with. */
+const boundaryOf = (file: string) => GOLDEN_PARTS[file]!.boundary;
 
 /** A golden's parts from their source files, each signed part carrying the signature parsed from the golden. */
 function golden(file: string): Promise<Part[]> {
-  const parsed = parseMultipart(fixture(file), B);
-  return goldenParts(GOLDEN_PARTS[file] ?? [], fixture, (_, i) => parsed[i]?.signature ?? "none");
+  const parsed = parseMultipart(fixture(file), boundaryOf(file));
+  const parts = GOLDEN_PARTS[file]?.parts ?? [];
+  return goldenParts(parts, fixture, (_, i) => parsed[i]?.signature ?? "none");
 }
 
 /** Frames parts by hand, independently of encodeMultipart. */
@@ -628,11 +643,15 @@ class AliasingBytes extends Uint8Array<ArrayBuffer> {
 
 describe("multipart", () => {
   test.each(GOLDEN)("encoding the parts of %s gives its bytes", async (file) => {
-    expect(encodeMultipart(await golden(file), B)).toEqual({ boundary: B, body: fixture(file) });
+    const boundary = boundaryOf(file);
+    expect(encodeMultipart(await golden(file), boundary)).toEqual({
+      boundary,
+      body: fixture(file),
+    });
   });
 
   test.each(GOLDEN)("parsing %s gives its parts and exact bodies", async (file) => {
-    const parsed = parseMultipart(fixture(file), B);
+    const parsed = parseMultipart(fixture(file), boundaryOf(file));
     expect(parsed).toEqual(await golden(file));
   });
 
@@ -1232,8 +1251,10 @@ describe("signed goldens", () => {
     "every signed part of %s verifies against certificate.pem as main",
     async (file) => {
       const key = await certificatePublicKey(text(fixture("certificate.pem")));
-      const signed = parseMultipart(fixture(file), B).filter((p) => p.signature !== undefined);
-      expect(signed.length).toBe(TIDE_GOLDEN[file]?.filter((p) => p.signed).length);
+      const signed = parseMultipart(fixture(file), boundaryOf(file)).filter(
+        (p) => p.signature !== undefined,
+      );
+      expect(signed.length).toBe(TIDE_GOLDEN[file]?.parts.filter((p) => p.signed).length);
       for (const p of signed)
         await expect(
           verifyExpoSignature(p.body, p.signature!, key, "main"),
@@ -1246,11 +1267,16 @@ describe("signed goldens", () => {
     const key = await certificatePublicKey(await mainCertificate());
     const files = await signedFixtures(fixture, cryptoKeySigner(keys.privateKey, "main"));
     expect(Object.keys(files)).toEqual(Object.keys(TIDE_GOLDEN));
-    const shape = (bytes: Uint8Array<ArrayBuffer>) =>
-      parseMultipart(bytes, B).map(({ name, body, signature }) => [name, body, !signature]);
     for (const [file, bytes] of Object.entries(files)) {
+      const shape = (b: Uint8Array<ArrayBuffer>) =>
+        parseMultipart(b, boundaryOf(file)).map(({ name, body, signature }) => [
+          name,
+          body,
+          !signature,
+        ]);
       expect(shape(bytes)).toEqual(shape(fixture(file)));
-      for (const p of parseMultipart(bytes, B).filter((p) => p.signature !== undefined))
+      const parts = parseMultipart(bytes, boundaryOf(file));
+      for (const p of parts.filter((p) => p.signature !== undefined))
         await expect(
           verifyExpoSignature(p.body, p.signature!, key, "main"),
         ).resolves.toBeUndefined();
@@ -1382,10 +1408,7 @@ describe(`properties (seed ${seed})`, () => {
 });
 
 describe("stored reply", () => {
-  const goldenReply = (file: string): StoredReply => {
-    const { multipart, reply } = TIDE_REPLY_GOLDEN[file]!;
-    return { ...reply, body: fixture(multipart) };
-  };
+  const goldenReply = (file: string) => goldenReplyOf(file, fixture);
   const manifestReply = () => goldenReply("manifest.reply.json");
   const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
   /** The manifest golden as a JSON object a case can break, then its UTF-8 bytes. */
@@ -1415,7 +1438,9 @@ describe("stored reply", () => {
 
   test("the generator wraps the multiparts it is given", () => {
     const files = replyGoldens(fixture);
-    for (const file of Object.keys(TIDE_REPLY_GOLDEN)) expect(files[file]).toEqual(fixture(file));
+    const all = [...Object.keys(TIDE_REPLY_GOLDEN), ...Object.keys(TIDE_ROLLOUT_GOLDEN)];
+    expect(Object.keys(files)).toEqual(all);
+    for (const file of all) expect(files[file]).toEqual(fixture(file));
   });
 
   const directive = (change: (o: Record<string, unknown>) => void) => {
@@ -1706,6 +1731,379 @@ describe("stored reply", () => {
       }),
       { seed },
     );
+  });
+});
+
+describe("rollout record", () => {
+  const ROLLOUTS = Object.keys(TIDE_ROLLOUT_GOLDEN);
+  const V1 = Object.keys(TIDE_REPLY_GOLDEN);
+  const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // manifest-next.json's id
+  const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
+  const rollout = (file = "rollout-manifest.reply.json") => goldenRollout(file, fixture);
+  const goldenText = () => text(fixture("rollout-manifest.reply.json"));
+  /** The rollout-manifest golden as a JSON object a case can break, then its UTF-8 bytes. */
+  type Fields = Record<string, unknown>;
+  const record = (
+    change: (o: Fields & { new: Fields; earlier: Fields }) => void,
+    space?: number,
+  ) => {
+    const o = JSON.parse(goldenText()) as Fields & { new: Fields; earlier: Fields };
+    change(o);
+    return utf8(JSON.stringify(o, null, space));
+  };
+  /** A nested reply golden's record fields without `version`. */
+  const nested = (file: string) => {
+    const { version: _, ...fields } = JSON.parse(text(fixture(file))) as Record<string, unknown>;
+    return fields;
+  };
+  /** The rollout-manifest golden with its new body padded so the record is exactly `size` bytes. */
+  const rolloutOfSize = (size: number): Rollout => {
+    const r = rollout();
+    const small = { ...r, new: { ...r.new, body: ascii("a") } };
+    const overhead = encodeRollout(small).length - 1;
+    return { ...r, new: { ...r.new, body: ascii("a".repeat(size - overhead)) } };
+  };
+
+  test.each(ROLLOUTS)("encoding %s's fields gives its bytes", (file) => {
+    expect(encodeRollout(rollout(file))).toEqual(fixture(file));
+  });
+
+  test.each(ROLLOUTS)("decoding %s gives its fields and both multiparts' exact bytes", (file) => {
+    const decoded = decodePointer(fixture(file));
+    expect(decoded).toEqual(rollout(file));
+    if (decoded.kind !== "rollout") throw new Error("not a rollout");
+    expect(decoded.new.body).toEqual(fixture("manifest-next.multipart"));
+    const earlier = TIDE_ROLLOUT_GOLDEN[file]!.earlier;
+    expect(decoded.earlier?.body).toEqual(
+      earlier === undefined ? undefined : fixture(TIDE_REPLY_GOLDEN[earlier]!.multipart),
+    );
+  });
+
+  test("the goldens cover an earlier manifest, an earlier rollback and no earlier reply", () => {
+    expect(ROLLOUTS.map((f) => rollout(f).earlier?.kind)).toEqual([
+      "manifest",
+      "rollBackToEmbedded",
+      undefined,
+    ]);
+    expect(ROLLOUTS.every((f) => rollout(f).new.updateId === NEW_ID)).toBe(true);
+    expect(goldenReplyOf(ROLLOUT_NEW, fixture)).toEqual(rollout().new);
+  });
+
+  test.each(V1)("%s decodes the same through decodePointer and decodeStoredReply", (file) => {
+    expect(decodePointer(fixture(file))).toEqual(decodeStoredReply(fixture(file)));
+  });
+
+  // Written by the encoder before rollouts existed, so a matching encoder and decoder change cannot pass.
+  test.each<[string, Record<string, string>]>([
+    [
+      "compat-v1-manifest.reply.json",
+      {
+        kind: "manifest",
+        updateId: "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90",
+        boundary: BOUNDARY,
+        manifestFilters: 'branch="main"',
+      },
+    ],
+    ["compat-v1-rollback.reply.json", { kind: "rollBackToEmbedded", boundary: BOUNDARY }],
+    ["compat-v1-no-update.reply.json", { kind: "noUpdateAvailable", boundary: BOUNDARY }],
+  ])("the earlier version-1 record %s decodes and re-encodes to its bytes", (file, fields) => {
+    const bytes = fixture(file);
+    const decoded = decodeStoredReply(bytes);
+    expect(decoded).toMatchObject(fields);
+    expect(Object.keys(decoded).sort()).toEqual([...Object.keys(fields), "body"].sort());
+    expect(decodePointer(bytes)).toEqual(decoded);
+    expect(encodeStoredReply(decoded)).toEqual(bytes);
+  });
+
+  test.each(ROLLOUTS)("decodeStoredReply refuses %s as unsupported", async (file) => {
+    await rejects(() => decodeStoredReply(fixture(file)), "version", "is not supported");
+  });
+
+  test.each<[string, unknown, string]>([
+    ["0", 0, "is not supported"],
+    ["3", 3, "is not supported"],
+    ['"2"', "2", "must be an integer"],
+    ["2.5", 2.5, "must be an integer"],
+  ])("version %s is refused by both decoders", async (_, version, message) => {
+    const bytes = record((o) => (o.version = version));
+    await rejects(() => decodePointer(bytes), "version", message);
+    await rejects(() => decodeStoredReply(bytes), "version", message);
+  });
+
+  // The version-1 reader stays as loose as before: key order and whitespace are not checked.
+  test("a version-1 record with reordered keys and whitespace decodes through decodePointer", () => {
+    const o = JSON.parse(text(fixture("manifest.reply.json"))) as Record<string, unknown>;
+    const reordered = Object.fromEntries(Object.entries(o).reverse());
+    for (const bytes of [utf8(JSON.stringify(reordered)), utf8(JSON.stringify(o, null, 2))]) {
+      expect(decodePointer(bytes)).toEqual(decodeStoredReply(fixture("manifest.reply.json")));
+    }
+  });
+
+  const replaceText = (from: string, to: string) => () => {
+    const t = goldenText();
+    expect(t).toContain(from);
+    return utf8(t.replace(from, to));
+  };
+  test.each<[string, () => Uint8Array, string, string]>([
+    [
+      "swapped outer keys",
+      () => record((o) => (o.kind = (delete o.kind, "rollout"))),
+      "record",
+      "must be exactly what encodeRollout writes",
+    ],
+    [
+      "swapped nested keys",
+      () => record((o) => (o.new.kind = (delete o.new.kind, "manifest"))),
+      "record",
+      "must be exactly",
+    ],
+    ["added whitespace", () => record(() => undefined, 1), "record", "must be exactly"],
+    [
+      "an escaped character",
+      replaceText('"kind":"rollout"', '"kind":"rollou\\u0074"'),
+      "record",
+      "must be exactly",
+    ],
+    ["percent 1e1", replaceText('"percent":12.5', '"percent":1e1'), "record", "must be exactly"],
+    ["percent -0", replaceText('"percent":12.5', '"percent":-0'), "record", "must be exactly"],
+    ["percent 50.0", replaceText('"percent":12.5', '"percent":50.0'), "record", "must be exactly"],
+    [
+      "an unknown outer field",
+      () => record((o) => (o.createdAt = "now")),
+      "createdAt",
+      "is not a field of a rollout record",
+    ],
+    [
+      "an unknown nested field",
+      () => record((o) => (o.new.createdAt = "now")),
+      "new.createdAt",
+      "is not a field of a manifest reply",
+    ],
+    [
+      "a nested version",
+      () => record((o) => (o.earlier.version = 1)),
+      "earlier.version",
+      "is not a field of a manifest reply",
+    ],
+    ["a missing version", () => record((o) => delete o.version), "version", "is missing"],
+    ["a missing kind", () => record((o) => delete o.kind), "kind", "is missing"],
+    ["a missing percent", () => record((o) => delete o.percent), "percent", "is missing"],
+    ["a missing new", () => record((o) => Reflect.deleteProperty(o, "new")), "new", "is missing"],
+    [
+      "a missing earlier",
+      () => record((o) => Reflect.deleteProperty(o, "earlier")),
+      "earlier",
+      "is missing",
+    ],
+    ["a missing nested body", () => record((o) => delete o.new.body), "new.body", "is missing"],
+    ["another kind", () => record((o) => (o.kind = "manifest")), "kind", "must be rollout"],
+    ["percent -0.01", () => record((o) => (o.percent = -0.01)), "percent", "from 0 to 100"],
+    ["percent 100.01", () => record((o) => (o.percent = 100.01)), "percent", "from 0 to 100"],
+    ["percent 12.345", () => record((o) => (o.percent = 12.345)), "percent", "steps of 0.01"],
+    ['percent "50"', () => record((o) => (o.percent = "50")), "percent", "must be a number"],
+    ["percent null", () => record((o) => (o.percent = null)), "percent", "must be a number"],
+    [
+      "a new rollback",
+      () => record((o) => (o.new = nested("rollback.reply.json"))),
+      "new.kind",
+      "must be a manifest reply",
+    ],
+    [
+      "a new no-update",
+      () => record((o) => (o.new = nested("no-update.reply.json"))),
+      "new.kind",
+      "must be a manifest reply",
+    ],
+    [
+      "a null new",
+      () => record((o) => Object.assign(o, { new: null })),
+      "new",
+      "must be a manifest reply",
+    ],
+    [
+      "an earlier no-update",
+      () => record((o) => (o.earlier = nested("no-update.reply.json"))),
+      "earlier.kind",
+      "must be a manifest or rollBackToEmbedded reply",
+    ],
+    [
+      "an earlier manifest with the new update ID",
+      () => record((o) => (o.earlier.updateId = NEW_ID)),
+      "earlier.updateId",
+      "must differ from new.updateId",
+    ],
+    [
+      "an uppercase nested update ID",
+      () => record((o) => (o.new.updateId = NEW_ID.toUpperCase())),
+      "new.updateId",
+      "lowercase UUID",
+    ],
+    [
+      "a record one byte over the limit",
+      () => new Uint8Array(MAX_REPLY_BYTES + 1),
+      "record",
+      "is too large",
+    ],
+  ])("decodePointer rejects %s", async (_, bytes, field, message) => {
+    await rejects(() => decodePointer(bytes()), field, message);
+  });
+
+  test("a record of exactly the limit round-trips and one byte more is refused", async () => {
+    const bytes = encodeRollout(rolloutOfSize(MAX_REPLY_BYTES));
+    expect(bytes.length).toBe(MAX_REPLY_BYTES);
+    expect(decodePointer(bytes)).toEqual(rolloutOfSize(MAX_REPLY_BYTES));
+    await rejects(() => encodeRollout(rolloutOfSize(MAX_REPLY_BYTES + 1)), "record", "too large");
+  });
+
+  test.each<[string, () => Record<string, unknown>, string]>([
+    ["percent 12.345", () => ({ ...rollout(), percent: 12.345 }), "percent"],
+    ["percent NaN", () => ({ ...rollout(), percent: Number.NaN }), "percent"],
+    ["percent 101", () => ({ ...rollout(), percent: 101 }), "percent"],
+    [
+      "a new rollback",
+      () => ({ ...rollout(), new: rollout("rollout-rollback.reply.json").earlier }),
+      "new.kind",
+    ],
+    ["a missing new", () => ({ ...rollout(), new: undefined }), "new"],
+    [
+      "an earlier no-update",
+      () => ({ ...rollout(), earlier: goldenReplyOf("no-update.reply.json", fixture) }),
+      "earlier.kind",
+    ],
+    [
+      "an earlier manifest with the new update ID",
+      () => ({ ...rollout(), earlier: { ...rollout().earlier, updateId: NEW_ID } }),
+      "earlier.updateId",
+    ],
+    [
+      "a new body that is not UTF-8",
+      () => ({ ...rollout(), new: { ...rollout().new, body: new Uint8Array([0xc3]) } }),
+      "new.body",
+    ],
+  ])("encodeRollout rejects %s", async (_, value, field) => {
+    await rejects(() => encodeRollout(loose(value())), field);
+  });
+
+  test(`decode(encode(rollout)) returns both bodies byte for byte (seed ${seed})`, () => {
+    const body = fc.string({ unit: "binary", minLength: 1 }).map(utf8);
+    const boundary = fc.stringMatching(/^[0-9A-Za-z_-]{1,70}$/);
+    const manifest = fc.record({
+      kind: fc.constant("manifest" as const),
+      updateId: fc.uuid(),
+      boundary,
+      manifestFilters: fc.constantFrom("", 'branch="main"'),
+      body,
+    });
+    const earlier = fc.oneof(
+      fc.constant(undefined),
+      manifest,
+      fc.record({ kind: fc.constant("rollBackToEmbedded" as const), boundary, body }),
+    );
+    const value = fc
+      .record({
+        kind: fc.constant("rollout" as const),
+        percent: fc.integer({ min: 0, max: 10_000 }).map((n) => n / 100),
+        new: manifest,
+        earlier,
+      })
+      .filter((r) => r.earlier?.kind !== "manifest" || r.earlier.updateId !== r.new.updateId);
+    fc.assert(
+      fc.property(value, (r) => {
+        const bytes = encodeRollout(r);
+        const decoded = decodePointer(bytes);
+        expect(decoded).toEqual(r);
+        if (decoded.kind !== "rollout") throw new Error("not a rollout");
+        expect(decoded.new.body).toEqual(r.new.body);
+        expect(decoded.earlier?.body).toEqual(r.earlier?.body);
+        expect(encodeRollout(decoded)).toEqual(bytes);
+      }),
+      { seed },
+    );
+  });
+});
+
+describe("rollout bucketing", () => {
+  const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14";
+  const OTHER_ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
+  const at = (percent: number): Rollout => ({
+    ...goldenRollout("rollout-manifest.reply.json", fixture),
+    percent,
+  });
+
+  test.each<[string | undefined, string | undefined]>([
+    [CLIENT_LOW, CLIENT_LOW],
+    [CLIENT_LOW.toUpperCase(), CLIENT_LOW],
+    [undefined, undefined],
+    ["", undefined],
+    ["not-a-uuid", undefined],
+    [`{${CLIENT_LOW}}`, undefined],
+    [CLIENT_LOW.slice(1), undefined],
+    [` ${CLIENT_LOW}`, undefined],
+    [`${CLIENT_LOW}, ${CLIENT_LOW}`, undefined], // A repeated header, as both runtimes join it.
+  ])("rolloutClientId(%j) is %j", (header, id) => {
+    expect(rolloutClientId(header)).toBe(id);
+  });
+
+  // Cross-checked with `printf '<updateId>:<clientId>' | shasum -a 256`: first 4 bytes mod 10,000.
+  test.each<[string, string, number]>([
+    [CLIENT_LOW, NEW_ID, 941],
+    [CLIENT_HIGH, NEW_ID, 8977],
+    ["99999999-9999-4999-8999-999999999999", NEW_ID, 41],
+    ["22222222-2222-4222-8222-222222222222", NEW_ID, 9554],
+  ])("the bucket of %s in %s is %i", async (client, update, bucket) => {
+    expect(await rolloutBucket(client, update)).toBe(bucket);
+    expect(await rolloutBucket(client, update)).toBe(bucket);
+    expect(await rolloutBucket(client.toUpperCase(), update)).toBe(bucket);
+  });
+
+  test("a client ID or update ID that is not a UUID is refused", async () => {
+    await rejects(() => rolloutBucket("not-a-uuid", NEW_ID), "clientId", "must be a UUID");
+    await rejects(() => rolloutBucket(CLIENT_LOW, NEW_ID.toUpperCase()), "updateId");
+  });
+
+  const clients = fc.sample(fc.uuid(), { numRuns: 100_000, seed });
+  const bucketsOf = (update: string) => Promise.all(clients.map((c) => rolloutBucket(c, update)));
+
+  test(`over 100,000 client IDs the new side's share is within 5 standard deviations of the percentage (seed ${seed})`, async () => {
+    const buckets = await bucketsOf(NEW_ID);
+    for (const percent of [1, 10, 33.33, 50, 99.99]) {
+      const p = percent / 100;
+      const share = buckets.filter((b) => b < Math.round(percent * 100)).length / buckets.length;
+      const tolerance = 5 * Math.sqrt((p * (1 - p)) / buckets.length);
+      expect([percent, Math.abs(share - p) <= tolerance]).toEqual([percent, true]);
+    }
+  });
+
+  test(`another update ID reshuffles about half the devices at 50% (seed ${seed})`, async () => {
+    const [a, b] = await Promise.all([bucketsOf(NEW_ID), bucketsOf(OTHER_ID)]);
+    const moved = a.filter((x, i) => x < 5000 !== b[i]! < 5000).length / a.length;
+    expect(Math.abs(moved - 0.5)).toBeLessThan(5 * Math.sqrt(0.25 / a.length));
+  });
+
+  // A threshold equal to the bucket is the earlier side; 0.01 percentage points more is the new side.
+  test.each<[string, number]>([
+    [CLIENT_LOW, 9.41],
+    [CLIENT_HIGH, 89.77],
+  ])("%s is earlier at %d% and new 0.01 points above", async (client, percent) => {
+    expect(await rolloutSide(at(percent), client)).toBe("earlier");
+    expect(await rolloutSide(at(Math.round(percent * 100 + 1) / 100), client)).toBe("new");
+    expect(await rolloutSide(at(Math.round(percent * 100 + 1) / 100), client.toUpperCase())).toBe(
+      "new",
+    );
+  });
+
+  test.each<[string, number, string | undefined, "new" | "earlier"]>([
+    ["a low bucket at 0", 0, CLIENT_LOW, "earlier"],
+    ["no client ID at 0", 0, undefined, "earlier"],
+    ["a high bucket at 100", 100, CLIENT_HIGH, "new"],
+    ["no client ID at 100", 100, undefined, "new"],
+    ["a malformed client ID at 100", 100, "not-a-uuid", "new"],
+    ["no client ID at 99.99", 99.99, undefined, "earlier"],
+    ["a malformed client ID at 99.99", 99.99, "not-a-uuid", "earlier"],
+    ["a low bucket at 12.5", 12.5, CLIENT_LOW, "new"],
+    ["a high bucket at 12.5", 12.5, CLIENT_HIGH, "earlier"],
+  ])("%s is %s", async (_, percent, client, side) => {
+    expect(await rolloutSide(at(percent), client)).toBe(side);
   });
 });
 

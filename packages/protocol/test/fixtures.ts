@@ -1,9 +1,11 @@
 // Shared by the tests and the fixture generator; Web APIs only, so it also runs on workerd.
-import type { Part, PartName, Signer, StoredReply } from "../src/index.ts";
+import type { Part, PartName, Rollout, Signer, StoredReply } from "../src/index.ts";
 import { base64 } from "../src/hash.ts";
-import { encodeMultipart, encodeStoredReply, expoSignature } from "../src/index.ts";
+import { encodeMultipart, encodeRollout, encodeStoredReply, expoSignature } from "../src/index.ts";
 
 export const BOUNDARY = "tide_fixture_boundary";
+/** The rollout new side's boundary, so a reply carrying the wrong side's content-type fails. */
+export const NEXT_BOUNDARY = "tide_fixture_next";
 
 interface GoldenPart {
   readonly name: PartName;
@@ -11,22 +13,44 @@ interface GoldenPart {
   readonly signed?: true;
 }
 
+/** A multipart golden: the boundary it is framed with and its parts. */
+interface Golden {
+  readonly boundary: string;
+  readonly parts: readonly GoldenPart[];
+}
+
 /** Tide's multipart goldens, signed by the generator with keyid `main` over `certificate.pem`. */
-export const TIDE_GOLDEN: Readonly<Record<string, readonly GoldenPart[]>> = {
-  "manifest.multipart": [
-    { name: "manifest", file: "manifest.json", signed: true },
-    { name: "extensions", file: "extensions.json" },
-  ],
-  "rollback.multipart": [{ name: "directive", file: "directive-rollback.json", signed: true }],
-  "no-update.multipart": [{ name: "directive", file: "directive-no-update.json", signed: true }],
+export const TIDE_GOLDEN: Readonly<Record<string, Golden>> = {
+  "manifest.multipart": {
+    boundary: BOUNDARY,
+    parts: [
+      { name: "manifest", file: "manifest.json", signed: true },
+      { name: "extensions", file: "extensions.json" },
+    ],
+  },
+  "manifest-next.multipart": {
+    boundary: NEXT_BOUNDARY,
+    parts: [{ name: "manifest", file: "manifest-next.json", signed: true }],
+  },
+  "rollback.multipart": {
+    boundary: BOUNDARY,
+    parts: [{ name: "directive", file: "directive-rollback.json", signed: true }],
+  },
+  "no-update.multipart": {
+    boundary: BOUNDARY,
+    parts: [{ name: "directive", file: "directive-no-update.json", signed: true }],
+  },
 };
 
 /** expo-updates' chain-mode vector: Expo's signature, keyid defaulting to `root`, verified by the chain's leaf. */
-export const EXPO_GOLDEN: Readonly<Record<string, readonly GoldenPart[]>> = {
-  "expo.multipart": [
-    { name: "directive", file: "expo-directive.json", signed: true },
-    { name: "certificate_chain", file: "expo-chain.pem" },
-  ],
+export const EXPO_GOLDEN: Readonly<Record<string, Golden>> = {
+  "expo.multipart": {
+    boundary: BOUNDARY,
+    parts: [
+      { name: "directive", file: "expo-directive.json", signed: true },
+      { name: "certificate_chain", file: "expo-chain.pem" },
+    ],
+  },
 };
 
 /** Returns the parts of a golden, with each signed part's signature from `signature`. */
@@ -49,9 +73,9 @@ export async function signedFixtures(
   signer: Signer,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> {
   const out: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const [file, parts] of Object.entries(TIDE_GOLDEN)) {
+  for (const [file, { boundary, parts }] of Object.entries(TIDE_GOLDEN)) {
     const signed = await goldenParts(parts, read, (body) => expoSignature(body, signer));
-    out[file] = encodeMultipart(signed, BOUNDARY).body;
+    out[file] = encodeMultipart(signed, boundary).body;
   }
   return out;
 }
@@ -71,6 +95,15 @@ export const TIDE_REPLY_GOLDEN: Readonly<
       manifestFilters: 'branch="main"', // manifest.json's metadata
     },
   },
+  "manifest-next.reply.json": {
+    multipart: "manifest-next.multipart",
+    reply: {
+      kind: "manifest",
+      updateId: "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14", // manifest-next.json's id
+      boundary: NEXT_BOUNDARY,
+      manifestFilters: 'branch="next"', // manifest-next.json's metadata
+    },
+  },
   "rollback.reply.json": {
     multipart: "rollback.multipart",
     reply: { kind: "rollBackToEmbedded", boundary: BOUNDARY },
@@ -81,16 +114,50 @@ export const TIDE_REPLY_GOLDEN: Readonly<
   },
 };
 
-/** Returns each stored reply golden's bytes, wrapping the multiparts `read` returns. */
-export function replyGoldens(
-  read: (file: string) => Uint8Array<ArrayBuffer>,
-): Record<string, Uint8Array<ArrayBuffer>> {
-  return Object.fromEntries(
-    Object.entries(TIDE_REPLY_GOLDEN).map(([file, { multipart, reply }]) => [
-      file,
-      encodeStoredReply({ ...reply, body: read(multipart) }),
-    ]),
-  );
+/** Each rollout golden: its percentage and the reply goldens on each side; no earlier golden means no-update. */
+export const TIDE_ROLLOUT_GOLDEN: Readonly<
+  Record<string, { readonly percent: number; readonly earlier: string | undefined }>
+> = {
+  "rollout-manifest.reply.json": { percent: 12.5, earlier: "manifest.reply.json" },
+  "rollout-rollback.reply.json": { percent: 50, earlier: "rollback.reply.json" },
+  "rollout-none.reply.json": { percent: 0.01, earlier: undefined },
+};
+/** Every rollout golden's new side. */
+export const ROLLOUT_NEW = "manifest-next.reply.json";
+// Client IDs whose buckets in the rollout of manifest-next.json's id are pinned: 941 and 8977 of 10,000.
+export const CLIENT_LOW = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+export const CLIENT_HIGH = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+type Read = (file: string) => Uint8Array<ArrayBuffer>;
+
+/** Returns the reply golden `file`'s fields with the body `read` returns for its multipart. */
+export function goldenReply(file: string, read: Read): StoredReply {
+  const golden = TIDE_REPLY_GOLDEN[file];
+  if (golden === undefined) throw new Error(`${file} is not a reply golden`);
+  return { ...golden.reply, body: read(golden.multipart) };
+}
+
+/** Returns the rollout golden `file`'s fields, its sides built from the reply goldens. */
+export function goldenRollout(file: string, read: Read): Rollout {
+  const golden = TIDE_ROLLOUT_GOLDEN[file];
+  if (golden === undefined) throw new Error(`${file} is not a rollout golden`);
+  const side = (name: string) => goldenReply(name, read) as Rollout["earlier"];
+  return {
+    kind: "rollout",
+    percent: golden.percent,
+    new: side(ROLLOUT_NEW) as Rollout["new"],
+    earlier: golden.earlier === undefined ? undefined : side(golden.earlier),
+  };
+}
+
+/** Returns each stored reply and rollout golden's bytes, wrapping the multiparts `read` returns. */
+export function replyGoldens(read: Read): Record<string, Uint8Array<ArrayBuffer>> {
+  const out: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const file of Object.keys(TIDE_REPLY_GOLDEN))
+    out[file] = encodeStoredReply(goldenReply(file, read));
+  for (const file of Object.keys(TIDE_ROLLOUT_GOLDEN))
+    out[file] = encodeRollout(goldenRollout(file, read));
+  return out;
 }
 
 export const RSA_SHA256 = {
