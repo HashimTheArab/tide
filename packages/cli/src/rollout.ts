@@ -139,8 +139,9 @@ export async function earlierOf(
 }
 
 /**
- * Returns the line of a target an earlier run of this same publish already staged: its pointer holds a rollout whose
- * new update's release record is `draft`'s. At `percent` it is skipped once both sides verify; at another it refuses.
+ * Returns the line of a target an earlier run of this same publish already staged: its pointer holds an unfinished
+ * rollout whose new update's release record is `draft`'s. At `percent` it is skipped once both sides verify; at another
+ * it refuses. A complete rollout is no partial run: its new reply becomes the earlier one.
  */
 export async function stagedRollout(
   writer: Writer,
@@ -150,7 +151,7 @@ export async function stagedRollout(
 ): Promise<PointerWrite | undefined> {
   const { key, previous } = target;
   const { reply, sides = [] } = previous;
-  if (reply?.kind !== "rollout") return undefined;
+  if (reply?.kind !== "rollout" || reply.percent === 100) return undefined;
   const record = await readReleaseRecord(writer.bucket, recordKey(reply.new.updateId));
   if (record === undefined) return undefined;
   const { updateId, createdAt } = record;

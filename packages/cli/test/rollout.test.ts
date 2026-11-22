@@ -11,6 +11,7 @@ import {
   decodeStoredReply,
   encodeMultipart,
   encodeRollout,
+  encodeStoredReply,
   expoSignature,
   parseMultipart,
   sha256Base64Url,
@@ -679,6 +680,51 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       ]);
       expect(store.snapshot()).toEqual(before);
     }
+  });
+
+  test("a complete rollout's unchanged export is no rerun: a new rollout over it starts from its new reply", async () => {
+    const store = open();
+    expect((await publishTo(store, artifact(), ["--rollout", "50"])).code).toBe(0);
+    expect((await rolloutTo(store, "complete")).code).toBe(0);
+    const complete = stored(store, IOS);
+    // iOS exports the same code again; only Android changes, to another runtime.
+    const androidOnly = artifact({
+      fields: { platforms: { ios: { runtimeVersion: "1.0.0" }, android: { runtimeVersion: "2" } } },
+    });
+    const next = await publishTo(store, androidOnly, ["--rollout", "25"]);
+    expect([next.code, next.err]).toEqual([0, []]);
+    expect(rolloutAt(store, IOS).percent).toBe(25);
+    expect(text(stored(store, IOS)).endsWith(`"earlier":${newText(complete)}}`)).toBe(true);
+  });
+
+  test("publish --rollout accepts a record only when it fits at every percentage tide rollout can write", async () => {
+    /** A store whose iOS pointer is a manifest padded by `n` bytes, which publish --rollout keeps as the earlier reply. */
+    const seeded = async (n: number) => {
+      const store = open();
+      const reply = await manifestReply(ID_A, Date.now() - 1000, { extra: { pad: "x".repeat(n) } });
+      await bucketPut(store, IOS, encodeStoredReply(reply));
+      return store;
+    };
+    const calibrate = await seeded(1000);
+    expect((await publishTo(calibrate, iosExport(), ["--rollout", "50"])).code).toBe(0);
+    // At 99.99 the record is three bytes longer than at 50, and at 100 one byte.
+    const fits = 1000 + MAX_REPLY_BYTES - 3 - stored(calibrate, IOS).length;
+
+    const store = await seeded(fits);
+    expect((await publishTo(store, iosExport(), ["--rollout", "50"])).code).toBe(0);
+    expect(stored(store, IOS).length).toBe(MAX_REPLY_BYTES - 3);
+    expect((await rolloutTo(store, "99.99", ONLY_IOS)).code).toBe(0);
+    expect(stored(store, IOS).length).toBe(MAX_REPLY_BYTES);
+    expect((await rolloutTo(store, "complete", ONLY_IOS)).code).toBe(0);
+
+    const over = await seeded(fits + 1);
+    const before = over.snapshot();
+    expect(await publishTo(over, iosExport(), ["--rollout", "50"])).toEqual({
+      code: 2,
+      out: [],
+      err: [`tide: ${IOS}: record is too large: over ${MAX_REPLY_BYTES} bytes`],
+    });
+    expect(over.snapshot()).toEqual(before);
   });
 
   test("a rollout record over the size limit on the second target refuses before the first is written", async () => {

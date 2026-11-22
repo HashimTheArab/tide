@@ -185,14 +185,14 @@ async function prepare(
     }
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
-    writes.push(
-      percent === undefined
-        ? c.pointer
-        : {
-            ...c.pointer,
-            reply: rolloutRecord(t.key, { kind: "rollout", percent, new: c.manifest, earlier }),
-          },
-    );
+    if (percent === undefined) {
+      writes.push(c.pointer);
+      continue;
+    }
+    const next: Rollout = { kind: "rollout", percent, new: c.manifest, earlier };
+    // Sized at the longest percentage too, so tide rollout can move it to any goal within the limit.
+    rolloutRecord(t.key, { ...next, percent: 99.99 });
+    writes.push({ ...c.pointer, reply: rolloutRecord(t.key, next) });
   }
   const stored = await storedContent(writer.bucket);
   // Before the plan, so its fresh certificate check also covers the time spent diffing.

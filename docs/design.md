@@ -443,8 +443,9 @@ reply the pointer held (a manifest or a rollback), a complete rollout's new repl
 none when there was no pointer, so devices outside the rollout get `reply/no-update`. Over any other rollout it
 refuses: finish that one with `tide rollout complete`, or replace it with a plain publish, republish or rollback. A
 percentage is 0.01 to 99.99 in steps of 0.01, written as a plain decimal (`12.5`); 0 and 100 are `revert` and
-`complete`. A value starting with `-` is a usage error, since the argument parser reads it as an option. stdout and
-exit codes as publish.
+`complete`. A value starting with `-` is a usage error, since the argument parser reads it as an option. The record
+must fit the size limit at `99.99`, the longest percentage, so `tide rollout` can always move it. stdout and exit
+codes as publish.
 
 `tide rollout <percent>|complete|revert --channel <name> --runtime-version <v> [--platform ios|android]...` rewrites
 each existing rollout from its stored bodies, byte for byte, and signs nothing: it reads the build pins (Keys) and
@@ -469,8 +470,8 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
 - **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
   version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
 - **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
-  writes nothing to a target already at its goal. `publish --rollout` skips a target whose rollout is at the same
-  percentage and whose new update's release record is the one this export would write there (same code, channel,
+  writes nothing to a target already at its goal. `publish --rollout` skips a target whose unfinished rollout is at the
+  same percentage and whose new update's release record is the one this export would write there (same code, channel,
   URLs and `expoClient`), once both its sides verify, and prints that target's stored line; at another percentage it
   refuses. So a rerun after a partial write, or after a committed PUT whose response was lost, writes only the
   targets left.
