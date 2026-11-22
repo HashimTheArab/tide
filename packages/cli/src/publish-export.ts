@@ -33,8 +33,6 @@ interface ExportedAsset extends ExportedFile {
 export interface ExportedPlatform {
   readonly bundle: ExportedFile;
   readonly assets: readonly ExportedAsset[];
-  // As metadata.json names them, every asset path kept before identical assets collapse.
-  readonly paths: { readonly bundle: string; readonly assets: readonly string[] };
 }
 
 /** What `tide export` writes beside `dist/`: only what every manifest or shipped build already makes public. */
@@ -218,10 +216,8 @@ export async function readExport<T extends { readonly platform: Platform }>(
     if (entry === undefined)
       throw new PublishError(`export has no ${platform} bundle: ${at} is missing`);
     if (!Array.isArray(list)) throw new PublishError(`export ${at}.assets is not an array`);
-    const bundlePath = member(entry, "bundle");
-    const bundle = await file(bundlePath, `${at}.bundle`);
+    const bundle = await file(member(entry, "bundle"), `${at}.bundle`);
     const assets = new Map<string, ExportedAsset>();
-    const assetPaths: string[] = [];
     for (const [i, item] of (list as unknown[]).entries()) {
       const name = `${at}.assets[${i}]`;
       const path = member(item, "path");
@@ -236,7 +232,6 @@ export async function readExport<T extends { readonly platform: Platform }>(
       }
       const key = match[1] ?? "";
       const exported = await file(path, `${name}.path`);
-      assetPaths.push(path as string);
       if (createHash("md5").update(exported.bytes).digest("hex") !== key) {
         throw new PublishError(
           `export ${name}.path does not hash to the key in its name: the file changed after expo export`,
@@ -252,12 +247,7 @@ export async function readExport<T extends { readonly platform: Platform }>(
         throw new PublishError(`export ${name} lists key ${key} for two different files`);
       }
     }
-    result.push({
-      ...target,
-      bundle,
-      assets: [...assets.values()],
-      paths: { bundle: bundlePath as string, assets: assetPaths },
-    });
+    result.push({ ...target, bundle, assets: [...assets.values()] });
   }
   return { platforms: result, files };
 }

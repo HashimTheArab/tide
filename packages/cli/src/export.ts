@@ -15,9 +15,9 @@ import type { PublishOptions } from "./publish.ts";
 import {
   OVERRIDE_VARIABLE,
   appHermesc,
-  captureWrapper,
-  deltaCompile,
-  readBases,
+  checkDelta,
+  deltaWrapper,
+  readBase,
 } from "./hermes-delta.ts";
 import {
   KeyError,
@@ -39,7 +39,7 @@ import { PublishError, platformsOf } from "./publish-record.ts";
 import { parsed, report } from "./publish.ts";
 
 export const EXPORT_USAGE =
-  "usage: tide export --out <dir> [--platform ios|android]... [--runtime-version <version>] [--project-root <dir>] [--pass-env <name>]... [--base-bytecode <platform>=<file>]...";
+  "usage: tide export --out <dir> [--platform ios|android]... [--runtime-version <version>] [--project-root <dir>] [--pass-env <name>]... [--base-bytecode <platform>=<file>]";
 const STDOUT_LIMIT = 16 * 1024 * 1024;
 // What every child sees from the caller: locale, paths and CI flags, and what Expo inlines into the public bundle.
 const INHERITED = /^(?:PATH|HOME|TMPDIR|LANG|LANGUAGE|TZ|CI|LC_[A-Z]+|EXPO_PUBLIC_\w+)$/;
@@ -69,12 +69,12 @@ async function run(
   env: Env,
   { out: print, now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
-  const { out, platforms, runtimeVersion, projectRoot, passEnv, bases } = parse(args, cwd);
+  const { out, platforms, runtimeVersion, projectRoot, passEnv, base } = parse(args, cwd);
   const childEnv = environment(env, passEnv);
   const runner: Runner = (command, path, args, dir, stdout) =>
     runChild(command, path, args, dir, childEnv, stdout);
   // Before any Expo tool runs, so a missing compiler or a base it cannot read leaves no trace.
-  const hermesc = bases.size === 0 ? undefined : await appHermesc(projectRoot, bases, runner);
+  const compiler = base === undefined ? undefined : await appHermesc(projectRoot, base, runner);
 
   const config = await expoJson(projectRoot, childEnv, ["config", "--json"], "expo");
   const updates = member(config, "updates");
@@ -148,11 +148,9 @@ async function run(
     );
   }
   const staging = mkdtempSync(join(tmpdir(), "tide-export-"));
-  const scratch = hermesc === undefined ? undefined : mkdtempSync(join(tmpdir(), "tide-hermes-"));
+  const wrapper = compiler === undefined ? undefined : deltaWrapper(compiler);
   try {
     const selected = platforms.flatMap((p) => ["--platform", p]);
-    const wrapper =
-      hermesc === undefined || scratch === undefined ? undefined : captureWrapper(scratch, hermesc);
     await runTool(
       projectRoot,
       wrapper === undefined ? childEnv : { ...childEnv, [OVERRIDE_VARIABLE]: wrapper.override },
@@ -163,12 +161,11 @@ async function run(
       staging,
       platforms.map((platform) => ({ platform })),
     );
-    const files =
-      wrapper === undefined ? exported.files : await deltaCompile(exported, bases, wrapper, runner);
+    if (wrapper !== undefined) checkDelta(exported.platforms, wrapper);
     // Only what metadata.json names: Expo also copies the project's public/ folder into its output.
-    for (const [path, bytes] of files) write(join(out, "dist", path), bytes);
+    for (const [path, bytes] of exported.files) write(join(out, "dist", path), bytes);
   } finally {
-    for (const dir of [staging, scratch]) {
+    for (const dir of [staging, wrapper?.scratch]) {
       if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
     }
   }
@@ -207,10 +204,6 @@ function parse(args: readonly string[], cwd: string) {
       );
     }
   }
-  const given = values["base-bytecode"] ?? [];
-  if (given.length > 0 && passEnv.includes(OVERRIDE_VARIABLE)) {
-    throw new PublishError(`--pass-env ${OVERRIDE_VARIABLE} would bypass --base-bytecode`);
-  }
   const platforms = platformsOf(values.platform);
   return {
     // All against the caller's directory, before any child runs elsewhere.
@@ -219,7 +212,7 @@ function parse(args: readonly string[], cwd: string) {
     platforms,
     runtimeVersion,
     passEnv,
-    bases: readBases(given, platforms, cwd),
+    base: readBase(values["base-bytecode"] ?? [], platforms, cwd),
   };
 }
 

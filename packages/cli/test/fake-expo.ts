@@ -88,7 +88,11 @@ function hermescPath(): string | undefined {
     return undefined;
   }
   const host = process.platform === "darwin" ? "osx-bin" : "linux64-bin";
-  const override = process.env.REACT_NATIVE_OVERRIDE_HERMES_DIR;
+  // FAKE_EXPO_IGNORES_OVERRIDE stands in for an Expo that no longer reads the variable.
+  const override =
+    process.env.FAKE_EXPO_IGNORES_OVERRIDE === undefined
+      ? process.env.REACT_NATIVE_OVERRIDE_HERMES_DIR
+      : undefined;
   const found = [
     override === undefined ? "" : `${override}/build/bin/hermesc`,
     `${rn}/ReactAndroid/hermes-engine/build/hermes/bin/hermesc`,

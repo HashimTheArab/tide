@@ -216,8 +216,7 @@ export async function exportUpdate(
 ) {
   writeMarker(app, marker);
   const out = join(stack.dir, `export-${app.version}-${marker}`);
-  const bases = base === undefined ? {} : { [app.platform]: base };
-  await cli.export(app.dir, out, [app.platform], runtimeVersion, bases);
+  await cli.export(app.dir, out, [app.platform], runtimeVersion, base);
   return out;
 }
 

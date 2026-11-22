@@ -265,8 +265,10 @@ every base shrink ([0002](decisions/0002-hermes-delta-compiles.md): 70% fewer by
 does it):
 
 ```sh
-npx tide export --out "$RUNNER_TEMP/export" --base-bytecode android=index.android.bundle
+npx tide export --out "$RUNNER_TEMP/export" --platform android --base-bytecode android=index.android.bundle
 ```
+
+Export and publish each platform on its own: a based export takes one `--platform` and one base.
 
 - **The base** is the file you give `tide register-build --bundle` for that platform's release build of the runtime
   version being published. Keep it in the repository or a build artifact the export job reads; it needs no secret.

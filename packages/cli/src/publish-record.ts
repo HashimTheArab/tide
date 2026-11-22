@@ -28,7 +28,7 @@ export type Platform = "ios" | "android";
 /** Returns the `--platform` values, both by default; a repeat is refused. */
 export function platformsOf(values: readonly string[] | undefined): Platform[] {
   const platforms: Platform[] = [];
-  for (const p of (values ?? ["ios", "android"]).map(platformOf)) {
+  for (const p of (values ?? ["ios", "android"]).map((v) => platformOf(v))) {
     // Two writes over one read ETag would fail the run against its own pointer.
     if (platforms.includes(p)) throw new PublishError(`--platform ${p} is given twice`);
     platforms.push(p);
@@ -36,10 +36,10 @@ export function platformsOf(values: readonly string[] | undefined): Platform[] {
   return platforms;
 }
 
-/** Returns `value` as a platform, or refuses it. */
-export function platformOf(value: string): Platform {
+/** Returns `value` as a platform, or refuses it as `name`. */
+export function platformOf(value: string, name = "--platform"): Platform {
   if (value !== "ios" && value !== "android")
-    throw new PublishError("--platform must be ios or android");
+    throw new PublishError(`${name} must be ios or android`);
   return value;
 }
 

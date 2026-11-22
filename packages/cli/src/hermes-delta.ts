@@ -1,13 +1,10 @@
-// `tide export --base-bytecode`: the launch bundle compiled with the app's hermesc against a fixed base (decision 0002).
+// `tide export --base-bytecode`: Expo compiles the launch bundle with the app's hermesc against a fixed base (decision 0002).
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
-  readdirSync,
   realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -17,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import type { ExportedPlatform } from "./publish-export.ts";
 import type { Platform } from "./publish-record.ts";
 import { readRegular } from "./publish-export.ts";
-import { PublishError } from "./publish-record.ts";
+import { PublishError, platformOf } from "./publish-record.ts";
 
 /** Runs `command` in `cwd` with the export's child environment; returns its stdout when `pipe`. */
 export type Runner = (
@@ -28,8 +25,9 @@ export type Runner = (
   stdout: "pipe" | "stderr",
 ) => Promise<string>;
 
-/** A validated `--base-bytecode` file. */
+/** A validated `--base-bytecode` file, for the export's one platform. */
 export interface Base {
+  readonly platform: Platform;
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly version: number;
 }
@@ -45,48 +43,48 @@ function bytecodeVersion(bytes: Uint8Array): number | undefined {
   return new DataView(bytes.buffer, bytes.byteOffset, 12).getUint32(8, true);
 }
 
-/** Returns each `<platform>=<file>` value's base, read against `cwd`; every platform must be selected, once. */
-export function readBases(
+/**
+ * Returns the `<platform>=<file>` value's base, read against `cwd`, or undefined without one. Expo gives hermesc no
+ * platform, so a based export selects exactly that one platform.
+ */
+export function readBase(
   values: readonly string[],
   platforms: readonly Platform[],
   cwd: string,
-): Map<Platform, Base> {
-  const given = new Map<Platform, string>();
-  for (const value of values) {
-    const at = value.indexOf("=");
-    const platform = value.slice(0, at);
-    if (at === -1 || value.length === at + 1) {
-      throw new PublishError("--base-bytecode must be <platform>=<file>");
-    }
-    if (platform !== "ios" && platform !== "android") {
-      throw new PublishError("--base-bytecode platform must be ios or android");
-    }
-    if (!platforms.includes(platform)) {
-      throw new PublishError(`--base-bytecode ${platform} is not a platform this export selects`);
-    }
-    if (given.has(platform)) throw new PublishError(`--base-bytecode ${platform} is given twice`);
-    given.set(platform, value.slice(at + 1));
+): Base | undefined {
+  const [value] = values;
+  if (value === undefined) return undefined;
+  const at = value.indexOf("=");
+  if (at === -1 || value.length === at + 1) {
+    throw new PublishError("--base-bytecode must be <platform>=<file>");
   }
-  const bases = new Map<Platform, Base>();
-  for (const [platform, file] of given) {
-    const name = `--base-bytecode ${platform}`;
-    const bytes = readRegular(resolve(cwd, file), Infinity, name);
-    const version = bytecodeVersion(bytes);
-    if (version === undefined) throw new PublishError(`${name} is not Hermes bytecode`);
-    bases.set(platform, { bytes, version });
+  const platform = platformOf(value.slice(0, at), "--base-bytecode platform");
+  if (values.length > 1 || platforms.length > 1) {
+    throw new PublishError(
+      "--base-bytecode compiles one platform: give one base and one --platform, and export each platform on its own",
+    );
   }
-  return bases;
+  if (platform !== platforms[0]) {
+    throw new PublishError(`--base-bytecode ${platform} is not the platform this export selects`);
+  }
+  const name = `--base-bytecode ${platform}`;
+  const bytes = readRegular(resolve(cwd, value.slice(at + 1)), Infinity, name);
+  const version = bytecodeVersion(bytes);
+  if (version === undefined) throw new PublishError(`${name} is not Hermes bytecode`);
+  return { platform, bytes, version };
+}
+
+/** The app's hermesc and the base it was checked against. */
+export interface Compiler {
+  readonly hermesc: string;
+  readonly base: Base;
 }
 
 /**
  * Returns the hermesc Expo would run for the project (`exportHermes.js`, without its override), after checking that it
- * writes every base's bytecode version.
+ * writes the base's bytecode version.
  */
-export async function appHermesc(
-  projectRoot: string,
-  bases: ReadonlyMap<Platform, Base>,
-  run: Runner,
-): Promise<string> {
+export async function appHermesc(projectRoot: string, base: Base, run: Runner): Promise<Compiler> {
   const host = HOSTS[process.platform];
   if (host === undefined) {
     throw new PublishError(
@@ -110,23 +108,15 @@ export async function appHermesc(
   if (hermesc === undefined) {
     throw new PublishError("no hermesc is installed under react-native or hermes-compiler");
   }
-  const cwd = mkdtempSync(join(tmpdir(), "tide-hermesc-"));
-  let about: string;
-  try {
-    about = await run("hermesc -version", hermesc, ["-version"], cwd, "pipe");
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
+  const about = await run("hermesc -version", hermesc, ["-version"], tmpdir(), "pipe");
   const version = /HBC bytecode version: (\d+)/.exec(about)?.[1];
   if (version === undefined) throw new PublishError("hermesc -version printed no bytecode version");
-  for (const [platform, base] of bases) {
-    if (base.version !== Number(version)) {
-      throw new PublishError(
-        `--base-bytecode ${platform} is bytecode version ${base.version}; the app's hermesc writes ${version}`,
-      );
-    }
+  if (base.version !== Number(version)) {
+    throw new PublishError(
+      `--base-bytecode ${base.platform} is bytecode version ${base.version}; the app's hermesc writes ${version}`,
+    );
   }
-  return hermesc;
+  return { hermesc, base };
 }
 
 /** Returns the directory of `name`'s package.json, resolved from `from` as Node and Expo resolve it. */
@@ -139,120 +129,48 @@ function packageRoot(from: string, name: string): string {
 }
 
 /**
- * Writes the hermesc Expo finds under the returned override directory: it runs `hermesc` with Expo's arguments, then
- * keeps the arguments (NUL-separated), the input JS and the output in a new directory under `capture`.
+ * Writes, under the returned override directory, the hermesc Expo finds: `hermesc` with Expo's arguments plus
+ * `-base-bytecode` of the checked base bytes, leaving a mark that Expo ran it.
  */
-export function captureWrapper(scratch: string, hermesc: string): Wrapper {
+export function deltaWrapper({ hermesc, base }: Compiler): Wrapper {
+  const scratch = mkdtempSync(join(tmpdir(), "tide-hermes-"));
   const override = join(scratch, "override");
-  const capture = join(scratch, "capture");
   mkdirSync(join(override, "build", "bin"), { recursive: true });
-  mkdirSync(capture);
+  writeFileSync(join(scratch, "base.hbc"), base.bytes);
   const bin = join(override, "build", "bin", "hermesc");
   writeFileSync(
     bin,
     `#!/bin/sh
-run=$(mktemp -d ${quote(join(capture, "run.XXXXXX"))}) || exit
-printf '%s\\0' "$@" > "$run/args" || exit
-${quote(hermesc)} "$@" || exit
-out= next=
-for a in "$@"; do
-  if [ -n "$next" ]; then out=$a; next=
-  elif [ "$a" = -out ]; then next=1
-  else case $a in -*) ;; *) cp -- "$a" "$run/input" || exit ;; esac
-  fi
-done
-cp -- "$out" "$run/output"
+: > ${quote(join(scratch, "ran"))} || exit
+exec ${quote(hermesc)} "$@" ${quote(`-base-bytecode=${join(scratch, "base.hbc")}`)}
 `,
   );
   chmodSync(bin, 0o755);
-  return { hermesc, scratch, override, capture };
+  return { scratch, override, base };
 }
 
 interface Wrapper {
-  readonly hermesc: string; // The app's own, which the wrapper runs.
-  readonly scratch: string;
+  readonly scratch: string; // Removed by the caller.
   readonly override: string; // The REACT_NATIVE_OVERRIDE_HERMES_DIR value.
-  readonly capture: string;
+  readonly base: Base;
 }
 
 /** A POSIX shell single-quoted literal of `s`. */
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
-/**
- * Returns `files` with each based platform's launch bundle compiled again against its base: the JS and flags of the
- * one captured run that wrote Expo's bundle, plus `-base-bytecode`. Refuses a bundle path the export also uses for
- * another file, a bundle that is not bytecode, and one no single capture wrote.
- */
-export async function deltaCompile(
-  {
-    platforms: exported,
-    files,
-  }: {
-    readonly platforms: readonly (ExportedPlatform & { readonly platform: Platform })[];
-    readonly files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
-  },
-  bases: ReadonlyMap<Platform, Base>,
-  { hermesc, scratch, capture }: Wrapper,
-  run: Runner,
-): Promise<Map<string, Uint8Array<ArrayBuffer>>> {
-  const runs = readdirSync(capture).flatMap((name) => {
-    const dir = join(capture, name);
-    if (!existsSync(join(dir, "output"))) return [];
-    const args = readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1);
-    return [{ dir, args, output: readFileSync(join(dir, "output")) }];
-  });
-  const out = new Map(files);
-  for (const { platform, bundle, paths } of exported) {
-    const base = bases.get(platform);
-    if (base === undefined) continue;
-    const shared =
-      paths.bundle === "metadata.json" ||
-      exported.some(
-        (other) =>
-          (other.platform !== platform && other.paths.bundle === paths.bundle) ||
-          other.paths.assets.includes(paths.bundle),
-      );
-    if (shared) {
-      throw new PublishError(
-        `the ${platform} launch bundle ${paths.bundle} is also another file of the export, which --base-bytecode would change`,
-      );
-    }
-    if (bytecodeVersion(bundle.bytes) === undefined) {
-      throw new PublishError(`the ${platform} launch bundle is not Hermes bytecode`);
-    }
-    const matches = runs.filter((r) => r.output.equals(bundle.bytes));
-    const [match] = matches;
-    if (match === undefined || matches.length > 1) {
-      throw new PublishError(
-        `expo export compiled the ${platform} launch bundle in ${matches.length} hermesc runs Tide saw, not 1`,
-      );
-    }
-    const dir = mkdtempSync(join(scratch, "compile-"));
-    writeFileSync(join(dir, "index.js"), readFileSync(join(match.dir, "input")));
-    writeFileSync(join(dir, "base.hbc"), base.bytes);
-    // Fixed relative names: hermesc embeds the input path, so the bytes depend only on the JS, flags and base.
-    await run(
-      "hermesc",
-      hermesc,
-      [...retarget(match.args), "-base-bytecode=base.hbc"],
-      dir,
-      "stderr",
-    );
-    const compiled = readRegular(join(dir, "index.hbc"), Infinity, "the delta-compiled bundle");
-    if (bytecodeVersion(compiled) !== base.version) {
-      throw new PublishError(`hermesc did not write bytecode version ${base.version}`);
-    }
-    out.set(paths.bundle, compiled);
+/** Refuses unless Expo ran the wrapper and wrote each launch bundle as bytecode of the base's version. */
+export function checkDelta(
+  platforms: readonly ExportedPlatform[],
+  { scratch, base }: Wrapper,
+): void {
+  if (!existsSync(join(scratch, "ran"))) {
+    throw new PublishError(`expo export did not run hermesc through ${OVERRIDE_VARIABLE}`);
   }
-  return out;
-}
-
-/** Returns Expo's hermesc arguments reading `index.js` and writing `index.hbc`. */
-function retarget(args: readonly string[]): string[] {
-  const out = args.indexOf("-out");
-  const inputs = args.flatMap((a, i) => (a.startsWith("-") || i === out + 1 ? [] : [i]));
-  if (out === -1 || out + 1 >= args.length || inputs.length !== 1) {
-    throw new PublishError("expo export ran hermesc without one input and one -out");
+  for (const { bundle } of platforms) {
+    if (bytecodeVersion(bundle.bytes) !== base.version) {
+      throw new PublishError(
+        `the ${base.platform} launch bundle is not Hermes bytecode version ${base.version}`,
+      );
+    }
   }
-  return args.map((a, i) => (i === out + 1 ? "index.hbc" : i === inputs[0] ? "index.js" : a));
 }

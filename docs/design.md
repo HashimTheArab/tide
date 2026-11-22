@@ -385,7 +385,7 @@ stored field are never printed.
 same user, so no environment allowlist would protect a writer that ran Expo.
 
 `tide export --out <dir> [--platform ios|android]... [--runtime-version <v>] [--project-root <dir>]
-[--pass-env <name>]... [--base-bytecode <platform>=<file>]...` writes the export directory `publish --from` reads. `--out` and `--project-root` resolve
+[--pass-env <name>]... [--base-bytecode <platform>=<file>]` writes the export directory `publish --from` reads. `--out` and `--project-root` resolve
 against the caller's directory; `--out` must not exist. Platforms default to both. Exit 0, or 2 on any refusal or
 tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
 
@@ -422,10 +422,11 @@ shell and an allowlisted environment: `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAG
 one), `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or, when unset or empty, `production`: the
 mode `expo export` forces, so config, runtime and bundle agree.
 
-**Delta compiles** ([0002](decisions/0002-hermes-delta-compiles.md)). `--base-bytecode <platform>=<file>` (at most
-once per selected platform) compiles that platform's launch bundle against `<file>`, the release build's embedded
-bundle, so patches from every base shrink. Publish, patches and the wire format do not change. Without it the export
-runs no hermesc of its own and its bytes are unchanged.
+**Delta compiles** ([0002](decisions/0002-hermes-delta-compiles.md)). `--base-bytecode <platform>=<file>` has Expo
+compile the launch bundle against `<file>`, the release build's embedded bundle, so patches from every base shrink.
+Expo gives hermesc no platform, so a based export selects that one platform, and each platform is exported on its
+own. Publish, patches and the wire format do not change. Without it the export runs no hermesc of its own and its
+bytes are unchanged.
 
 1. Before any child: the file (against the caller's directory) is a regular file opening with the HBC magic
    `c6 1f bc 03 c1 03 19 1f` and a u32 little-endian bytecode version at offset 8.
@@ -434,15 +435,12 @@ runs no hermesc of its own and its bytes are unchanged.
    directory, `hermes-compiler/package.json` from react-native's, then the first of
    `<react-native>/ReactAndroid/hermes-engine/build/hermes/bin/hermesc`, `<hermes-compiler>/hermesc/<host>/hermesc` and
    `<react-native>/sdks/hermesc/<host>/hermesc` (`osx-bin` or `linux64-bin`; no Windows). Its `-version` must print
-   `HBC bytecode version: <n>` equal to every base's.
+   `HBC bytecode version: <n>` equal to the base's.
 3. `expo export` gets `REACT_NATIVE_OVERRIDE_HERMES_DIR` naming a `sh` wrapper that runs that hermesc with Expo's
-   arguments and keeps the arguments, input JS and output. `--pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR` is refused
-   with a base.
-4. After the export is read: a based launch bundle must be HBC, its `metadata.json` path no other file's (another
-   platform's bundle, any asset path, `metadata.json`), and exactly one wrapped run must have written its bytes.
-   That run's JS and arguments, on the fixed names `index.js` and `index.hbc` in a new directory, plus
-   `-base-bytecode=base.hbc` (the checked bytes), compile the bundle that replaces it; it must have the base's
-   version. Every hermesc run gets the environment Expo's tools get. A refusal here leaves no `tide-export.json`.
+   arguments plus `-base-bytecode=<copy of the checked bytes>`, so Expo writes, names and lists the delta bundle
+   itself. Every chunk Expo compiles is compiled against the base. hermesc gets the environment Expo's tools get.
+4. After the export is read: the wrapper must have run, and the launch bundle must be HBC of the base's version. A
+   refusal here leaves no `tide-export.json`.
 
 `tide publish --from <dir> --channel <name> [--rollout <percent>]` publishes one update per platform the export names
 (`--rollout`: Staged rollouts). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has

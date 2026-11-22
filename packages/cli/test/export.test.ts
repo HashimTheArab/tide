@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -477,7 +477,7 @@ describe("--base-bytecode", () => {
   const BUNDLE = "dist/_expo/static/js/android/index-android.hbc";
   const IOS_BUNDLE = "dist/_expo/static/js/ios/index-ios.hbc";
   const EMBEDDED = fakeHbc(utf8("// android\nembedded"));
-  const EXPO_COMPILE = [
+  const EXPO_COMPILE: unknown[] = [
     "-emit-binary",
     "-out",
     expect.stringMatching(/\/index\.hbc$/),
@@ -485,12 +485,8 @@ describe("--base-bytecode", () => {
     "-O",
   ];
   const DELTA_COMPILE = [
-    "-emit-binary",
-    "-out",
-    "index.hbc",
-    "index.js",
-    "-O",
-    "-base-bytecode=base.hbc",
+    ...EXPO_COMPILE,
+    expect.stringMatching(/^-base-bytecode=\/.+\/base\.hbc$/),
   ];
   // What /bin/sh adds running a shim, and macOS to every process.
   const SHELL = new Set(["PWD", "SHLVL", "_", "OLDPWD", "__CF_USER_TEXT_ENCODING"]);
@@ -518,7 +514,7 @@ describe("--base-bytecode", () => {
   const read = (dir: string, path: string) => new Uint8Array(readFileSync(join(dir, path)));
   const js = (platform: string, body: string) => utf8(`// ${platform}\n${body}`);
 
-  test("compiles the launch bundle against the base with Expo's JS and flags; every other file is a plain export's", async () => {
+  test("Expo compiles the launch bundle against the base with its own JS and flags; every other file is a plain export's", async () => {
     const { app, hermes } = hermesProject();
     const plain = await exportIn(app.root, ["--platform", "android"], PATH);
     expect(hermes().map((r) => r.args)).toEqual([EXPO_COMPILE]);
@@ -535,12 +531,7 @@ describe("--base-bytecode", () => {
     before.delete(BUNDLE);
     after.delete(BUNDLE);
     expect(after).toEqual(before);
-    expect(hermes().map((r) => r.args)).toEqual([
-      EXPO_COMPILE,
-      ["-version"],
-      EXPO_COMPILE,
-      DELTA_COMPILE,
-    ]);
+    expect(hermes().map((r) => r.args)).toEqual([EXPO_COMPILE, ["-version"], DELTA_COMPILE]);
   });
 
   test("every hermesc run gets the export's allowlisted environment; only Expo's sees the override", async () => {
@@ -558,31 +549,25 @@ describe("--base-bytecode", () => {
       caller,
     );
     expect(result.code).toBe(0);
-    const [version, wrapped, delta] = hermes().slice(1);
+    const [version, wrapped] = hermes().slice(1);
     expect(own(version?.env ?? {})).toEqual(CHILD_ENV);
     const { REACT_NATIVE_OVERRIDE_HERMES_DIR: override, ...wrappedEnv } = own(wrapped?.env ?? {});
     expect(wrappedEnv).toEqual(CHILD_ENV);
     expect(override?.endsWith("/override")).toBe(true);
-    expect(own(delta?.env ?? {})).toEqual(CHILD_ENV);
-    // Tide's own runs start outside the project.
-    for (const r of [version, delta]) expect(r?.cwd.startsWith(app.root)).toBe(false);
+    // Tide's own run starts outside the project.
+    expect(version?.cwd.startsWith(app.root)).toBe(false);
   });
 
-  test("each based platform compiles against its own base, and an unbased one stays plain", async () => {
+  test("an ios export compiles its launch bundle against an ios base", async () => {
     const { app } = hermesProject();
     const iosBase = fakeHbc(js("ios", "embedded"));
-    const one = await exportIn(app.root, ["--base-bytecode", `android=${file(EMBEDDED)}`], PATH);
-    expect(one).toMatchObject({ code: 0, out: ["ios 1.0.0", "android 1.0.0"] });
-    expect(read(one.dir, BUNDLE)).toEqual(fakeHbc(js("android", "one"), EMBEDDED));
-    expect(read(one.dir, IOS_BUNDLE)).toEqual(fakeHbc(js("ios", "one")));
-    const both = await exportIn(
+    const result = await exportIn(
       app.root,
-      ["--base-bytecode", `ios=${file(iosBase)}`, "--base-bytecode", `android=${file(EMBEDDED)}`],
+      ["--platform", "ios", "--base-bytecode", `ios=${file(iosBase)}`],
       PATH,
     );
-    expect(both.code).toBe(0);
-    expect(read(both.dir, BUNDLE)).toEqual(fakeHbc(js("android", "one"), EMBEDDED));
-    expect(read(both.dir, IOS_BUNDLE)).toEqual(fakeHbc(js("ios", "one"), iosBase));
+    expect(result).toMatchObject({ code: 0, out: ["ios 1.0.0"] });
+    expect(read(result.dir, IOS_BUNDLE)).toEqual(fakeHbc(js("ios", "one"), iosBase));
   });
 
   test("hermesc resolves from the real app directory, as Expo's does, through to react-native's sdks", async () => {
@@ -606,9 +591,11 @@ describe("--base-bytecode", () => {
     );
     expect(result).toMatchObject({ code: 0, err: [] });
     expect(read(result.dir, BUNDLE)).toEqual(fakeHbc(js("android", "one"), EMBEDDED));
-    expect(hermes().map((r) => r.args)).toEqual([["-version"], EXPO_COMPILE, DELTA_COMPILE]);
+    expect(hermes().map((r) => r.args)).toEqual([["-version"], DELTA_COMPILE]);
   });
 
+  const ONE_PLATFORM =
+    "--base-bytecode compiles one platform: give one base and one --platform, and export each platform on its own";
   test.each<[string, (base: string) => string[], string]>([
     [
       "a missing base",
@@ -637,8 +624,13 @@ describe("--base-bytecode", () => {
     ],
     [
       "an unselected platform",
+      (b) => ["--base-bytecode", `ios=${b}`],
+      "--base-bytecode ios is not the platform this export selects",
+    ],
+    [
+      "two platforms",
       (b) => ["--platform", "ios", "--base-bytecode", `android=${b}`],
-      "--base-bytecode android is not a platform this export selects",
+      ONE_PLATFORM,
     ],
     [
       "an unknown platform",
@@ -646,26 +638,26 @@ describe("--base-bytecode", () => {
       "--base-bytecode platform must be ios or android",
     ],
     [
-      "a platform twice",
+      "two bases",
       (b) => ["--base-bytecode", `android=${b}`, "--base-bytecode", `android=${b}`],
-      "--base-bytecode android is given twice",
+      ONE_PLATFORM,
     ],
     ["no file", () => ["--base-bytecode", "android="], "--base-bytecode must be <platform>=<file>"],
     ["no =", (b) => ["--base-bytecode", b], "--base-bytecode must be <platform>=<file>"],
-    [
-      "the override passed through",
-      (b) => ["--pass-env", "REACT_NATIVE_OVERRIDE_HERMES_DIR", "--base-bytecode", `android=${b}`],
-      "--pass-env REACT_NATIVE_OVERRIDE_HERMES_DIR would bypass --base-bytecode",
-    ],
   ])("%s is refused before any child runs", async (_, args, message) => {
     const { app, hermes } = hermesProject();
-    const result = await exportIn(app.root, args(file(EMBEDDED)), PATH);
+    const result = await exportIn(
+      app.root,
+      ["--platform", "android", ...args(file(EMBEDDED))],
+      PATH,
+    );
     expect(result).toMatchObject({ code: 2, out: [], err: [`tide: ${message}`] });
     expect(hermes()).toEqual([]);
     expect(readdirSync(app.root)).not.toContain("fake-expo.log");
     expect(existsSync(result.dir)).toBe(false);
   });
 
+  const BASED = (base: string) => ["--platform", "android", "--base-bytecode", `android=${base}`];
   const modules = (root: string, ...path: string[]) => join(root, "node_modules", ...path);
   test.each<[string, (root: string) => void, string]>([
     [
@@ -694,7 +686,7 @@ describe("--base-bytecode", () => {
   ])("%s is refused before any child runs", async (_, remove, message) => {
     const { app, hermes } = hermesProject();
     remove(app.root);
-    const result = await exportIn(app.root, ["--base-bytecode", `android=${file(EMBEDDED)}`], PATH);
+    const result = await exportIn(app.root, BASED(file(EMBEDDED)), PATH);
     expect(result).toMatchObject({ code: 2, out: [], err: [`tide: ${message}`] });
     expect(hermes()).toEqual([]);
     expect(readdirSync(app.root)).not.toContain("fake-expo.log");
@@ -704,7 +696,7 @@ describe("--base-bytecode", () => {
   test("a base of another bytecode version is refused after hermesc -version, before Expo runs", async () => {
     const { app, hermes } = hermesProject();
     const old = fakeHbc(js("android", "embedded"), undefined, FAKE_VERSION - 3);
-    const result = await exportIn(app.root, ["--base-bytecode", `android=${file(old)}`], PATH);
+    const result = await exportIn(app.root, BASED(file(old)), PATH);
     expect(result).toMatchObject({
       code: 2,
       err: [`tide: --base-bytecode android is bytecode version 96; the app's hermesc writes 99`],
@@ -714,66 +706,42 @@ describe("--base-bytecode", () => {
     expect(existsSync(result.dir)).toBe(false);
   });
 
-  const md5 = (bytes: Uint8Array) => createHash("md5").update(bytes).digest("hex");
-  const DOM_BYTES = utf8("<html>shared</html>");
-  const DOM_KEY = md5(DOM_BYTES);
-  const SHARED = `the android launch bundle`;
-  test.each<[string, Record<string, Uint8Array | string>, string]>([
-    [
-      "a launch bundle Expo wrote as plain JS",
-      { "_expo/static/js/android/index-android.hbc": "plain js" },
-      "the android launch bundle is not Hermes bytecode",
-    ],
-    [
-      "a launch bundle no hermesc run wrote",
-      { "_expo/static/js/android/index-android.hbc": fakeHbc(utf8("elsewhere")) },
-      "expo export compiled the android launch bundle in 0 hermesc runs Tide saw, not 1",
-    ],
-    [
-      "a launch bundle path both platforms name",
-      {
-        "metadata.json": JSON.stringify({
-          version: 0,
-          bundler: "metro",
-          fileMetadata: {
-            ios: { bundle: "_expo/static/js/android/index-android.hbc", assets: [] },
-            android: { bundle: "_expo/static/js/android/index-android.hbc", assets: [] },
-          },
-        }),
-      },
-      `${SHARED} _expo/static/js/android/index-android.hbc is also another file of the export, which --base-bytecode would change`,
-    ],
-    [
-      "a launch bundle path an asset also names, after an identical asset",
-      {
-        "metadata.json": JSON.stringify({
-          version: 0,
-          bundler: "metro",
-          fileMetadata: {
-            ios: { bundle: "_expo/static/js/ios/index-ios.hbc", assets: [] },
-            android: {
-              bundle: `www.bundle/${DOM_KEY}.html`,
-              assets: [
-                { path: `assets/${DOM_KEY}`, ext: "html" },
-                { path: `www.bundle/${DOM_KEY}.html`, ext: "html" },
-              ],
-            },
-          },
-        }),
-        [`assets/${DOM_KEY}`]: DOM_BYTES,
-        [`www.bundle/${DOM_KEY}.html`]: DOM_BYTES,
-      },
-      `${SHARED} www.bundle/${DOM_KEY}.html is also another file of the export, which --base-bytecode would change`,
-    ],
-  ])("%s is refused and leaves no tide-export.json", async (_, publicFiles, message) => {
+  test("a launch bundle that is not bytecode of the base's version is refused and leaves no tide-export.json", async () => {
     const { app } = hermesProject();
     // Expo copies public/ over its output.
-    for (const [path, bytes] of Object.entries(publicFiles)) {
-      mkdirSync(join(app.root, "public", path, ".."), { recursive: true });
-      writeFileSync(join(app.root, "public", path), bytes);
-    }
-    const result = await exportIn(app.root, ["--base-bytecode", `android=${file(EMBEDDED)}`], PATH);
-    expect(result).toMatchObject({ code: 2, out: [], err: [`tide: ${message}`] });
+    const bundle = join(
+      app.root,
+      "public",
+      "_expo",
+      "static",
+      "js",
+      "android",
+      "index-android.hbc",
+    );
+    mkdirSync(join(bundle, ".."), { recursive: true });
+    writeFileSync(bundle, "plain js");
+    const result = await exportIn(app.root, BASED(file(EMBEDDED)), PATH);
+    expect(result).toMatchObject({
+      code: 2,
+      out: [],
+      err: [`tide: the android launch bundle is not Hermes bytecode version ${FAKE_VERSION}`],
+    });
+    expect(files(result.dir)).toEqual([]);
+  });
+
+  test("an Expo that does not run the wrapper is refused and leaves no tide-export.json", async () => {
+    const { app, hermes } = hermesProject();
+    const result = await exportIn(
+      app.root,
+      ["--pass-env", "FAKE_EXPO_IGNORES_OVERRIDE", ...BASED(file(EMBEDDED))],
+      { ...PATH, FAKE_EXPO_IGNORES_OVERRIDE: "1" },
+    );
+    expect(result).toMatchObject({
+      code: 2,
+      out: [],
+      err: ["tide: expo export did not run hermesc through REACT_NATIVE_OVERRIDE_HERMES_DIR"],
+    });
+    expect(hermes().map((r) => r.args)).toEqual([["-version"], EXPO_COMPILE]);
     expect(files(result.dir)).toEqual([]);
   });
 

@@ -21,9 +21,9 @@ npx tide publish --from <dir> --channel main        # signs and uploads; runs no
 `tide publish` signs with a key from `TIDE_SIGNING_KEY_FILE`, `TIDE_SIGNING_KEY` or AWS KMS (`TIDE_KMS_*`), checks
 every signature against your app's certificate, and writes to the bucket named by `TIDE_S3_*` or `TIDE_DISK_DIR`.
 
-For smaller patches on Hermes apps, `tide export --base-bytecode android=<index.android.bundle>` compiles the update
-against the bundle inside your store build, the same file you give `tide register-build`. Do this for every update of
-that runtime version
+For smaller patches on Hermes apps, `tide export --platform android --base-bytecode android=<index.android.bundle>`
+compiles the update against the bundle inside your store build, the same file you give `tide register-build`. Export
+each platform on its own, and do this for every update of that runtime version
 ([publishing](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#delta-compiles)).
 
 ## Certificate
