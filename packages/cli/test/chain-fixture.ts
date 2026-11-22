@@ -131,6 +131,7 @@ export async function expectChained(
 ): Promise<void> {
   if (stored === undefined) throw new Error(`${key} is absent`);
   const record = key === "reply/no-update" ? decodeStoredReply(stored) : decodePointer(stored);
+  if (record.kind === "identities") throw new Error(`${key} holds a version-3 record`);
   const replies =
     record.kind === "rollout"
       ? [record.new, ...(record.earlier === undefined ? [] : [record.earlier])]

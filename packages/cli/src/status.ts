@@ -94,12 +94,15 @@ export async function readRecord(bucket: Bucket, key: string): Promise<Verdict |
 
 /** Checks the bytes stored at `key` the way a signing client would receive them; a rollout checks both sides. */
 export function checkRecord(key: string, bytes: Uint8Array): Verdict {
-  let reply: StoredReply | Rollout;
+  let decoded;
   try {
-    reply = key === NO_UPDATE_KEY ? decodeStoredReply(bytes) : decodePointer(bytes);
+    decoded = key === NO_UPDATE_KEY ? decodeStoredReply(bytes) : decodePointer(bytes);
   } catch {
     return "not a stored reply";
   }
+  // The CLI does not read version-3 records yet.
+  if (decoded.kind === "identities") return "not a stored reply";
+  const reply: StoredReply | Rollout = decoded;
   if (reply.kind !== "rollout") {
     const side = checkSide(key, reply);
     return typeof side === "string" ? side : { reply, time: side.time, sides: [side] };

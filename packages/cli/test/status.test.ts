@@ -163,6 +163,18 @@ describe.each(stores)("tide status on %s", (_, open) => {
   // Each sorts before the readable pointer at reply/zz/1.0.0/ios.
   test.each<[string, string, Uint8Array<ArrayBuffer>, string]>([
     ["a garbage record", "reply/a/1.0.0/ios", utf8("garbage"), "not a stored reply"],
+    [
+      "a version-3 pointer",
+      "reply/a/1.0.0/ios",
+      fixture("identities-manifest.reply.json"),
+      "not a stored reply",
+    ],
+    [
+      "a version-3 reply/no-update",
+      "reply/no-update",
+      fixture("identities-no-update.reply.json"),
+      "not a stored reply",
+    ],
     ["a record over the size limit", "reply/a/1.0.0/ios", new Uint8Array(MAX_REPLY_BYTES + 1), ""],
     [
       "a pointer holding noUpdateAvailable",
