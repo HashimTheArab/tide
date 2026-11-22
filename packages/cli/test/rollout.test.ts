@@ -52,8 +52,8 @@ const TARGET = ["--channel", "main", "--runtime-version", "1.0.0"];
 const ONLY_IOS = ["--platform", "ios"];
 const STALE = (key: string) =>
   `${key} was changed by another writer since it was read; it keeps theirs`;
-const UNVERIFIED = (key: string, name: string) =>
-  `${key}: its ${name} does not verify under this app's certificate and key ID`;
+const UNVERIFIED = (key: string) =>
+  `${key}: a reply it copies does not verify under this app's certificate and key ID`;
 const PERCENT = "--rollout must be a percentage from 0.01 to 99.99 in steps of 0.01";
 const HOLDS = (key: string) =>
   `${key} holds a rollout: finish it with tide rollout complete, or replace it with tide publish, republish or rollback`;
@@ -615,29 +615,22 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     await bucketPut(store, NO_UPDATE_KEY, await noUpdateBy(main));
     const good = await manifestReply(ID_A, Date.now());
     const earlier = await manifestReply(ID_B, Date.now() - 1000);
-    for (const [r, name] of [
-      [{ kind: "rollout", percent: 50, new: await resigned(good, other), earlier }, "new reply"],
-      [
-        { kind: "rollout", percent: 50, new: good, earlier: await resigned(earlier, other) },
-        "earlier reply",
-      ],
+    for (const r of [
+      { kind: "rollout", percent: 50, new: await resigned(good, other), earlier },
+      { kind: "rollout", percent: 50, new: good, earlier: await resigned(earlier, other) },
     ] as const) {
       await bucketPut(store, IOS, encodeRollout(r));
       const before = store.snapshot();
       for (const goal of ["90", "complete", "revert"]) {
         const result = await rolloutTo(store, goal, ONLY_IOS);
-        expect([goal, result.code, result.err]).toEqual([
-          goal,
-          2,
-          [`tide: ${UNVERIFIED(IOS, name)}`],
-        ]);
+        expect([goal, result.code, result.err]).toEqual([goal, 2, [`tide: ${UNVERIFIED(IOS)}`]]);
       }
       expect(store.snapshot()).toEqual(before);
     }
     const dir = iosExport();
     await bucketPut(store, IOS, await seededPointer("manifest", Date.now() - 1000, other));
     expect((await publishTo(store, dir, ["--rollout", "50"])).err).toEqual([
-      `tide: ${UNVERIFIED(IOS, "reply")}`,
+      `tide: ${UNVERIFIED(IOS)}`,
     ]);
     await bucketPut(
       store,
@@ -646,7 +639,7 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     );
     const before = store.snapshot();
     expect((await publishTo(store, dir, ["--rollout", "50"])).err).toEqual([
-      `tide: ${UNVERIFIED(IOS, "new reply")}`,
+      `tide: ${UNVERIFIED(IOS)}`,
     ]);
     expect(store.snapshot()).toEqual(before);
     // Once every body verifies, both commands go ahead.
@@ -675,14 +668,14 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
 
     // The skipped target's sides are verified first: each re-signed by another key is refused.
     const staged = rolloutAt(store, IOS);
-    for (const [r, name] of [
-      [{ ...staged, new: await resigned(staged.new, other) }, "new reply"],
-      [{ ...staged, earlier: await manifestReply(ID_B, 0, { by: other }) }, "earlier reply"],
-    ] as const) {
+    for (const r of [
+      { ...staged, new: await resigned(staged.new, other) },
+      { ...staged, earlier: await manifestReply(ID_B, 0, { by: other }) },
+    ]) {
       await bucketPut(store, IOS, encodeRollout(r));
       const before = store.snapshot();
       expect((await publishTo(store, artifact(), ["--rollout", "50"])).err).toEqual([
-        `tide: ${UNVERIFIED(IOS, name)}`,
+        `tide: ${UNVERIFIED(IOS)}`,
       ]);
       expect(store.snapshot()).toEqual(before);
     }

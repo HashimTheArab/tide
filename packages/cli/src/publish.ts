@@ -174,22 +174,25 @@ async function prepare(
       assets: t.assets.map((a) => ({ key: a.key, hash: a.hash, fileExtension: `.${a.ext}` })),
       extra: { expoClient: artifact.expoClient },
     };
-    if (percent === undefined) {
-      const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
-      records.push(...c.records);
-      writes.push(c.pointer);
-      continue;
+    let earlier;
+    if (percent !== undefined) {
+      const staged = await stagedRollout(writer, t, draft, percent);
+      if (staged !== undefined) {
+        writes.push(staged);
+        continue;
+      }
+      earlier = await earlierOf(writer.identity, t.key, t.previous);
     }
-    const staged = await stagedRollout(writer, t, draft, percent);
-    if (staged !== undefined) {
-      writes.push(staged);
-      continue;
-    }
-    const earlier = await earlierOf(writer.identity, t.key, t.previous);
     const c = await compose(writer, draft, createdAtFloor(local, t.previous), t);
     records.push(...c.records);
-    const rollout: Rollout = { kind: "rollout", percent, new: c.manifest, earlier };
-    writes.push({ ...c.pointer, reply: rolloutRecord(t.key, rollout) });
+    writes.push(
+      percent === undefined
+        ? c.pointer
+        : {
+            ...c.pointer,
+            reply: rolloutRecord(t.key, { kind: "rollout", percent, new: c.manifest, earlier }),
+          },
+    );
   }
   const stored = await storedContent(writer.bucket);
   // Before the plan, so its fresh certificate check also covers the time spent diffing.

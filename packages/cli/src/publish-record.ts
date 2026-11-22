@@ -173,10 +173,15 @@ export function decodeRecord(bytes: Uint8Array): ReleaseRecord {
   if (parsed.version !== VERSION) throw new ProtocolError("record.version", "is not supported");
   const record = parsed as unknown as ReleaseRecord;
   const canonical = encodeRecord(record);
-  if (canonical.length !== bytes.length || canonical.some((b, i) => b !== bytes[i])) {
+  if (!sameBytes(canonical, bytes)) {
     throw new ProtocolError("record", "is not in the form tide writes");
   }
   return record;
+}
+
+/** True when `a` and `b` hold the same bytes. */
+export function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** Returns the release record at `key`, undefined when absent; one that does not decode or names another ID refuses. */

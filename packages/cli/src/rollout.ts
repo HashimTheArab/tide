@@ -6,7 +6,6 @@ import { ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
 import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
-import type { Side } from "./status.ts";
 import { buildIdentity, checkBucket, checkCopied } from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
@@ -15,6 +14,7 @@ import {
   platformsOf,
   readReleaseRecord,
   recordKey,
+  sameBytes,
 } from "./publish-record.ts";
 import { execute, parsed } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
@@ -24,7 +24,6 @@ export const ROLLOUT_USAGE =
 
 // 0 and 100 are spelled revert and complete.
 const PERCENT = /^(?:0|[1-9]\d?)(?:\.\d{1,2})?$/;
-const COMPLETE = 10_000; // Hundredths.
 
 /** Returns `value` as a percentage from 0.01 to 99.99 in steps of 0.01; `name` labels the refusal. */
 export function percentOf(value: string, name: string): number {
@@ -56,27 +55,25 @@ export async function rollout(
         "reply/no-update is absent: tide publish, republish or rollback writes it",
       );
     }
-    const writes: {
-      readonly key: string;
-      readonly previous: PointerState;
-      readonly bytes: Uint8Array<ArrayBuffer> | undefined;
-      readonly line: string;
-    }[] = [];
+    const writes: PointerWrite[] = [];
     for (const key of keys) {
       const previous = await readPointer(bucket, key);
-      const { reply } = previous;
+      const { reply, sides = [] } = previous;
       if (reply === undefined) throw new PublishError(`${key} does not exist: there is no rollout`);
       if (reply.kind !== "rollout") throw new PublishError(`${key} holds no rollout`);
-      const at = Math.round(reply.percent * 100);
-      if (at !== goal) forward(key, at, goal);
-      await checkCopied(key, named(previous), identity);
-      // Encoded here, so a record over the size limit refuses before any write.
-      const bytes = at === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal / 100 });
-      writes.push({ key, previous, bytes, line: `${key} ${reply.new.updateId} ${goal / 100}` });
+      if (reply.percent !== goal) forward(key, reply.percent, goal);
+      await checkCopied(key, sides, identity);
+      writes.push({
+        key,
+        previous,
+        // Encoded here, so a record over the size limit refuses before any write.
+        reply: reply.percent === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal }),
+        line: `${key} ${reply.new.updateId} ${goal}`,
+      });
     }
     return async () => {
-      for (const { key, previous, bytes, line } of writes) {
-        if (bytes !== undefined) await writePointer(bucket, key, bytes, previous);
+      for (const { key, previous, reply, line } of writes) {
+        if (reply !== undefined) await writePointer(bucket, key, reply, previous);
         out(line);
       }
     };
@@ -94,11 +91,11 @@ export function rolloutRecord(key: string, rollout: Rollout): Uint8Array<ArrayBu
 }
 
 /**
- * Refuses a move from `at` to another `goal` (both in hundredths) unless the percentage rises or the rollout ends.
+ * Refuses a move from `at` to another `goal` percentage unless it rises or the rollout ends.
  * So a key never returns to bytes it held, and an ETag match, content hash or not, always means unchanged since read.
  */
 function forward(key: string, at: number, goal: number): void {
-  if (at === COMPLETE) {
+  if (at === 100) {
     throw new PublishError(
       `${key}'s rollout is complete: start another with tide publish --rollout, or use tide rollback`,
     );
@@ -110,15 +107,9 @@ function forward(key: string, at: number, goal: number): void {
   }
   if (goal !== 0 && goal < at) {
     throw new PublishError(
-      `${key} is at ${at / 100}%: a rollout percentage only rises; lowering it never moves a device back, so use tide rollout revert or tide rollback`,
+      `${key} is at ${at}%: a rollout percentage only rises; lowering it never moves a device back, so use tide rollout revert or tide rollback`,
     );
   }
-}
-
-/** A read pointer's signed replies, each with the name a refusal gives it. */
-function named({ reply, sides = [] }: PointerState): [string, Side][] {
-  if (reply?.kind !== "rollout") return sides.map((s) => ["reply", s]);
-  return sides.map((s, i) => [i === 0 ? "new reply" : "earlier reply", s]);
 }
 
 /**
@@ -130,12 +121,12 @@ export async function earlierOf(
   key: string,
   previous: PointerState,
 ): Promise<Rollout["earlier"]> {
-  const { reply } = previous;
+  const { reply, sides = [] } = previous;
   if (reply === undefined) return undefined;
   // readPointer has refused it already; this narrows the type.
   if (reply.kind === "noUpdateAvailable") throw new PublishError(`${key} holds no update`);
   if (reply.kind !== "rollout") {
-    await checkCopied(key, named(previous), identity);
+    await checkCopied(key, sides, identity);
     return reply;
   }
   if (reply.percent !== 100) {
@@ -143,7 +134,7 @@ export async function earlierOf(
       `${key} holds a rollout: finish it with tide rollout complete, or replace it with tide publish, republish or rollback`,
     );
   }
-  await checkCopied(key, named(previous).slice(0, 1), identity);
+  await checkCopied(key, sides.slice(0, 1), identity);
   return reply.new;
 }
 
@@ -158,20 +149,20 @@ export async function stagedRollout(
   percent: number,
 ): Promise<PointerWrite | undefined> {
   const { key, previous } = target;
-  const { reply } = previous;
+  const { reply, sides = [] } = previous;
   if (reply?.kind !== "rollout") return undefined;
   const record = await readReleaseRecord(writer.bucket, recordKey(reply.new.updateId));
   if (record === undefined) return undefined;
   const { updateId, createdAt } = record;
-  const ours = encodeRecord({ ...draft, updateId, createdAt });
-  const stored = encodeRecord(record);
-  if (ours.length !== stored.length || ours.some((b, i) => b !== stored[i])) return undefined;
+  if (!sameBytes(encodeRecord({ ...draft, updateId, createdAt }), encodeRecord(record))) {
+    return undefined;
+  }
   if (reply.percent !== percent) {
     throw new PublishError(
       `${key} already stages this export at ${reply.percent}%: change it with tide rollout`,
     );
   }
-  await checkCopied(key, named(previous), writer.identity);
+  await checkCopied(key, sides, writer.identity);
   return { key, previous, reply: undefined, line: `${key} ${updateId} ${createdAt}` };
 }
 
@@ -198,11 +189,7 @@ function parse(args: readonly string[]) {
     throw new PublishError(`--channel and --runtime-version are required; ${ROLLOUT_USAGE}`);
   }
   const goal =
-    value === "complete"
-      ? COMPLETE
-      : value === "revert"
-        ? 0
-        : Math.round(percentOf(value, "the rollout") * 100);
+    value === "complete" ? 100 : value === "revert" ? 0 : percentOf(value, "the rollout");
   const keys = platformsOf(platform).map((p) => replyKey(channel, runtime, p));
   return { goal, keys };
 }

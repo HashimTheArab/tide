@@ -272,18 +272,18 @@ async function checkSigned(key: string, record: Verdict, identity: Identity): Pr
 }
 
 /**
- * Refuses unless each named reply at `key` verifies under `identity`. A writer that copies a signed body checks it
- * here, since a valid `reply/no-update` stops `checkBucket` before any pointer.
+ * Refuses unless each of `sides` read at `key` verifies under `identity`. A writer that copies a signed body checks
+ * it here, since a valid `reply/no-update` stops `checkBucket` before any pointer.
  */
 export async function checkCopied(
   key: string,
-  sides: readonly (readonly [name: string, side: Side])[],
+  sides: readonly Side[],
   identity: Identity,
 ): Promise<void> {
-  for (const [name, side] of sides) {
+  for (const side of sides) {
     if (!(await verifies(side, identity))) {
       throw new KeyError(
-        `${key}: its ${name} does not verify under this app's certificate and key ID`,
+        `${key}: a reply it copies does not verify under this app's certificate and key ID`,
       );
     }
   }
