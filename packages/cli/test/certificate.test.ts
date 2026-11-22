@@ -580,13 +580,13 @@ describe("refusals print nothing on stdout", () => {
       "no common name",
       file,
       ["--validity-years", "1"],
-      "--common-name is required; usage: tide certificate --common-name <name> --validity-years <n>",
+      `--common-name is required; ${CERTIFICATE_USAGE}`,
     ],
     [
       "no validity",
       file,
       ["--common-name", "a"],
-      "--validity-years is required; usage: tide certificate --common-name <name> --validity-years <n>",
+      `give exactly one of --validity-years and --validity-days; ${CERTIFICATE_USAGE}`,
     ],
     [
       "a repeated common name",
@@ -598,13 +598,13 @@ describe("refusals print nothing on stdout", () => {
       "an unknown flag",
       file,
       [...ARGS, "--out", "x"],
-      "unrecognised arguments; usage: tide certificate --common-name <name> --validity-years <n>",
+      `unrecognised arguments; ${CERTIFICATE_USAGE}`,
     ],
     [
       "a positional",
       file,
       [...ARGS, "certificate.pem"],
-      "unrecognised arguments; usage: tide certificate --common-name <name> --validity-years <n>",
+      `unrecognised arguments; ${CERTIFICATE_USAGE}`,
     ],
     ...["", " leading", "trailing ", "x".repeat(65), "Tidé", "tab\there", "line\nbreak"].map(
       (name): [string, () => Env, readonly string[], string] => [
@@ -703,9 +703,7 @@ describe("the tide bin", () => {
   test("with no arguments lists the command", async () => {
     const result = await run(MAIN, [], {});
     expect(result.code).toBe(2);
-    expect(result.stderr.split("\n")).toContain(
-      "usage: tide certificate --common-name <name> --validity-years <n>",
-    );
+    expect(result.stderr.split("\n")).toContain(CERTIFICATE_USAGE);
   });
 });
 
@@ -914,6 +912,24 @@ describe("a root, an intermediate and a leaf", () => {
 });
 
 describe("lifetimes", () => {
+  test("--validity-days sets the lifetime of every form", async () => {
+    const env = SOURCES.TIDE_SIGNING_KEY!(2048);
+    const days = ["--validity-days", "30"];
+    const direct = expectIssued(await chainIssue(env, ["--common-name", "Tide Direct", ...days]));
+    const root = expectIssued(
+      await chainIssue(env, ["--ca", "--common-name", "Tide Root CA", ...days]),
+    );
+    const leaf = expectIssued(
+      await chainIssue(env, issuedArgs(root, keys[3072], ["--common-name", "Tide Leaf", ...days])),
+    );
+    const lifetime = (pem: string) => {
+      const x509 = new X509Certificate(pem);
+      return x509.validToDate.getTime() - x509.validFromDate.getTime();
+    };
+    expect([direct, root, leaf].map(lifetime)).toEqual(Array(3).fill(30 * DAY_MS));
+    await codeSigningCertificate(direct, new Date(AT));
+  });
+
   test("a leaf may end with the root above its issuer, not after it", async () => {
     const env = SOURCES.TIDE_SIGNING_KEY!(2048);
     const T = Date.UTC(2030, 0, 1);
@@ -1101,23 +1117,19 @@ describe("chain refusals print nothing on stdout", () => {
       .toString("base64")
       .match(/.{1,64}/g)!
       .join("\n")}\n-----END ${label}-----\n`;
-  /** An RSA SubjectPublicKeyInfo with a made-up modulus of `bits` and exponent `e`, which Node parses as given. */
-  const rsaSpki = (bits: number, e: number) => {
+  /** An RSA SubjectPublicKeyInfo with a made-up modulus of `bits` and exponent 65537, which Node parses as given. */
+  const rsaSpki = (bits: number) => {
     const modulus = new Uint8Array(bits / 8 + 1).fill(0xa5);
     modulus[0] = 0;
     modulus[1] = 0xc5;
-    const exponent = Uint8Array.from(
-      e
-        .toString(16)
-        .padStart(8, "0")
-        .match(/../g)!
-        .map((h) => parseInt(h, 16)),
-    );
-    const minimal = exponent.subarray(exponent.findIndex((b) => b !== 0));
     return derTlv(
       0x30,
       derTlv(0x30, derOid("1.2.840.113549.1.1.1"), Uint8Array.of(5, 0)),
-      derTlv(0x03, Uint8Array.of(0), derTlv(0x30, derTlv(0x02, modulus), derTlv(0x02, minimal))),
+      derTlv(
+        0x03,
+        Uint8Array.of(0),
+        derTlv(0x30, derTlv(0x02, modulus), derTlv(0x02, Uint8Array.of(1, 0, 1))),
+      ),
     );
   };
   const subjectKey = (contents: () => string | Uint8Array) => async () => [
@@ -1149,7 +1161,7 @@ describe("chain refusals print nothing on stdout", () => {
           .publicKey.export({ type: "spki", format: "pem" })
           .toString(),
       ),
-      "--subject-key must hold an RSA key of 2048 to 4096 bits",
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
     ],
     [
       "a 1024-bit key",
@@ -1158,22 +1170,17 @@ describe("chain refusals print nothing on stdout", () => {
           .publicKey.export({ type: "spki", format: "pem" })
           .toString(),
       ),
-      "--subject-key must hold an RSA key of 2048 to 4096 bits",
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
     ],
     [
       "an 8192-bit key",
-      subjectKey(() => pemOf(rsaSpki(8192, 65537), "PUBLIC KEY")),
-      "--subject-key must hold an RSA key of 2048 to 4096 bits",
-    ],
-    [
-      "a 4096-bit key with a four-octet exponent",
-      subjectKey(() => pemOf(rsaSpki(4096, 16_777_259), "PUBLIC KEY")),
-      "--subject-key must encode in at most 550 bytes, as a 4096-bit key with exponent 65537 does",
+      subjectKey(() => pemOf(rsaSpki(8192), "PUBLIC KEY")),
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
     ],
     [
       "trailing bytes after the key",
       subjectKey(() => pemOf(Buffer.concat([spkiOf(keys[2048]), Buffer.of(0)]), "PUBLIC KEY")),
-      "--subject-key must hold a DER SubjectPublicKeyInfo",
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
     ],
     [
       "non-canonical base64",
@@ -1207,11 +1214,6 @@ describe("chain refusals print nothing on stdout", () => {
       "--path-length must be a whole number from 0 to 7",
     ]),
     [
-      "--validity-days without --issuer",
-      () => ["--ca", "--common-name", "a", "--validity-days", "1"],
-      `--validity-days goes only with --issuer; ${usage}`,
-    ],
-    [
       "--validity-days with --validity-years",
       () => ["--issuer", "a", "--subject-key", "k", ...LEAF_ARGS, "--validity-days", "1"],
       `give exactly one of --validity-years and --validity-days; ${usage}`,
@@ -1224,7 +1226,7 @@ describe("chain refusals print nothing on stdout", () => {
     [
       "no lifetime on a root",
       () => ["--ca", "--common-name", "a"],
-      `--validity-years is required; ${usage}`,
+      `give exactly one of --validity-years and --validity-days; ${usage}`,
     ],
     ...["0", "36501", "1.5"].map((n): [string, () => readonly string[], string] => [
       `--validity-days ${n}`,
@@ -1281,10 +1283,7 @@ describe("chain refusals print nothing on stdout", () => {
     expect(root.length).toBeLessThanOrEqual(65_536);
     expect(root.length).toBeGreaterThan(40_000);
     const result = await chainIssue(rootEnv(), issuedArgs(root, keys[3072], INTERMEDIATE_ARGS));
-    expectRefused(
-      result,
-      "the generated certificate: with --issuer it would make an --issuer file over 65536 bytes",
-    );
+    expectRefused(result, "the generated certificate: issuer must be 1 to 65536 bytes");
     // A leaf under the same root is fine: it is never an issuer.
     expectIssued(await chainIssue(rootEnv(), issuedArgs(root, keys[3072], LEAF_ARGS)));
   });
@@ -1348,10 +1347,5 @@ describe("the tide bin, chain forms", () => {
     expectNoPem(result.stderr, pem);
     for (const dir of [cwd, home, tmp]) expect(readdirSync(dir)).toEqual([]);
     expect(readdirSync(inputs).sort()).toEqual(["leaf.pub", "root.pem"]);
-  });
-
-  test("with no arguments lists every certificate form", async () => {
-    const result = await run(MAIN, [], {});
-    expect(result.stderr).toContain(`${CERTIFICATE_USAGE}\n`);
   });
 });

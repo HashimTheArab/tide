@@ -283,7 +283,10 @@ export async function certificateChain(
   root: string,
   now: Date,
 ): Promise<CryptoKey> {
-  const { members, top } = await linkedChain(served, root, now, (i) =>
+  const ders =
+    served === undefined ? [] : readCertificateChain(served, "certificate_chain", MAX_CHAIN_BYTES);
+  const rootDer = pemCertificateDer(root, "+", (message) => chainError(`root ${message}`));
+  const { members, top } = await linkedChain([...ders, rootDer], now, (i) =>
     i === 0 ? "leaf" : `intermediate ${i}`,
   );
   const leaf = members[0] ?? top;
@@ -298,50 +301,25 @@ export async function certificateChain(
   return leaf.key;
 }
 
-/**
- * Refuses unless `served` (undefined: nothing) followed by `root` is a CA path at `now` that a leaf Tide issues under
- * its first certificate could extend: every member a CA with keyCertSign, path lengths counting the first served
- * member as an intermediate, and room for one more certificate. With `reserveLeaf`, the bytes must also leave room
- * for the largest such leaf (an RSA key of `MAX_SPKI_BYTES`, a `MAX_COMMON_NAME` name).
- */
-export async function certificateAuthorityChain(
-  served: Uint8Array | undefined,
-  root: string,
-  now: Date,
-  reserveLeaf: boolean,
-): Promise<void> {
-  const { members, top } = await linkedChain(served, root, now, (i) => `intermediate ${i + 1}`);
-  checkAuthorities(top, members.slice(0, -1));
-  if (members.length > MAX_CHAIN_CERTIFICATES) {
-    throw chainError(`must leave room for a leaf: at most ${MAX_CHAIN_CERTIFICATES - 1} served`);
-  }
-  checkProject(members);
-  if (!reserveLeaf) return;
-  const first = members[0] ?? top;
-  const { modulusLength = 4096 } = first.key.algorithm as { readonly modulusLength?: number };
-  if ((served?.length ?? 0) + (await largestLeaf(first.subject, modulusLength)) > MAX_CHAIN_BYTES) {
-    throw chainError(`must leave room within ${MAX_CHAIN_BYTES} bytes for any leaf Tide issues`);
-  }
-}
-
 const chainError = (message: string) => new ProtocolError("certificate_chain", message);
 
-/** Returns the members of `served` then `root`, each valid at `now`, linked by name and signature to a self-signed root. */
+/**
+ * Returns the members of `ders` (root last), each valid at `now`, linked by name and signature to a self-signed root;
+ * `role` names each one below the root.
+ */
 async function linkedChain(
-  served: Uint8Array | undefined,
-  root: string,
+  ders: readonly Uint8Array<ArrayBuffer>[],
   now: Date,
   role: (index: number) => string,
 ): Promise<{ readonly members: Member[]; readonly top: Member }> {
   // A NaN instant would pass every validity comparison.
   if (Number.isNaN(now.getTime())) throw new ProtocolError("now", "must be a valid Date");
-  const ders =
-    served === undefined ? [] : readCertificateChain(served, "certificate_chain", MAX_CHAIN_BYTES);
-  const rootDer = pemCertificateDer(root, "+", (message) => chainError(`root ${message}`));
   const members: Member[] = [];
-  for (const [i, der] of ders.entries()) members.push(await chainMember(der, now, role(i)));
-  const top = await chainMember(rootDer, now, "root");
-  members.push(top);
+  for (const [i, der] of ders.entries()) {
+    members.push(await chainMember(der, now, i === ders.length - 1 ? "root" : role(i)));
+  }
+  const top = members.at(-1);
+  if (top === undefined) throw chainError("must hold a root");
 
   for (const [i, child] of members.entries()) {
     const issuer = members[i + 1];
@@ -406,6 +384,7 @@ interface Member {
   readonly issuer: Uint8Array;
   readonly subject: Uint8Array;
   readonly key: CryptoKey;
+  readonly notAfter: number; // Epoch ms.
   readonly ca: boolean;
   readonly pathLen: number; // Infinity when absent.
   readonly keyUsage: KeyUsage | undefined;
@@ -477,6 +456,7 @@ async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Pr
     issuer: bytesOf(der, cert.issuer),
     subject: bytesOf(der, cert.subject),
     key,
+    notAfter,
     ...basicConstraints(value(BASIC_CONSTRAINTS), malformed),
     keyUsage: usage === undefined ? undefined : keyUsage(usage, malformed),
     extendedKeyUsages: usages,
@@ -974,10 +954,6 @@ export function readTlv(der: Uint8Array, start: number, limit: number): Tlv {
   return { tag, start, body, end: body + length };
 }
 
-/** Longest common name `signedCertificate` callers issue; the leaf reserve assumes it. */
-export const MAX_COMMON_NAME = 64;
-/** Largest SubjectPublicKeyInfo DER a Tide leaf carries: a 4096-bit RSA key with exponent 65537 is 550 bytes. */
-export const MAX_SPKI_BYTES = 550;
 /** Largest issuer path `issuerPath` reads; the root is embedded, not served, so it may exceed `MAX_CHAIN_BYTES`. */
 export const MAX_ISSUER_BYTES = 65_536;
 
@@ -1060,70 +1036,39 @@ function certificatePem(der: Uint8Array): string {
   return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
 }
 
-/** Returns the PEM length of the largest leaf `signedCertificate` issues under `issuer` with a key of `bits`. */
-async function largestLeaf(issuer: Uint8Array, bits: number): Promise<number> {
-  const latest = new Date(Date.UTC(9999, 0, 1)); // GeneralizedTime, the longer encoding.
-  const pem = await signedCertificate(
-    {
-      spki: derTlv(SEQUENCE, new Uint8Array(MAX_SPKI_BYTES - 4)), // A four-octet header, so MAX_SPKI_BYTES in all.
-      commonName: "x".repeat(MAX_COMMON_NAME),
-      notBefore: latest,
-      notAfter: latest,
-      issuer,
-    },
-    () => Promise.resolve(new Uint8Array(Math.ceil(bits / 8))),
-  );
-  return pem.length;
-}
-
 /** The certificate an issued certificate names as its issuer, and the path above it. */
 export interface IssuerPath {
   readonly subject: Uint8Array; // The issuing certificate's subject Name DER.
   readonly spki: Uint8Array; // The issuing certificate's SubjectPublicKeyInfo DER.
   readonly notAfter: number; // The earliest notAfter on the path, in epoch ms.
-  readonly served: Uint8Array | undefined; // Canonical PEMs below the root, issuer first; undefined for a root.
+  readonly served: string | undefined; // Canonical PEMs below the root, issuer first; undefined for a root.
   readonly root: string; // The root's canonical PEM.
 }
 
 /**
  * Returns the issuer path in `bytes`: the issuing certificate first, then each one above it, the root last, in the
- * `certificate_chain` grammar. Only the shape is checked here; `certificateAuthorityChain` checks the rules.
+ * `certificate_chain` grammar. Refuses unless it is a CA path at `now` that a certificate issued under its first
+ * member extends within the client's chain rules: every member a CA with keyCertSign, path lengths counting the
+ * first member as an intermediate.
  */
-export function issuerPath(bytes: Uint8Array): IssuerPath {
+export async function issuerPath(bytes: Uint8Array, now: Date): Promise<IssuerPath> {
   const ders = readCertificateChain(bytes, "issuer", MAX_ISSUER_BYTES);
-  const certs = ders.map((der) => {
-    try {
-      const cert = parseCertificate(der);
-      const validity = sequence(der, cert.validity);
-      const [, end] = validity;
-      const notAfter = validity.length === 2 && end !== undefined ? time(der, end) : undefined;
-      if (notAfter === undefined)
-        throw new ProtocolError("certificate", "has a malformed validity");
-      return { der, cert, notAfter };
-    } catch (e) {
-      if (!(e instanceof ProtocolError)) throw e;
-      throw new ProtocolError("issuer", "holds a certificate that is not well-formed X.509 DER");
-    }
-  });
-  const [first] = certs;
-  const top = certs.at(-1);
-  if (first === undefined || top === undefined) throw new ProtocolError("issuer", CHAIN_GRAMMAR);
-  const below = certs
-    .slice(0, -1)
-    .map((c) => certificatePem(c.der))
-    .join("");
-  const served = below === "" ? undefined : new TextEncoder().encode(below);
-  if (served !== undefined && served.length > MAX_CHAIN_BYTES) {
+  const below = ders.slice(0, -1).map(certificatePem).join("");
+  if (below.length > MAX_CHAIN_BYTES) {
     throw new ProtocolError(
       "issuer",
       `must hold at most ${MAX_CHAIN_BYTES} bytes of certificates below the root, the most a reply serves`,
     );
   }
+  const { members, top } = await linkedChain(ders, now, (i) => `intermediate ${i + 1}`);
+  checkAuthorities(top, members.slice(0, -1));
+  checkProject(members);
+  const first = members[0] ?? top;
   return {
-    subject: bytesOf(first.der, first.cert.subject).slice(),
+    subject: first.subject.slice(),
     spki: bytesOf(first.der, first.cert.spki).slice(),
-    notAfter: Math.min(...certs.map((c) => c.notAfter)),
-    served,
+    notAfter: Math.min(...members.map((m) => m.notAfter)),
+    served: below === "" ? undefined : below,
     root: certificatePem(top.der),
   };
 }

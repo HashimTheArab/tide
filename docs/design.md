@@ -541,20 +541,20 @@ bucket and no project code, and it opens no file for writing.
 
 | Flags | Issues | Subject key | Signed by |
 | --- | --- | --- | --- |
-| `--common-name <name> --validity-years <n>` | the self-signed direct-signing certificate the app embeds | source's | source |
+| `--common-name <name>` and a lifetime | the self-signed direct-signing certificate the app embeds | source's | source |
 | `--ca [--path-length <n>]` with the above | a CA root, to embed for chain mode | source's | source |
 | `--issuer <chain.pem> --subject-key <public-key.pem> --ca [--path-length <n>]` | an intermediate | the file's | source, as the issuer |
 | `--issuer <chain.pem> --subject-key <public-key.pem>` | a leaf, the writer's chain-mode signer | the file's | source, as the issuer |
 
-- **Arguments.** The common name is 1 to 64 printable ASCII characters with no space at either end; the validity is
-  a whole number of years from 1 to 100. Issued forms take exactly one of `--validity-years` and `--validity-days`
-  (1 to 36500), so a certificate can still be issued in an ancestor's last year. `--path-length` is 0 to 7, the
-  most intermediates a served chain holds; absent means unlimited.
+- **Arguments.** The common name is 1 to 64 printable ASCII characters with no space at either end. Every form takes
+  exactly one of `--validity-years` (1 to 100) and `--validity-days` (1 to 36500), so a certificate can still be
+  issued in an ancestor's last year. `--path-length` is 0 to 7, the most intermediates a served chain holds; absent
+  means unlimited.
 - **Inputs.** `--issuer` is a regular file of at most 64 KiB in the `certificate_chain` grammar: the issuing
   certificate first, each one above it, the root last (`cat intermediate.pem root.pem`, or `root.pem` alone).
   `--subject-key` is one canonical `PUBLIC KEY` PEM block holding an RSA SubjectPublicKeyInfo of 2048 to 4096 bits
-  and at most 550 bytes (a 4096-bit key with exponent 65537), whose DER re-encodes byte for byte; `openssl pkey
-  -pubout` writes it, and a KMS key's comes from `aws kms get-public-key`.
+  whose DER re-encodes byte for byte; `openssl pkey -pubout` writes it, and a KMS key's comes from
+  `aws kms get-public-key`.
 - **Certificate.** X.509 v3 with a random positive 16-octet serial, `sha256WithRSAEncryption` with NULL parameters
   inside and outside the TBS, and a subject Name holding only the common name. A self-signed certificate's issuer
   Name is the same bytes; an issued one's is the issuing certificate's subject Name, byte for byte. Validity runs
@@ -574,15 +574,14 @@ bucket and no project code, and it opens no file for writing.
   - Direct: the PEM passes the certificate profile (Keys), its public key is the source's, and `tide signing probe`
     signed by the source verifies under it, so a KMS key whose `Sign` and `GetPublicKey` disagree is refused.
   - Issued forms, before any key source call: both files parse, and the issuer path passes the client's chain rules
-    as a CA path (`certificateAuthorityChain`): every member valid, linked and a CA with `keyCertSign`, path lengths
-    leaving room for the issuing certificate, and room for one more certificate. Then the issuing certificate's key
-    must be the source's, and the new certificate must not expire after any certificate on the path.
-  - After signing: a root passes `certificateAuthorityChain` alone; an intermediate passes it with the issuer path;
-    a leaf passes `certificateChain`, the client's chain-mode check, as the served part `leaf + intermediates` over
-    the root. The link or root self-signature proves `Sign` and `GetPublicKey` agree, so they run no probe.
-  - A CA must leave room in a served part (32 KiB, 8 certificates) for the largest leaf Tide issues under it (550-
-    byte key, 64-character name); a leaf is measured by its own bytes. An intermediate is refused when it and its
-    `--issuer` together would exceed the 64 KiB `--issuer` limit, so it can always issue the next certificate.
+    as a CA path (`issuerPath`): at most 8 certificates, at most 32 KiB below the root, every member valid, linked
+    and a CA with `keyCertSign`, and path lengths leaving room for the issuing certificate. Then the issuing
+    certificate's key must be the source's, and the new certificate must not expire after any certificate on the
+    path.
+  - After signing: a root or an intermediate, followed by its `--issuer`, passes `issuerPath` as the next
+    `--issuer`; a leaf passes `certificateChain`, the client's chain-mode check, as the served part
+    `leaf + intermediates` over the root. The link or root self-signature proves `Sign` and `GetPublicKey` agree,
+    so they run no probe.
 - **Output.** stdout is exactly the PEM, one block of 64-column lines; redirect it to a file outside the app
   checkout (`deploy.md`, Signing identity). stderr is `tide: certificate DER SHA-256 <hex>`, the fingerprint the
   identity check compares. Exit 0, or 2 on any refusal with nothing on stdout. No message carries a key,

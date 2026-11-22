@@ -56,10 +56,7 @@ export type { CertificateFields, CodeSigningCertificate, IssuerPath, Signer } fr
 export {
   MAX_CHAIN_BYTES,
   MAX_CHAIN_CERTIFICATES,
-  MAX_COMMON_NAME,
   MAX_ISSUER_BYTES,
-  MAX_SPKI_BYTES,
-  certificateAuthorityChain,
   certificateChain,
   certificatePublicKey,
   codeSigningCertificate,
