@@ -304,6 +304,43 @@ export async function certificateChain(
 const chainError = (message: string) => new ProtocolError("certificate_chain", message);
 
 /**
+ * Returns the root `pem` a chain-mode app embeds, as `certificateChain` reads it at `now`: self-signed, and a CA with
+ * keyCertSign, since a served chain makes it an issuer. Errors are reported against `root`.
+ */
+export async function rootCertificate(pem: string, now: Date): Promise<CodeSigningCertificate> {
+  try {
+    const der = pemCertificateDer(pem, "+", (message) => chainError(`root ${message}`));
+    const { members, top } = await linkedChain([der], now, () => "root");
+    checkAuthorities(top, []);
+    checkProject(members);
+    return { key: top.key, sha256: await sha256Hex(der) };
+  } catch (e) {
+    if (!(e instanceof ProtocolError) || e.field !== "certificate_chain") throw e;
+    // Every chain rule names the lone member "root".
+    throw new ProtocolError("root", e.message.slice("certificate_chain root ".length));
+  }
+}
+
+/**
+ * Returns the leaf's verify key when `served` over `root` passed `certificateChain` 1 ms after its latest
+ * `notBefore`: who signed a stored body, not whether a client accepts it today.
+ */
+export async function certificateChainAtIssue(
+  served: Uint8Array,
+  root: string,
+): Promise<CryptoKey> {
+  const ders = readCertificateChain(served, "certificate_chain", MAX_CHAIN_BYTES);
+  ders.push(pemCertificateDer(root, "+", (message) => chainError(`root ${message}`)));
+  let issued = -Infinity;
+  for (const der of ders) {
+    const { notBefore } = await checkedCertificate(der, chainError);
+    issued = Math.max(issued, notBefore);
+  }
+  // Members accept only a strictly inner instant, and dates are whole seconds.
+  return await certificateChain(served, root, new Date(issued + 1));
+}
+
+/**
  * Returns the members of `ders` (root last), each valid at `now`, linked by name and signature to a self-signed root;
  * `role` names each one below the root.
  */

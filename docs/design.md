@@ -21,10 +21,15 @@ CLI refuses to publish without a key. Without it, anyone who can write the bucke
   rollback is a new, newer publish, and a device must never be served an older reply whose filters its running
   update fails.
 - It verifies `expo-signature` over the exact bytes of the multipart part, and each asset's SHA-256.
-- In chain mode (`codeSigningIncludeManifestResponseCertificateChain`) it builds the chain from the reply's
-  `certificate_chain` part (leaf first) and the embedded certificate as root, checks every certificate's validity,
-  links and CA constraints, and ignores the signature's `keyid`. The protocol package's `certificateChain` mirrors
-  those rules, stricter where its comments say.
+- In chain mode it builds the chain from the reply's `certificate_chain` part (leaf first) and the embedded
+  certificate as root, checks every certificate's validity at request time, links and CA constraints, and ignores the
+  signature's `keyid`. The protocol package's `certificateChain` mirrors those rules, stricter where its comments
+  say. The app opts in natively (Android meta-data
+  `expo.modules.updates.CODE_SIGNING_INCLUDE_MANIFEST_RESPONSE_CERTIFICATE_CHAIN`, iOS `Expo.plist`
+  `EXUpdatesCodeSigningIncludeManifestResponseCertificateChain`); in SDK 58 no app-config field maps to either, so a
+  config plugin writes them.
+- Every signing client sends `expo-expect-signature` with its metadata `keyid` (`root` when absent), chain mode
+  included.
 - With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
   launch-asset request carries `A-IM: bsdiff`,
   `Expo-Current-Update-ID` (the running update, which can be the embedded one) and `Expo-Requested-Update-ID`.
@@ -47,6 +52,7 @@ reply/no-update                          stored reply: the signed noUpdateAvaila
 legacy/map.json                          content keys that URLs from earlier servers name (legacy import)
 bases/<updateId>                         base record: a launch bundle patches start from (Base records)
 patches/<fromHash>/<toHash>              BSDIFF40 patch between two launch bundles (Patches)
+identities/<sha256(keyid)>               chain mode: the root a keyid is bound to (Keys); the server never reads it
 ```
 
 The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
@@ -57,7 +63,8 @@ read-only token.
 
 - **Keys** are a known prefix plus a hash (`assets/` or `bundles/` and 64 lowercase hex), a release record
   (`updates/<lowercase UUID>.json`), a base record (`bases/<lowercase UUID>`), a patch (`patches/` and two 64
-  lowercase hex content keys, from then to) or a reply key. All but reply keys are lowercase, so they are distinct on
+  lowercase hex content keys, from then to), an identity binding (`identities/` and the 64 lowercase hex SHA-256 of
+  the keyid's UTF-8) or a reply key. All but reply keys are lowercase, so they are distinct on
   a case-insensitive disk and need no escaping. Objects are stored
   unencoded; an object with a `content-encoding` other than `identity` is an error, not an asset.
 - **Reply keys** come from protocol `replyKey`, shared by server and CLI. Channel and runtime version are each 1 to 64
@@ -333,7 +340,9 @@ tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
 1. `expo config --json` gives `updates.codeSigningMetadata` (`keyid` required printable ASCII, `alg` absent or
    `rsa-v1_5-sha256`; only those two members are kept) and `updates.codeSigningCertificate` (relative to the project
    root, a regular file of at most 64 KiB, UTF-8, passing the certificate profile, so it holds one certificate and
-   nothing else).
+   nothing else). `updates.codeSigningIncludeManifestResponseCertificateChain` (the input of the app's own config
+   plugin, which `expo config` passes through) must be absent or a boolean; when `true` the certificate must pass the
+   root rules instead (Keys, Chain mode).
 2. `expo config --type public --json` (an object) and each platform's runtime: `expo-updates
    runtimeversion:resolve --platform <p>` (every Expo policy, resolved by Expo) unless `--runtime-version` is given.
    A runtime must be a string the reply key grammar accepts.
@@ -346,6 +355,10 @@ tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
 ```json
 {"version":1,"certificate":"-----BEGIN CERTIFICATE-----\n…","codeSigningMetadata":{"keyid":"main","alg":"rsa-v1_5-sha256"},"expoClient":{…},"platforms":{"ios":{"runtimeVersion":"1.0.0"}}}
 ```
+
+Chain mode adds `"codeSigningIncludeManifestResponseCertificateChain":true` after `codeSigningMetadata`; it is
+written only when true, so a direct export's bytes are unchanged, and an older CLI refuses the member rather than
+publish direct-signed.
 
 Everything in the directory is served publicly (`expoClient` is every manifest's `extra.expoClient`; `dist` is what
 is uploaded) or embedded in every shipped build (certificate, `keyid`, `alg`). Steps 1 and 2 refuse before `<dir>`
@@ -373,8 +386,9 @@ is dropped. Plus the bucket (Bucket configuration) and a key (Keys).
 
 **Export.** The directory is untrusted input, checked once, by publish. `tide-export.json` (at most 16 MiB, UTF-8
 JSON) holds exactly the fields above with `version` 1, a string certificate of at most 64 KiB, an object
-`expoClient`, and one or more of `ios` and `android`, each only a `runtimeVersion` the key grammar accepts. Its
-certificate must be the builds' (same DER) and its `keyid` theirs (Keys). Neither it nor `dist` may resolve outside
+`expoClient`, the chain member only as `true` (absent is direct), and one or more of `ios` and `android`, each only
+a `runtimeVersion` the key grammar accepts. Its certificate must be the builds' (same DER), its `keyid` and mode
+theirs (Keys). Neither it nor `dist` may resolve outside
 the directory, which must stay unchanged while publish runs. Every path in `metadata.json` must resolve inside
 `dist` to a regular file. An asset path is `assets/<md5>` or `www.bundle/<md5>.<ext>` (DOM
 components), the MD5 is its key, and the file's bytes must hash to it. Repeated identical entries collapse.
@@ -397,11 +411,14 @@ Steps, in order; every refusal comes before the first write, and all replies are
    read. `makeBsdiff` builds each patch, and protocol `applyBsdiff` applies it to the base: a refusal, or a result
    whose SHA-256 is not the new bundle's, refuses the publish. A checked patch is kept only when at most half the
    new bundle's level-9 gzip size, the encoding every client accepts; otherwise the full bundle serves alone. Then
-   build `reply/no-update` if it is missing, and re-check the certificate by both clocks.
+   build `reply/no-update` if it is missing (in chain mode, also when it serves another chain than the configured
+   one), and re-check the certificate by both clocks.
 6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then kept patches
    at `patches/<from hex>/<to hex>` (put-if-absent, `no-store`; a lost race stored the same deterministic, checked
-   bytes), then `reply/no-update` (a winner must verify under the identity), then each release record followed by
-   its `update` base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
+   bytes), then in chain mode the identity binding (put-if-absent; a winner must bind the same root), then
+   `reply/no-update` (put-if-absent, or `If-Match` for a renewal; in chain mode the chain is re-checked by both
+   clocks just before it; a winner must verify under the identity), then each release record followed by its `update`
+   base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
    Then,
    per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
    its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
@@ -471,6 +488,10 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
 - **Copied bodies are verified.** Every body a write copies (both sides for `tide rollout`, the kept reply for
   `publish --rollout`) must verify under the configured certificate and `keyid`, whatever `reply/no-update` holds.
   Plain publish, republish and rollback copy nothing, so they still replace a pointer that fails; that repairs it.
+- **A rise checks the new reply.** In chain mode, a higher percentage or `complete` refuses (exit 2) when the new
+  reply's chain fails the client's rules by either clock, read after the pointers, since it would reach devices the
+  earlier reply served. Before each later rising write, both clocks are read afresh again; a failure then exits 1.
+  `revert` and a target already at its goal restore or keep what devices get, and read no clock.
 - **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
   version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
 - **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
@@ -590,10 +611,9 @@ bucket and no project code, and it opens no file for writing.
 
 ## Keys
 
-A leaked key can ship code to every installed app. Publish only from CI, and sign through KMS where possible. Tide
-supports direct signing only: the app embeds one self-signed certificate, and its key signs every part.
-`tide certificate` already issues chain certificates (a CA root, intermediates and leaves); writers serving a chain
-are roadmap P11.
+A leaked key can ship code to every installed app. Publish only from CI, and sign through KMS where possible. In
+direct mode the app embeds one self-signed certificate, and its key signs every part. In chain mode the app embeds a
+CA root, and a leaf under it signs every part, served with its chain (Chain mode).
 
 **Key sources.** Exactly one is configured; an empty variable counts as unset.
 
@@ -614,12 +634,15 @@ Writers call only `Sign`; `tide certificate` also calls `GetPublicKey` on the sa
 identity from the store builds, read from a shipped binary rather than the checkout:
 
 - `TIDE_BUILD_KEYID`: the builds' `keyid`, printable ASCII. Expo's implicit `root` is never assumed.
+- `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN`: `true` for chain mode; `false`, unset or empty for direct, the client's
+  default; anything else is refused.
 - Exactly one of `TIDE_BUILD_CERTIFICATE_FILE` (a path, a regular file of at most 64 KiB) and
-  `TIDE_BUILD_CERTIFICATE` (the PEM).
+  `TIDE_BUILD_CERTIFICATE` (the PEM): the certificate, or in chain mode the root.
 
 In an APK, `aapt2 dump xmltree --file AndroidManifest.xml app.apk` shows the meta-data
 `expo.modules.updates.CODE_SIGNING_CERTIFICATE` and `CODE_SIGNING_METADATA`; in an IPA, `plutil -p
-Payload/<App>.app/Expo.plist` shows `EXUpdatesCodeSigningCertificate` and `EXUpdatesCodeSigningMetadata`.
+Payload/<App>.app/Expo.plist` shows `EXUpdatesCodeSigningCertificate` and `EXUpdatesCodeSigningMetadata`, and for chain mode
+`CODE_SIGNING_INCLUDE_MANIFEST_RESPONSE_CERTIFICATE_CHAIN` and `EXUpdatesCodeSigningIncludeManifestResponseCertificateChain`.
 
 **Certificate profile.** One ASCII PEM block, each delimiter alone on its line, holding one self-signed X.509 v3
 certificate, valid now, signed with `sha256WithRSAEncryption` (the same identifier inside and outside the TBS), with
@@ -628,25 +651,55 @@ project-information extension, and an RSA key of 2048 to 4096 bits. A renewed ce
 builds hold an expired one.
 
 **Identity.** `publish` also refuses an export whose `codeSigningMetadata` (`keyid` printable ASCII, `alg` absent or
-`rsa-v1_5-sha256`) names another `keyid`, or whose certificate is not the pinned one, compared by DER SHA-256.
+`rsa-v1_5-sha256`) names another `keyid`, whose mode differs from the pin, or whose certificate is not the pinned one,
+compared by DER SHA-256.
 `tide export` applies the same metadata rule and the profile before writing anything, so a malformed `keyid` or a
 file holding a key never reaches an export.
 
 **Probe.** Before the bucket is opened, the CLI signs `tide signing probe` and verifies it against the certificate
-and `keyid`. Every later signature is verified the same way before it is returned, so a re-pointed KMS alias cannot
+and `keyid`, or in chain mode under the served leaf. Every later signature is verified the same way before it is
+returned, so a re-pointed KMS alias cannot
 produce a part the app rejects. Every key, pin or export identity refusal exits before the bucket is opened; the bucket check only
 reads replies. Each refusal has a fixed message that names variables and config fields, never a key,
 credential or provider text.
 
 **One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
 exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
-certificate and `keyid`. When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
+certificate and `keyid` (in chain mode, that belongs to the identity: Chain mode). When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
 the same way, both bodies of a rollout included (an empty `reply/` is a new bucket), so no writer repairs another
-identity's bucket. A new key or key
-ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `republish` create a missing
+identity's bucket. A new direct key, a new root or a new key ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `republish` create a missing
 `reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; and they re-check
 the certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
 write. No writer runs project code (CLI).
+
+**Chain mode.** The writers sign with a leaf under the pinned root, and every reply they build (manifest,
+`rollBackToEmbedded`, `noUpdateAvailable`) carries the signed part followed by a `certificate_chain` part.
+
+- **Root.** The pinned certificate is checked as the client reads a root: one PEM block, self-signed, valid now, a CA
+  with `keyCertSign`, and no Expo project information. A chain-mode export's certificate must pass the same rules.
+- **Served chain.** Exactly one of `TIDE_CERTIFICATE_CHAIN_FILE` (a path, at most 64 KiB) and
+  `TIDE_CERTIFICATE_CHAIN` (the text): the leaf, then any intermediates, root excluded, in the `certificate_chain`
+  grammar (at most 32 KiB and 8 certificates). It is not a pin, since leaves rotate without an app release; only
+  `publish`, `rollback` and `republish` read it, and either variable in direct mode is refused. Its bytes are stored
+  as given, after `certificateChain` passes them over the root at open, so the check runs on exactly what clients
+  receive. The validity re-checks before each write cover every member of the chain.
+- **Identity.** A stored body belongs to the identity when its signature's `keyid` is the pinned one, it carries a
+  `certificate_chain` part (and a direct body none), and its chain links to the pinned root and verifies the
+  signed part as of the chain's issue (`certificateChainAtIssue`: 1 ms after its latest `notBefore`). So a body an
+  earlier leaf under the same root signed, expired or not, still belongs, and a new leaf needs no app release and no
+  new bucket. The served chain omits the root, so the bucket also binds the `keyid` to the root's exact DER: the
+  first chain-mode write creates `identities/<sha256(keyid)>`, `{"version":1,"keyid":"<keyid>","root":"<DER
+  SHA-256 hex>"}`, with put-if-absent, and every writer refuses a binding to another root. A root reissued with the
+  same subject and key is therefore another identity: it could carry other constraints than the builds embed.
+  Writers bind before any chained reply, so a bucket holding chained replies without the binding has lost it:
+  every writer refuses it until the binding is restored, rather than bind whichever root its chains link to.
+- **Shared no-update.** `reply/no-update` carries the leaf that signed it, so a signing writer whose configured chain
+  differs from the stored body's re-signs it, replacing it with `If-Match` on the ETag it read. A lost race keeps the
+  winner when it is this identity's; an unknown outcome is re-read by the next run.
+- **Expiry.** An expired leaf or intermediate in the served chain stops every writer until it is replaced; bodies
+  already stored keep their own chain, and each device rejects one whose chain has expired. Publish or republish each
+  live channel, and finish or replace rollouts, before an old leaf expires; `tide probe` fails on an expired served
+  chain. An expired root stops every writer and every build that embeds it.
 
 **KMS provisioning.** Prefer a key created inside KMS, whose private key never exists anywhere else:
 
@@ -661,7 +714,8 @@ Such a key cannot be exported, so there is no recovery copy. Disabling it stops 
 a pending deletion can be cancelled with `cancel-key-deletion`, then `enable-key`. Once it is deleted, or left
 disabled, every installed build is stranded: it keeps the updates it has, but nothing new is signed for it until a
 new store build ships. That build needs a new key, a new bucket and a new `updates.url` (One signing identity per
-bucket); certificate chains and per-`keyid` identities are roadmap P11. So schedule any deletion with the longest
+bucket); in chain mode a lost leaf key needs only a new leaf under the root (Chain mode), and per-`keyid`
+identities are roadmap P11. So schedule any deletion with the longest
 waiting period, `schedule-key-deletion --pending-window-in-days 30`, and give the key a policy that allows
 `kms:ScheduleKeyDeletion` and `kms:DisableKey` only to a break-glass role.
 
@@ -718,7 +772,10 @@ tide probe --server-url <url> --channel <name> --runtime-version <version> --pla
 `--server-url` is the base before `/manifest` (`https:`, or `http:` to a loopback IP literal). The pins are the
 builds' own: `TIDE_BUILD_KEYID`, and the certificate the builds embed in exactly one of `TIDE_BUILD_CERTIFICATE_FILE`
 (a path, at most 64 KiB) or `TIDE_BUILD_CERTIFICATE` (the PEM). The certificate must pass the same profile and
-validity checks as at publish, so an expired one fails the probe.
+validity checks as at publish, so an expired one fails the probe. With `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN=true` it is
+the root, the reply must carry a `certificate_chain` part, and the signed part verifies under that chain's leaf after
+`certificateChain` passes it over the root now, with the `keyid` ignored as the client ignores it; direct mode ignores
+a `certificate_chain` part.
 
 The probe sends `GET /manifest` as a stock client: `expo-protocol-version: 1`, `expo-expect-signature` with the
 pinned keyid, `accept: multipart/mixed`, and no current update ID, so a pointer is served whenever one exists. It
@@ -735,7 +792,7 @@ wherever it points and its SHA-256 compared with `launchAsset.hash`; other asset
 | 3 | Unreachable: a request failed or passed its deadline |
 | 4 | `/manifest` or the launch asset answered a status other than 200 (404 for the asset is 7) |
 | 5 | Unparseable reply: not `multipart/mixed`, no `expo-protocol-version: 1`, filters that are not a dictionary of strings, a bad body, no single signed part, or malformed JSON |
-| 6 | Signature: missing, malformed, another keyid, or not verifying under the pinned certificate |
+| 6 | Signature: missing, malformed, another keyid, or not verifying under the pinned certificate; in chain mode, no `certificate_chain` part, a chain that fails the client's rules, or no verify under the served leaf |
 | 7 | The launch asset answered 404 |
 | 8 | The launch asset's SHA-256 differs from the manifest's hash |
 | 9 | The signed manifest is for another runtime version than `--runtime-version`, or its metadata fails the reply's filters |

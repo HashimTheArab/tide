@@ -18,7 +18,7 @@ import {
 import type { Bucket } from "./bucket.ts";
 import type { Env } from "./keys.ts";
 import type { PublishOptions, WriteStep } from "./publish.ts";
-import { buildIdentity, checkBucket, member } from "./keys.ts";
+import { buildIdentity, member, servingBucket } from "./keys.ts";
 import { writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError, platformOf } from "./publish-record.ts";
@@ -72,11 +72,11 @@ async function prepare(
   });
 
   // An empty bucket serves no identity, so its first publish could pin another under this build's asset keys.
-  if (!(await checkBucket(bucket, identity))) {
-    throw new PublishError(
-      "reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
-    );
-  }
+  await servingBucket(
+    bucket,
+    identity,
+    "reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
+  );
   const stored = await bucket.get(key, MAX_BASE_BYTES);
   if (stored !== undefined && !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);

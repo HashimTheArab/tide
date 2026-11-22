@@ -12,7 +12,7 @@ import {
 
 import type { Bucket } from "./bucket.ts";
 import { isKey } from "./bucket.ts";
-import { isObject } from "./keys.ts";
+import { isObject, sameBytes } from "./keys.ts";
 import { isTime } from "./status.ts";
 
 /** A command's refusal or failure. Its message names keys, variables and rules, never stored data. */
@@ -177,11 +177,6 @@ export function decodeRecord(bytes: Uint8Array): ReleaseRecord {
     throw new ProtocolError("record", "is not in the form tide writes");
   }
   return record;
-}
-
-/** True when `a` and `b` hold the same bytes. */
-export function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** Returns the release record at `key`, undefined when absent; one that does not decode or names another ID refuses. */
