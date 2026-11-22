@@ -47,8 +47,8 @@ One bucket (R2 or S3-compatible), written only by the CLI:
 assets/<sha256>                          immutable non-launch assets
 bundles/<sha256>                         launch bundles
 updates/<updateId>.json                  release record (CLI, Release records)
-reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
-reply/no-update                          stored reply: the signed noUpdateAvailable
+reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer), or one per keyid
+reply/no-update                          stored reply: the signed noUpdateAvailable, or one per keyid
 legacy/map.json                          content keys that URLs from earlier servers name (legacy import)
 bases/<updateId>                         base record: a launch bundle patches start from (Base records)
 patches/<fromHash>/<toHash>              BSDIFF40 patch between two launch bundles (Patches)
@@ -133,6 +133,40 @@ this order, no whitespace, no trailing newline:
 - Only `tide publish --rollout` and `tide rollout` write version 2 (CLI, Staged rollouts); servers read it from the
   same release, and must be deployed first.
 
+#### Several signing identities (version 3)
+
+A pointer or `reply/no-update` may hold a version-3 record: one entry per signing identity, keyed by the keyid its
+builds send in `expo-expect-signature`. Protocol `encodeIdentityPointer` and `encodeIdentityNoUpdate` write it;
+`decodePointer` and `decodeNoUpdate` read it beside the earlier versions (`decodeStoredReply` stays version 1 only).
+Golden files: `identities-*.reply.json`. Each entry is `keyid` followed by the fields of a version-1 reply or a
+version-2 rollout without `version`:
+
+```json
+{"version":3,"identities":[{"keyid":"main","kind":"rollout","percent":12.5,"new":{…},"earlier":null},{"keyid":"root","kind":"manifest","updateId":"…","contentType":"…","manifestFilters":"…","body":"…"}]}
+```
+
+- An array, sorted by keyid in code-unit order, each keyid once, 1 to 16 entries. A pointer entry is a `manifest`,
+  `rollBackToEmbedded` or `rollout` (every version-2 rule applies); a `reply/no-update` entry is `noUpdateAvailable`.
+- A keyid is non-empty printable ASCII whose escaped length (each `"` and `\` counts twice, the same in JSON and in
+  the RFC 8941 header string) is at most 16 KiB, Node's default request head limit. So every keyid a request can
+  carry to both runtimes fits, and protocol `checkKeyId` applies the one rule to records and requests alike.
+- Size: at most 2 MiB plus 32 KiB, measured with each rollout's percent padded to its longest spelling (5
+  characters), so a later percent change never makes a stored record too large. The margin lets any valid version-1
+  or version-2 record become a one-entry record under any keyid, body bytes unchanged. Input over 2 MiB is refused
+  before parsing unless it starts with `{"version":3,`.
+- Decode refuses anything encode would not write byte for byte, as for version 2, naming the field where it can.
+
+Migration rules, for the writers:
+
+- A version-1 or version-2 record counts as the one identity its signatures carry. The server never reads that
+  keyid and serves the record to every request, so buckets written before version 3 keep serving the same bytes.
+  A legacy keyid over 16 KiB keeps serving but cannot become an entry.
+- Convert `reply/no-update` to version 3 first, then every pointer, each as one entry for the existing identity. Add
+  an entry for a second identity only when no version-1 or version-2 record is left: a legacy pointer would serve the
+  old identity's manifest to the new identity's builds.
+- Servers first: no CLI may write version 3 until every server sharing the bucket reads it; an older server answers
+  503 for every key that holds one ([deploy.md](deploy.md#upgrade-order)).
+
 ### Base records
 
 One JSON object per base, encoded and decoded by protocol `encodeBaseRecord` and `decodeBaseRecord`; the golden files
@@ -200,7 +234,8 @@ An empty request header counts as absent. In order:
 4. `expo-channel-name` or `expo-runtime-version` missing or outside the reply key grammar: 400. There is no default
    channel: a misconfigured app sees a 400 in its logs rather than a silent no-update, and keeps its current update.
 5. No pointer for `<channel>/<runtime>/<platform>`: the stored `reply/no-update`.
-6. A rollout pointer picks a side, then the reply on that side, as below.
+6. A version-3 pointer picks the entry for the request's keyid (below); no entry means `reply/no-update`. A rollout
+   pointer or entry picks a side, then the reply on that side, as below.
 7. `Expo-Current-Update-ID` equal to the update ID of the manifest picked (compared ignoring case), or no reply on
    the side picked: the stored `reply/no-update`.
 8. Otherwise the reply picked. A rollback is served even to a client running its embedded update: the client applies
@@ -225,17 +260,34 @@ A rollout's side:
   Lowering the percentage never moves a device back: devices already on the new update stay there. To move them off
   it, publish a newer update or use `tide rollback`.
 
+A request's keyid is the `keyid` string of its `expo-expect-signature`, or `root` when it has none: every signing
+stock client sends the header, in chain mode too. It is read only when a version-3 record decides the reply, so
+version-1 and version-2 records serve exactly as before, whatever the header says.
+
+- An absent or malformed header, or a keyid that is not a string `checkKeyId` accepts: 400 with exactly
+  `expo-expect-signature must name a keyid`.
+- A version-3 `reply/no-update` with no entry for the keyid: 404 with exactly `no reply is signed for this keyid`.
+  Neither body names the keyid or holds stored bytes.
+- A version-1 `reply/no-update` under a version-3 pointer is a storage inconsistency (its body is signed for one
+  identity, and the server cannot tell which): 503 wherever the pointer needs no-update. A version-1 or version-2
+  pointer over a version-3 `reply/no-update` falls back per keyid, with the 400 and 404 above.
+
 A served reply is 200 with the stored body, `content-type: multipart/mixed; boundary=…`, `expo-protocol-version: 1`,
 `expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the served manifest's stored
 `expo-manifest-filters` (even when empty: a client keeps earlier filters when the header is absent). Each part
 carries `Content-Disposition: form-data; name="manifest"` (or `"directive"`), `Content-Type: application/json` and
 `expo-signature: sig="<base64>", keyid="<id>"` over its exact bytes.
 
+A reply picked by keyid also carries `vary: Expo-Expect-Signature`, so a private cache (Android's OkHttp) never
+gives one identity's reply to another. Legacy responses carry no `vary`, but `max-age=0` makes a cache revalidate
+them, and with no validator that is a full request. An app whose `requestHeaders` allow stale responses
+(`max-stale`) must also send `cache-control: no-cache` from the build that moves to a new identity.
+
 One deadline (10 s) covers every read of a request. A missing `reply/no-update` when it is needed, a record over
-2 MiB (checked from its stored size before reading), one that fails to decode (a malformed version-2 record
-included) or has the wrong kind for its key, a store error, and a read past the deadline are each 503 with
-`cache-control: no-store`; 400 and 406 are `no-store` too. A server older than version 2 answers 503 for a pointer
-holding it.
+the version-3 limit (checked from its stored size before reading), one that fails to decode (a malformed or oversize
+version-2 or version-3 record included) or has the wrong kind for its key, a store error, and a read past the
+deadline are each 503 with `cache-control: no-store`; 400, 404 and 406 are `no-store` too, and record no analytics
+point. A server older than a record's version answers 503 for it.
 
 ### `GET /bundles/<sha256>`
 

@@ -313,6 +313,8 @@ release, so deploy that server everywhere before using any CLI that writes versi
 pinned CLI back below that release while any pointer holds the version, a complete or reverted rollout included: an
 older server answers 503 for that pointer and an older CLI refuses to write over it, so first replace each such
 pointer with a plain publish, republish or rollback.
+Version 3 (several signing identities) is read by servers before any CLI writes it: deploy a server that reads it
+everywhere first.
 
 ## The container
 
