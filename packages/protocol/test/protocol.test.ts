@@ -15,6 +15,8 @@ import { bunzip2 } from "../src/bzip2.ts";
 import { base64, decodeBase64 } from "../src/hash.ts";
 import {
   MAX_BASE_BYTES,
+  MAX_CHAIN_BYTES,
+  MAX_CHAIN_CERTIFICATES,
   MAX_FILTERS_BYTES,
   MAX_REPLY_BYTES,
   LEGACY_MAP_KEY,
@@ -27,6 +29,7 @@ import {
   buildManifest,
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
+  certificateChain,
   certificatePublicKey,
   codeSigningCertificate,
   contentKey,
@@ -58,6 +61,7 @@ import {
   signV4,
   storageFromEnv,
   textOf,
+  verifyChainedSignature,
   verifyExpoSignature,
 } from "../src/index.ts";
 import { EMPTY_SHA256 } from "../src/s3.ts";
@@ -74,6 +78,9 @@ import {
 import {
   ALGORITHM,
   BOUNDARY,
+  CHAIN_GOLDEN,
+  CHAIN_NOW,
+  CHAIN_VALIDITY,
   CLIENT_HIGH,
   CLIENT_LOW,
   EXPO_GOLDEN,
@@ -85,9 +92,11 @@ import {
   TIDE_REPLY_GOLDEN,
   TIDE_ROLLOUT_GOLDEN,
   certificate,
+  chainFixtures,
   goldenParts,
   goldenReply as goldenReplyOf,
   goldenRollout,
+  keyId,
   pem,
   replyGoldens,
   signedFixtures,
@@ -615,7 +624,7 @@ describe("sfv", () => {
 const B = BOUNDARY;
 const part = (name: PartName, body: Uint8Array<ArrayBuffer>): Part => ({ name, body });
 const SIGNATURE = 'sig="a", keyid="main"';
-const GOLDEN_PARTS = { ...TIDE_GOLDEN, ...EXPO_GOLDEN };
+const GOLDEN_PARTS = { ...TIDE_GOLDEN, ...EXPO_GOLDEN, ...CHAIN_GOLDEN };
 const GOLDEN = Object.keys(GOLDEN_PARTS);
 /** The boundary golden `file` is framed with. */
 const boundaryOf = (file: string) => GOLDEN_PARTS[file]!.boundary;
@@ -1324,6 +1333,744 @@ function join(chunks: Uint8Array[]): Uint8Array<ArrayBuffer> {
 }
 
 const seed = inject("fcSeed");
+
+const rootKeys = once(rsa("SHA-256"));
+const intermediateKeys = once(rsa("SHA-256"));
+const leafKeys = once(rsa("SHA-256"));
+interface Pair {
+  readonly publicKey: CryptoKey;
+  readonly privateKey: CryptoKey;
+}
+
+/** Issues a chain-test certificate inside CHAIN_VALIDITY; `options` override. */
+const issue = (subject: Pair, issuer: Pair, options: CertificateOptions) =>
+  certificate(subject.publicKey, issuer.privateKey, CHAIN_NOW, { ...CHAIN_VALIDITY, ...options });
+const CA = [EXTENSION.ca(), EXTENSION.keyCertSignOnly];
+/** A `certificate_chain` part body serving `pems` (PEM text or DER), in order. */
+const servedBody = (...pems: (string | Uint8Array)[]) =>
+  ascii(pems.map((p) => (typeof p === "string" ? p : pem(p))).join(""));
+const CODE_SIGNING = [EXTENSION.digitalSignature, EXTENSION.codeSigning];
+
+/** Per-role overrides of a test chain; the defaults pass. */
+interface ChainSpec {
+  readonly root?: CertificateOptions;
+  readonly intermediate?: CertificateOptions;
+  readonly leaf?: CertificateOptions;
+  readonly leafSigner?: Pair; // Default: the certificate above the leaf.
+}
+
+/** Returns a root, intermediate, leaf chain (or root and leaf when `length` is 2): the part body, its PEMs, the root. */
+async function testChain(spec: ChainSpec = {}, length: 2 | 3 = 3) {
+  const [root, intermediate, leaf] = [await rootKeys(), await intermediateKeys(), await leafKeys()];
+  const above = length === 3 ? intermediate : root;
+  const rootPem = await issue(root, root, {
+    subject: "Root",
+    issuer: "Root",
+    extensions: CA,
+    ...spec.root,
+  });
+  const leafPem = await issue(leaf, spec.leafSigner ?? above, {
+    subject: "Leaf",
+    issuer: length === 3 ? "Intermediate" : "Root",
+    extensions: CODE_SIGNING,
+    ...spec.leaf,
+  });
+  const intermediatePem =
+    length === 3
+      ? await issue(intermediate, root, {
+          subject: "Intermediate",
+          issuer: "Root",
+          extensions: CA,
+          ...spec.intermediate,
+        })
+      : undefined;
+  const pems = intermediatePem === undefined ? [leafPem] : [leafPem, intermediatePem];
+  return { served: servedBody(...pems), pems, root: rootPem };
+}
+
+/** Expects the chain from `spec` to be refused with `message`. */
+async function refuses(spec: ChainSpec, message: string, length: 2 | 3 = 3) {
+  const { served, root } = await testChain(spec, length);
+  await rejects(() => certificateChain(served, root, CHAIN_NOW), "certificate_chain", message);
+}
+
+/** Returns a chain golden's signed part and its `certificate_chain` part body. */
+function chainGolden(file: string) {
+  const [signed, chain] = parseMultipart(fixture(file), boundaryOf(file));
+  return { signed: signed!, served: chain!.body };
+}
+
+/** A Name of these RDNs, each a SET of the given attribute TLVs. */
+const rdnName = (...rdns: Uint8Array[][]) =>
+  derTlv(0x30, ...rdns.map((attributes) => derTlv(0x31, ...attributes)));
+const attribute = (tag: number, value: Uint8Array) =>
+  derTlv(0x30, derOid("2.5.4.3"), derTlv(tag, value));
+
+describe("certificate chain", () => {
+  test.each([
+    ["chain.multipart", 2],
+    ["chain-short.multipart", 1],
+  ])(
+    "%s serves %i certificates, passes under chain-root.pem and its leaf verifies the signed part",
+    async (file, count) => {
+      const { signed, served } = chainGolden(file);
+      expect(text(served).match(/BEGIN CERTIFICATE/g)?.length).toBe(count);
+      const leaf = await certificateChain(served, text(fixture("chain-root.pem")), CHAIN_NOW);
+      await expect(
+        verifyChainedSignature(signed.body, signed.signature!, leaf),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  test("certificate.pem alone is a one-certificate chain whose key verifies manifest.multipart", async () => {
+    const leaf = await certificateChain(undefined, text(fixture("certificate.pem")), CHAIN_NOW);
+    const [part] = parseMultipart(fixture("manifest.multipart"), B);
+    await expect(
+      verifyChainedSignature(part!.body, part!.signature!, leaf),
+    ).resolves.toBeUndefined();
+  });
+
+  test("a one-certificate chain need not be a CA but must be a code-signing certificate", async () => {
+    const keys = await rootKeys();
+    const caOnly = await issue(keys, keys, { extensions: CA });
+    await rejects(
+      () => certificateChain(undefined, caOnly, CHAIN_NOW),
+      "certificate_chain",
+      "leaf must have Key Usage digitalSignature",
+    );
+    const noEku = await issue(keys, keys, { extensions: [EXTENSION.digitalSignature] });
+    await rejects(
+      () => certificateChain(undefined, noEku, CHAIN_NOW),
+      "certificate_chain",
+      "leaf must have Extended Key Usage codeSigning",
+    );
+  });
+
+  // Android's bounds are inclusive and iOS's exclusive: only a strictly inner instant passes both.
+  test.each<["root" | "intermediate" | "leaf", "notBefore" | "notAfter", string]>([
+    ["root", "notBefore", "root is not valid yet"],
+    ["root", "notAfter", "root has expired"],
+    ["intermediate", "notBefore", "intermediate 1 is not valid yet"],
+    ["intermediate", "notAfter", "intermediate 1 has expired"],
+    ["leaf", "notBefore", "leaf is not valid yet"],
+    ["leaf", "notAfter", "leaf has expired"],
+  ])("a %s whose %s is now is refused, and passes 1 ms inside", async (role, bound, message) => {
+    const { served, root } = await testChain({ [role]: { [bound]: CHAIN_NOW } });
+    await rejects(() => certificateChain(served, root, CHAIN_NOW), "certificate_chain", message);
+    const inside = new Date(CHAIN_NOW.getTime() + (bound === "notBefore" ? 1 : -1));
+    await expect(certificateChain(served, root, inside)).resolves.toBeDefined();
+  });
+
+  test("a one-certificate chain at exactly its notAfter is refused", async () => {
+    const keys = await rootKeys();
+    const pemText = await issue(keys, keys, { notAfter: CHAIN_NOW });
+    await rejects(
+      () => certificateChain(undefined, pemText, CHAIN_NOW),
+      "certificate_chain",
+      "root has expired",
+    );
+  });
+
+  test.each<[string, () => Promise<ChainSpec> | ChainSpec, string]>([
+    [
+      "a leaf whose issuer is not the intermediate's subject",
+      () => ({ leaf: { issuer: "Someone" } }),
+      "leaf is not issued by the certificate above it",
+    ],
+    [
+      "a leaf signed by another key",
+      async () => ({ leafSigner: await otherKeys() }),
+      "leaf has a signature that does not verify under its issuer's key",
+    ],
+    [
+      "a root that names another issuer",
+      () => ({ root: { issuer: "Someone" } }),
+      "root must be self-issued",
+    ],
+  ])("links: %s is refused", async (_, make, message) => {
+    await refuses(await make(), message);
+  });
+
+  test("links: a self-issued root signed by another key is refused", async () => {
+    const [root, other] = [await rootKeys(), await otherKeys()];
+    const { served } = await testChain();
+    const forged = await issue(root, other, { subject: "Root", issuer: "Root", extensions: CA });
+    await rejects(
+      () => certificateChain(served, forged, CHAIN_NOW),
+      "certificate_chain",
+      "root has a self-signature that does not verify",
+    );
+  });
+
+  test.each<[string, ChainSpec, string]>([
+    [
+      "a root without cA",
+      { root: { extensions: [EXTENSION.keyCertSignOnly] } },
+      "root must be a CA",
+    ],
+    [
+      "a root without keyCertSign",
+      { root: { extensions: [EXTENSION.ca(), EXTENSION.digitalSignature] } },
+      "root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "an intermediate without cA",
+      { intermediate: { extensions: [EXTENSION.keyCertSignOnly] } },
+      "intermediate 1 must be a CA",
+    ],
+    [
+      "an intermediate without keyCertSign",
+      { intermediate: { extensions: [EXTENSION.ca(), EXTENSION.digitalSignature] } },
+      "intermediate 1 must be a CA with Key Usage keyCertSign",
+    ],
+    // iOS reads the first content byte whole, Android only the declared bits; DER zeroes the padding.
+    [
+      "a CA whose keyCertSign bit sits in the padding",
+      { root: { extensions: [EXTENSION.ca(), EXTENSION.keyUsage("0304")] } },
+      "root has a malformed extension",
+    ],
+    [
+      "a root with pathLen 0 above an intermediate",
+      { root: { extensions: [EXTENSION.ca(0), EXTENSION.keyCertSignOnly] } },
+      "intermediate 1 exceeds the path length its issuers allow",
+    ],
+  ])("CA rules: %s is refused", async (_, spec, message) => {
+    await refuses(spec, message);
+  });
+
+  test("pathLen: a second intermediate under one with pathLen 0 is refused", async () => {
+    const [root, intermediate, leaf, other] = [
+      await rootKeys(),
+      await intermediateKeys(),
+      await leafKeys(),
+      await otherKeys(),
+    ];
+    const rootPem = await issue(root, root, { subject: "Root", issuer: "Root", extensions: CA });
+    const upper = await issue(intermediate, root, {
+      subject: "Upper",
+      issuer: "Root",
+      extensions: [EXTENSION.ca(0), EXTENSION.keyCertSignOnly],
+    });
+    const lower = await issue(other, intermediate, {
+      subject: "Lower",
+      issuer: "Upper",
+      extensions: CA,
+    });
+    const leafPem = await issue(leaf, other, { subject: "Leaf", issuer: "Lower" });
+    await rejects(
+      () => certificateChain(servedBody(leafPem, lower, upper), rootPem, CHAIN_NOW),
+      "certificate_chain",
+      "intermediate 1 exceeds the path length its issuers allow",
+    );
+  });
+
+  test("pathLen passes at the limit: root 0 directly above the leaf, root 1 above one intermediate", async () => {
+    const zero = await testChain(
+      { root: { extensions: [EXTENSION.ca(0), EXTENSION.keyCertSignOnly] } },
+      2,
+    );
+    await expect(certificateChain(zero.served, zero.root, CHAIN_NOW)).resolves.toBeDefined();
+    const one = await testChain({
+      root: { extensions: [EXTENSION.ca(1), EXTENSION.keyCertSignOnly] },
+    });
+    await expect(certificateChain(one.served, one.root, CHAIN_NOW)).resolves.toBeDefined();
+  });
+
+  const X = EXTENSION.project("project-x,@tide/x");
+  const Y = EXTENSION.project("project-y,@tide/y");
+  // The client makes every certificate below a carrier carry it, and Tide refuses it on the leaf: none may carry it.
+  test.each<[string, ChainSpec, string]>([
+    ["the root alone", { root: { extensions: [...CA, X] } }, "root"],
+    ["an intermediate alone", { intermediate: { extensions: [...CA, X] } }, "intermediate 1"],
+    [
+      "the root over an intermediate's other value",
+      { root: { extensions: [...CA, X] }, intermediate: { extensions: [...CA, Y] } },
+      "intermediate 1",
+    ],
+    [
+      "every certificate, matching down to the leaf",
+      {
+        root: { extensions: [...CA, X] },
+        intermediate: { extensions: [...CA, X] },
+        leaf: { extensions: [...CODE_SIGNING, X] },
+      },
+      "leaf",
+    ],
+    ["the leaf alone", { leaf: { extensions: [...CODE_SIGNING, X] } }, "leaf"],
+  ])("project information on %s is refused", async (_, spec, role) => {
+    await refuses(spec, `${role} must not carry Expo project information`);
+  });
+
+  test("project information on a one-certificate chain is refused", async () => {
+    const keys = await rootKeys();
+    const pemText = await issue(keys, keys, { extensions: [...CODE_SIGNING, X] });
+    await rejects(
+      () => certificateChain(undefined, pemText, CHAIN_NOW),
+      "certificate_chain",
+      "root must not carry Expo project information",
+    );
+  });
+
+  test("key identifiers: a leaf AKI that is not its issuer's SKI is refused; an AKI without an issuer SKI passes", async () => {
+    const issuerId = await keyId((await intermediateKeys()).publicKey);
+    const otherId = await keyId((await otherKeys()).publicKey);
+    const withSki = { extensions: [...CA, EXTENSION.subjectKeyId(issuerId)] };
+    await refuses(
+      {
+        intermediate: withSki,
+        leaf: { extensions: [...CODE_SIGNING, EXTENSION.authorityKeyId(otherId)] },
+      },
+      "leaf names another authority key identifier than its issuer's",
+    );
+    const { served, root } = await testChain({
+      leaf: { extensions: [...CODE_SIGNING, EXTENSION.authorityKeyId(otherId)] },
+    });
+    await expect(certificateChain(served, root, CHAIN_NOW)).resolves.toBeDefined();
+  });
+
+  test.each<[string, ChainSpec, string]>([
+    [
+      "a leaf without digitalSignature",
+      { leaf: { extensions: [EXTENSION.keyCertSignOnly, EXTENSION.codeSigning] } },
+      "leaf must have Key Usage digitalSignature",
+    ],
+    [
+      "a leaf without codeSigning",
+      { leaf: { extensions: [EXTENSION.digitalSignature, EXTENSION.serverAuthOnly] } },
+      "leaf must have Extended Key Usage codeSigning",
+    ],
+    // Apple's parser takes one or two Key Usage content octets and refuses a critical extension it cannot parse.
+    [
+      "a leaf whose Key Usage has three content octets",
+      { leaf: { extensions: [EXTENSION.keyUsage("07800000"), EXTENSION.codeSigning] } },
+      "leaf has a malformed extension",
+    ],
+  ])("leaf rules: %s is refused", async (_, spec, message) => {
+    await refuses(spec, message);
+  });
+
+  const criticalFalse = derTlv(
+    0x30,
+    derOid("2.5.29.37"),
+    derTlv(0x01, Uint8Array.of(0)),
+    derTlv(0x04, derTlv(0x30, derOid("1.3.6.1.5.5.7.3.3"))),
+  );
+  const caFalse = derTlv(
+    0x30,
+    derOid("2.5.29.19"),
+    derTlv(0x04, derTlv(0x30, derTlv(0x01, Uint8Array.of(0)))),
+  );
+  const criticalSki = derTlv(
+    0x30,
+    derOid("2.5.29.14"),
+    derTlv(0x01, Uint8Array.of(0xff)),
+    derTlv(0x04, derTlv(0x04, Uint8Array.of(1, 2, 3))),
+  );
+  // Expo 58's iOS decoder searches the whole TBSCertificate for the first Key Usage OID.
+  const ekuNamingKeyUsage = derTlv(
+    0x30,
+    derOid("2.5.29.37"),
+    derTlv(0x04, derTlv(0x30, derOid("1.3.6.1.5.5.7.3.3"), derOid("2.5.29.15"))),
+  );
+  test.each<[string, CertificateOptions, string]>([
+    [
+      "noncritical name constraints",
+      { extensions: [...CODE_SIGNING, EXTENSION.nameConstraints] },
+      "has an extension Tide does not allow",
+    ],
+    [
+      "an unknown critical extension",
+      { extensions: [...CODE_SIGNING, EXTENSION.unknownCritical] },
+      "has an extension Tide does not allow",
+    ],
+    [
+      "an AKI in the issuer and serial form",
+      { extensions: [...CODE_SIGNING, EXTENSION.authorityIssuerSerial] },
+      "has a malformed extension",
+    ],
+    [
+      "an explicit critical FALSE",
+      { extensions: [EXTENSION.digitalSignature, criticalFalse] },
+      "has a malformed extension",
+    ],
+    [
+      "an explicit cA FALSE",
+      { extensions: [...CODE_SIGNING, caFalse] },
+      "has a malformed extension",
+    ],
+    [
+      "a critical subject key identifier",
+      { extensions: [...CODE_SIGNING, criticalSki] },
+      "marks an extension critical that must not be",
+    ],
+    [
+      "Key Usage twice",
+      { extensions: [...CODE_SIGNING, EXTENSION.digitalSignature] },
+      "repeats an extension",
+    ],
+    [
+      "an EKU naming the Key Usage OID before Key Usage",
+      { extensions: [ekuNamingKeyUsage, EXTENSION.digitalSignature] },
+      "has a field that hides an extension from the iOS client",
+    ],
+    ["an empty serial", { serial: new Uint8Array() }, "must have a minimal positive serial number"],
+    [
+      "a 21-octet serial",
+      { serial: new Uint8Array(21).fill(1) },
+      "must have a minimal positive serial number",
+    ],
+    [
+      "a negative serial",
+      { serial: Uint8Array.of(0x80, 1) },
+      "must have a minimal positive serial number",
+    ],
+    [
+      "a non-minimal serial",
+      { serial: Uint8Array.of(0, 1) },
+      "must have a minimal positive serial number",
+    ],
+    ["a zero serial", { serial: Uint8Array.of(0) }, "must have a minimal positive serial number"],
+    ["an empty subject", { subject: rdnName() }, "must have a non-empty subject"],
+    [
+      "an empty RDN",
+      { subject: rdnName([], [attribute(0x0c, ascii("Leaf"))]) },
+      "must have a non-empty subject",
+    ],
+    [
+      "a two-attribute RDN",
+      { subject: rdnName([attribute(0x0c, ascii("A")), attribute(0x0c, ascii("B"))]) },
+      "must have a non-empty subject",
+    ],
+    [
+      "an empty attribute value",
+      { subject: rdnName([attribute(0x0c, new Uint8Array())]) },
+      "must have a non-empty subject",
+    ],
+    [
+      "an INTEGER attribute value",
+      { subject: rdnName([attribute(0x02, Uint8Array.of(1))]) },
+      "must have a non-empty subject",
+    ],
+    [
+      "a PrintableString with @",
+      { subject: rdnName([attribute(0x13, ascii("a@b"))]) },
+      "must have a non-empty subject",
+    ],
+    [
+      "a UTF8String that is not UTF-8",
+      { subject: rdnName([attribute(0x0c, Uint8Array.of(0xc3))]) },
+      "must have a non-empty subject",
+    ],
+    ["an issuer unique ID", { issuerUniqueId: true }, "must not carry a unique identifier"],
+    ["version 1", { v1: true }, "must be X.509 v3"],
+    [
+      "a SHA-384 signature",
+      { outerAlgorithm: ALGORITHM.sha384WithRsa, innerAlgorithm: ALGORITHM.sha384WithRsa },
+      "must be signed with sha256WithRSAEncryption",
+    ],
+  ])("profile: a one-certificate chain with %s is refused", async (_, options, message) => {
+    const keys = await rootKeys();
+    const pemText = await issue(keys, keys, { extensions: CODE_SIGNING, ...options });
+    await rejects(
+      () => certificateChain(undefined, pemText, CHAIN_NOW),
+      "certificate_chain",
+      `root ${message}`,
+    );
+  });
+
+  test("profile: an extension value of OCTET STRINGs nested 22 deep is walked once per level", async () => {
+    let nested = Uint8Array.of(1, 2, 3);
+    for (let level = 0; level < 22; level++) nested = derTlv(0x04, nested);
+    const ski = derTlv(0x30, derOid("2.5.29.14"), derTlv(0x04, nested));
+    const { served, root } = await testChain({ leaf: { extensions: [...CODE_SIGNING, ski] } });
+    await expect(certificateChain(served, root, CHAIN_NOW)).resolves.toBeDefined();
+  });
+
+  test("profile: a leaf and an intermediate with a bad serial are refused by role", async () => {
+    await refuses(
+      { leaf: { serial: Uint8Array.of(0) } },
+      "leaf must have a minimal positive serial",
+    );
+    await refuses(
+      { intermediate: { serial: Uint8Array.of(0) } },
+      "intermediate 1 must have a minimal positive serial",
+    );
+  });
+
+  test("names: a correctly signed link through matching names with an empty RDN is refused", async () => {
+    const odd = rdnName([], [attribute(0x0c, ascii("Intermediate"))]);
+    await refuses(
+      { intermediate: { subject: odd }, leaf: { issuer: odd } },
+      "leaf must have a non-empty issuer of single-attribute RDNs with string values",
+    );
+  });
+
+  test("names: PrintableString and UTF8String values pass", async () => {
+    const name = rdnName(
+      [attribute(0x13, ascii("Leaf (test) 1"))],
+      [attribute(0x0c, ascii("Tidé"))],
+    );
+    const { served, root } = await testChain({ leaf: { subject: name } });
+    await expect(certificateChain(served, root, CHAIN_NOW)).resolves.toBeDefined();
+  });
+
+  test("keys: a 1024-bit or EC leaf is refused", async () => {
+    const [small, ec, intermediate] = [await smallKeys(), await ecKeys(), await intermediateKeys()];
+    const { pems, root } = await testChain();
+    for (const [subject, message] of [
+      [small, "leaf must hold an RSA key of 2048 to 4096 bits"],
+      [ec, "leaf must hold an RSA public key"],
+    ] as const) {
+      const leaf = await certificate(subject.publicKey, intermediate.privateKey, CHAIN_NOW, {
+        ...CHAIN_VALIDITY,
+        subject: "Leaf",
+        issuer: "Intermediate",
+      });
+      await rejects(
+        () => certificateChain(servedBody(leaf, pems[1]!), root, CHAIN_NOW),
+        "certificate_chain",
+        message,
+      );
+    }
+  });
+
+  test("a served copy of the root is refused as a repeated subject", async () => {
+    const { pems, root } = await testChain({}, 2);
+    await rejects(
+      () => certificateChain(servedBody(pems[0]!, root), root, CHAIN_NOW),
+      "certificate_chain",
+      "intermediate 1 has the subject of another certificate in the chain",
+    );
+  });
+
+  test("malformed DER reports on certificate_chain with the member's role", async () => {
+    const { pems, root } = await testChain();
+    await rejects(
+      () =>
+        certificateChain(servedBody(pems[0]!, derOf(pems[1]!).subarray(0, -1)), root, CHAIN_NOW),
+      "certificate_chain",
+      "intermediate 1 has truncated DER",
+    );
+  });
+
+  test.each<[string, (root: string) => [undefined, string, Date], string, string]>([
+    ["an invalid now", (r) => [undefined, r, new Date(Number.NaN)], "now", "must be a valid Date"],
+    [
+      "a root with a blank line",
+      (r) => [undefined, r.replace("\n", "\n\n"), CHAIN_NOW],
+      "certificate_chain",
+      "root must be exactly one PEM",
+    ],
+    [
+      "two root blocks",
+      (r) => [undefined, r + r, CHAIN_NOW],
+      "certificate_chain",
+      "root must be exactly one PEM",
+    ],
+  ])("refuses %s", async (_, args, field, message) => {
+    const keys = await rootKeys();
+    const root = await issue(keys, keys, {});
+    await rejects(() => certificateChain(...args(root)), field, message);
+  });
+
+  test("the part body is read before the first await", async () => {
+    const { served, root } = await testChain();
+    const pending = certificateChain(served, root, CHAIN_NOW);
+    served.fill(0);
+    await expect(pending).resolves.toBeDefined();
+  });
+});
+
+describe("certificate chain: Expo's vectors", () => {
+  test("Expo's valid chain passes every client rule and stops at Tide's leaf rule", async () => {
+    await rejects(
+      () =>
+        certificateChain(
+          fixture("expo-chain.pem"),
+          text(fixture("expo-chain-root.pem")),
+          CHAIN_NOW,
+        ),
+      "certificate_chain",
+      "leaf must not carry Expo project information",
+    );
+  });
+
+  // Their leaves carry project information, so the CA rules must run before Tide's rule.
+  test.each<[string, string]>([
+    ["not-ca", "intermediate 1 must be a CA with Key Usage keyCertSign"],
+    ["path-len", "intermediate 1 exceeds the path length its issuers allow"],
+    ["project-information", "leaf must not carry Expo project information"],
+  ])("expo-%s-* is refused: %s", async (set, message) => {
+    const served = servedBody(
+      ...[`expo-${set}-leaf.pem`, `expo-${set}-intermediate.pem`].map((f) => text(fixture(f))),
+    );
+    await rejects(
+      () => certificateChain(served, text(fixture(`expo-${set}-root.pem`)), CHAIN_NOW),
+      "certificate_chain",
+      message,
+    );
+  });
+});
+
+describe("certificate_chain part reader", () => {
+  const leafPem = () => text(fixture("chain-leaf.pem"));
+  const intermediatePem = () => text(fixture("chain-intermediate.pem"));
+  const read = (body: Uint8Array) =>
+    certificateChain(body, text(fixture("chain-root.pem")), CHAIN_NOW);
+
+  test("CRLF line ends and a missing trailing line end pass", async () => {
+    const two = leafPem() + intermediatePem();
+    for (const ok of [two.replaceAll("\n", "\r\n"), two.slice(0, -1)]) {
+      await expect(read(ascii(ok))).resolves.toBeDefined();
+    }
+  });
+
+  test.each<[string, () => Uint8Array, string]>([
+    ["an empty body", () => new Uint8Array(), "must be 1 to 32768 bytes"],
+    [
+      "MAX_CHAIN_BYTES + 1 bytes",
+      () => new Uint8Array(MAX_CHAIN_BYTES + 1).fill(0x41),
+      "must be 1 to 32768 bytes",
+    ],
+    [
+      "MAX_CHAIN_CERTIFICATES + 1 blocks",
+      () => ascii(leafPem().repeat(MAX_CHAIN_CERTIFICATES + 1)),
+      "must serve 1 to 8",
+    ],
+    ["text that is not PEM", () => ascii("hello\n"), "must be PEM CERTIFICATE blocks"],
+    [
+      "a PUBLIC KEY block",
+      () => ascii(leafPem().replaceAll("CERTIFICATE", "PUBLIC KEY")),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    ["text before a block", () => ascii(`x\n${leafPem()}`), "must be PEM CERTIFICATE blocks"],
+    [
+      "text between blocks",
+      () => ascii(`${leafPem()}x\n${intermediatePem()}`),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    ["text after the blocks", () => ascii(`${leafPem()}x`), "must be PEM CERTIFICATE blocks"],
+    [
+      "a blank line between blocks",
+      () => ascii(`${leafPem()}\n${intermediatePem()}`),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    ["two trailing line ends", () => ascii(`${leafPem()}\n`), "must be PEM CERTIFICATE blocks"],
+    // Android's PEM reader takes a blank CRLF line for the end of headers and refuses the certificate.
+    [
+      "a blank CRLF line inside a block",
+      () =>
+        ascii(
+          leafPem()
+            .replaceAll("\n", "\r\n")
+            .replace(/(CERTIFICATE-----\r\n.{64}\r\n)/, "$1\r\n"),
+        ),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    [
+      "a non-ASCII byte",
+      () => ascii(leafPem().replace("-----\n", "-----\né")),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    [
+      "bad base64",
+      () => ascii(leafPem().replace("-----\nM", "-----\n!")),
+      "must be PEM CERTIFICATE blocks",
+    ],
+    [
+      "non-canonical base64",
+      () => ascii("-----BEGIN CERTIFICATE-----\nAB==\n-----END CERTIFICATE-----\n"),
+      "must be canonical base64",
+    ],
+  ])("refuses %s", async (_, body, message) => {
+    await rejects(() => read(body()), "certificate_chain", message);
+  });
+});
+
+describe("verifyChainedSignature", () => {
+  test("a flipped body byte fails, and verifyExpoSignature refuses the same header's keyid", async () => {
+    const { signed, served } = chainGolden("chain.multipart");
+    const leaf = await certificateChain(served, text(fixture("chain-root.pem")), CHAIN_NOW);
+    const body = new Uint8Array(signed.body);
+    body[10]! ^= 0x01;
+    await rejects(() => verifyChainedSignature(body, signed.signature!, leaf), "signature.sig");
+    await rejects(
+      () => verifyExpoSignature(signed.body, signed.signature!, leaf, "main"),
+      "signature.keyid",
+      "must be main",
+    );
+  });
+
+  test("still refuses a malformed header and a private key", async () => {
+    const { signed, served } = chainGolden("chain.multipart");
+    const leaf = await certificateChain(served, text(fixture("chain-root.pem")), CHAIN_NOW);
+    await rejects(
+      () =>
+        verifyChainedSignature(signed.body, `${signed.signature!}, alg="rsa-v1_5-sha512"`, leaf),
+      "signature.alg",
+    );
+    const { privateKey } = await leafKeys();
+    await rejects(
+      () => verifyChainedSignature(signed.body, signed.signature!, privateKey),
+      "key",
+      "public",
+    );
+  });
+
+  test("the generator's chain goldens carry the committed parts and verify", async () => {
+    const pair = rsa("SHA-256");
+    const files = await chainFixtures(fixture, {
+      root: await rootKeys(),
+      intermediate: await intermediateKeys(),
+      leaf: await leafKeys(),
+      shortLeaf: await pair(),
+    });
+    const pems = [
+      "chain-root.pem",
+      "chain-intermediate.pem",
+      "chain-leaf.pem",
+      "chain-short-leaf.pem",
+      "chain-served.pem",
+    ];
+    expect(Object.keys(files).sort()).toEqual([...pems, ...Object.keys(CHAIN_GOLDEN)].sort());
+    for (const file of Object.keys(CHAIN_GOLDEN)) {
+      const shape = (b: Uint8Array<ArrayBuffer>) =>
+        parseMultipart(b, boundaryOf(file)).map(({ name, body, signature }) => [
+          name,
+          name === "certificate_chain" ? undefined : body,
+          signature === undefined ? undefined : (/keyid="([^"]*)"/.exec(signature)?.[1] ?? "none"),
+        ]);
+      expect(shape(files[file]!)).toEqual(shape(fixture(file)));
+      const [signed, chain] = parseMultipart(files[file]!, boundaryOf(file));
+      const leaf = await certificateChain(chain!.body, text(files["chain-root.pem"]!), CHAIN_NOW);
+      await expect(
+        verifyChainedSignature(signed!.body, signed!.signature!, leaf),
+      ).resolves.toBeUndefined();
+    }
+  });
+});
+
+describe(`certificate chain properties (seed ${seed})`, () => {
+  test("flipping any byte of a served certificate refuses the chain", async () => {
+    const served = ["chain-leaf.pem", "chain-intermediate.pem"].map((f) => derOf(text(fixture(f))));
+    const root = text(fixture("chain-root.pem"));
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: served.length - 1 }),
+        fc.nat(),
+        fc.integer({ min: 1, max: 255 }),
+        async (member, at, mask) => {
+          const copy = served.map((d) => new Uint8Array(d));
+          const der = copy[member]!;
+          der[at % der.length]! ^= mask;
+          const body = servedBody(...copy);
+          await rejects(() => certificateChain(body, root, CHAIN_NOW), "certificate_chain");
+        },
+      ),
+      { seed },
+    );
+  });
+});
 
 describe(`properties (seed ${seed})`, () => {
   const tricky = ["\r\n", "--", "\r\n--", "\r\n\r\n", "b", "tide", "-"].map(ascii);

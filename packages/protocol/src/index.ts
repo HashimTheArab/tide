@@ -54,11 +54,15 @@ export {
 export { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
 export type { CodeSigningCertificate, SelfSignedFields, Signer } from "./signature.ts";
 export {
+  MAX_CHAIN_BYTES,
+  MAX_CHAIN_CERTIFICATES,
+  certificateChain,
   certificatePublicKey,
   codeSigningCertificate,
   cryptoKeySigner,
   expoSignature,
   parseExpoSignature,
   selfSignedCertificate,
+  verifyChainedSignature,
   verifyExpoSignature,
 } from "./signature.ts";

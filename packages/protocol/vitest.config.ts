@@ -16,7 +16,13 @@ const provide = { fcSeed: fcSeed(process.env.FC_SEED), fixtures };
 export default defineConfig({
   test: {
     projects: [
-      { test: { name: "node", include: ["test/protocol.test.ts"], provide } },
+      {
+        test: {
+          name: "node",
+          include: ["test/protocol.test.ts", "test/x509.node.test.ts"],
+          provide,
+        },
+      },
       {
         plugins: [cloudflareTest({ miniflare: { compatibilityDate: "2026-11-01" } })],
         test: { name: "workers", include: ["test/protocol.test.ts"], provide },
