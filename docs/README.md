@@ -23,3 +23,4 @@ Start here; keep this index current when adding a doc.
 Decisions:
 
 - [0001 Architecture](decisions/0001-architecture.md)
+- [0002 Hermes delta compiles](decisions/0002-hermes-delta-compiles.md)
