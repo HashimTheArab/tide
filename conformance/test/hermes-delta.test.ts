@@ -19,18 +19,28 @@ import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { applyBsdiff } from "@tide-ota/protocol";
 
 import type { AppId } from "../src/hermes-delta/apps.ts";
+import type { EmulatorResults } from "../src/hermes-delta/emulator.ts";
 import type { Results } from "../src/hermes-delta/measure.ts";
 import { makeBsdiff } from "../../packages/cli/src/bsdiff.ts";
 import { keepsPatch } from "../../packages/cli/src/publish-patch.ts";
 import { APPS, CHANGES } from "../src/hermes-delta/apps.ts";
 import {
   compile,
+  hbcVersion,
   hermescIo,
+  inspect,
   kotlinArgs,
   numstat,
   openTree,
+  parseDump,
   retarget,
 } from "../src/hermes-delta/build.ts";
+import {
+  PATHS,
+  applyPatches,
+  renderEmulator,
+  writeEmulatorResults,
+} from "../src/hermes-delta/emulator.ts";
 import {
   BASES,
   KEEP_RULE,
@@ -44,6 +54,7 @@ import { USAGE, UsageError, parseOptions } from "../src/hermes-delta/options.ts"
 
 const MAIN = fileURLToPath(new URL("../src/hermes-delta/main.ts", import.meta.url));
 const PATCHES = fileURLToPath(new URL("../hermes-delta/patches/", import.meta.url));
+const SHARED = fileURLToPath(new URL("../apps/shared/", import.meta.url));
 
 /** Returns `n` bytes from a fixed linear congruential sequence, so the inputs are the same every run. */
 function noise(n: number, seed: number): Uint8Array<ArrayBuffer> {
@@ -87,16 +98,41 @@ describe("pnpm hermes-delta options", () => {
   });
 
   test("defaults to every app", () => {
-    expect(parseOptions([])).toEqual({ apps: ["sdk-55", "sdk-58", "bluesky"] });
+    expect(parseOptions([])).toEqual({ emulator: false, apps: ["sdk-55", "sdk-58", "bluesky"] });
   });
 
   test("named apps keep table order; no option moves the cache the script deletes and rebuilds", () => {
     expect(parseOptions(["--app", "bluesky", "--app", "sdk-55"])).toEqual({
+      emulator: false,
       apps: ["sdk-55", "bluesky"],
     });
     for (const args of [["--work", "w"], ["--out", "o"], ["positional"]]) {
       expect(() => parseOptions(args), args.join(" ")).toThrow(UsageError);
     }
+  });
+});
+
+describe("pnpm hermes-delta --emulator options", () => {
+  test("defaults to both conformance apps and takes an AVD", () => {
+    expect(parseOptions(["--emulator"])).toEqual({
+      emulator: true,
+      apps: ["sdk-55", "sdk-58"],
+      avd: undefined,
+    });
+    expect(parseOptions(["--emulator", "--app", "sdk-58", "--avd", "a"])).toEqual({
+      emulator: true,
+      apps: ["sdk-58"],
+      avd: "a",
+    });
+  });
+
+  test("refuses the large app, whose source reports nothing, and --avd without --emulator", async () => {
+    const run = await bin(["--emulator", "--app", "bluesky"]);
+    expect(run.code).toBe(2);
+    expect(run.stderr).toBe(
+      "hermes-delta: --app must be one of sdk-55, sdk-58 with --emulator; see pnpm hermes-delta --help\n",
+    );
+    expect(() => parseOptions(["--avd", "a"])).toThrow("--avd is for --emulator");
   });
 });
 
@@ -484,4 +520,138 @@ test("writeResults writes only its own app's files, so runs of other apps never 
     `${JSON.stringify(results, null, 2)}\n`,
   );
   expect(readFileSync(join(out, "sdk-55.md"), "utf8")).toBe(renderTable(results));
+});
+
+describe("bytecode inspection", () => {
+  const header = (version: number) => {
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setBigUint64(0, 0x1f1903c103bc1fc6n, true);
+    view.setUint32(8, version, true);
+    return bytes;
+  };
+
+  test("hbcVersion reads the version after the HBC magic and refuses any other file", () => {
+    expect(hbcVersion(header(99))).toBe(99);
+    expect(() => hbcVersion(new TextEncoder().encode("var a = 1;\n"))).toThrow(
+      "not a Hermes bytecode file",
+    );
+    expect(() => hbcVersion(header(99).slice(0, 8))).toThrow("not a Hermes bytecode file");
+  });
+
+  test("parseDump reads hermesc's header and refuses a dump without one", () => {
+    const dump = [
+      "Bytecode File Information:",
+      "  Bytecode version number: 99",
+      "  Source hash: 6c8184fc",
+      "  Function count: 61189",
+      "  String count: 156152",
+      "  String Kind Entry count: 7",
+    ];
+    expect(parseDump(dump)).toEqual({
+      bytecodeVersion: 99,
+      sourceHash: "6c8184fc",
+      functions: 61189,
+      strings: 156152,
+    });
+    expect(() => parseDump(dump.slice(0, 4))).toThrow("the bytecode dump has no String count");
+  });
+
+  test("inspect loads the file alone: hermesc sees no other file, and only the header is read", async () => {
+    // The fake reports the files beside its input as the source hash, and a later count the header must not take.
+    const app = fakeHermesc(
+      `printf 'Bytecode File Information:\\n  Bytecode version number: 99\\n  Source hash: %s\\n' "$(ls)"
+printf '  Function count: 2\\n  String count: 3\\nGlobal String Table:\\n  Function count: 7\\n'`,
+    );
+
+    expect(await inspect(fakeTree(app, scratch()), header(99))).toEqual({
+      bytecodeVersion: 99,
+      sourceHash: "index.hbc",
+      functions: 2,
+      strings: 3,
+    });
+  });
+
+  test("inspect throws when hermesc cannot load the file", async () => {
+    const app = fakeHermesc(`echo "bad bytecode" >&2; exit 1`);
+    await expect(inspect(fakeTree(app, scratch()), header(99))).rejects.toThrow(
+      "hermesc could not load the bytecode alone: bad bytecode",
+    );
+  });
+});
+
+describe("the emulator check", () => {
+  test("applyPatches applies and reverses the conformance patches in an app dir inside another repository", () => {
+    // Git run inside a repository would skip every path outside the app dir and still exit 0.
+    const repo = scratch();
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    const app = join(repo, "app");
+    mkdirSync(app);
+    const original = readFileSync(join(SHARED, "App.js"));
+    writeFileSync(join(app, "App.js"), original);
+    const patches = ["conformance/previous.patch", "conformance/feature.patch"];
+
+    applyPatches(app, patches);
+    expect(readFileSync(join(app, "App.js"), "utf8")).toContain("<UpdateDetails />");
+    expect(existsSync(join(app, "UpdateDetails.js"))).toBe(true);
+
+    applyPatches(app, patches.toReversed(), true);
+    expect(readFileSync(join(app, "App.js"))).toEqual(original);
+    expect(readdirSync(app)).toEqual(["App.js"]);
+  });
+
+  const inspection = { bytecodeVersion: 99, sourceHash: "ab", functions: 10, strings: 20 };
+  const sample: EmulatorResults = {
+    schema: 1,
+    about: "About.",
+    app: { id: "sdk-58", title: "App", platform: "android" },
+    device: { abi: "arm64-v8a" },
+    tools: {},
+    deltaArgs: ["-emit-binary", "-out", "index.hbc", "index.js", "-O", "-base-bytecode=base.hbc"],
+    bytecodeVersions: { embedded: 99, base: 99 },
+    deltas: [
+      {
+        marker: "delta-58-1",
+        delta: { bytes: 1500, sha256: "11", alone: { ...inspection, strings: 21 } },
+        plain: { bytes: 1400, sha256: "22", alone: inspection },
+        patchFromBase: { plain: 900, delta: 90 },
+      },
+    ],
+    baseRequested: false,
+    paths: {
+      "other-ota-patch": { pass: true, saw: "delta-58-1 ran on a device on older-58" },
+      "other-ota-full": { pass: false, why: "the app reported nothing\n  got []" },
+      "embedded-patch": { pass: true, saw: "delta-58-2 ran on a device on embedded-58" },
+      "embedded-full": { pass: false, why: "not run: build failed" },
+    },
+  };
+
+  test("renderEmulator prints one row per path, failures by their first line, then each bundle loaded alone", () => {
+    const lines = renderEmulator(sample).split("\n");
+    expect(lines[0]).toBe("# Hermes delta compiles on an emulator: App");
+    expect(lines).toContain(
+      `| ${PATHS["other-ota-patch"]} | pass: delta-58-1 ran on a device on older-58 |`,
+    );
+    expect(lines).toContain(`| ${PATHS["other-ota-full"]} | fail: the app reported nothing |`);
+    expect(lines).toContain(`| ${PATHS["embedded-full"]} | fail: not run: build failed |`);
+    expect(lines).toContain("| delta-58-1 | plain | 1,400 | 99 | 10 | 20 | 900 |");
+    expect(lines).toContain("| delta-58-1 | delta | 1,500 | 99 | 10 | 21 | 90 |");
+  });
+
+  test("writeEmulatorResults writes only its own app's files beside the measurements", () => {
+    const out = scratch();
+    writeFileSync(join(out, "sdk-58.json"), "the measurements\n");
+
+    expect(writeEmulatorResults(out, sample)).toBe(join(out, "emulator-sdk-58.json"));
+
+    expect(readdirSync(out).toSorted()).toEqual([
+      "emulator-sdk-58.json",
+      "emulator-sdk-58.md",
+      "sdk-58.json",
+    ]);
+    expect(readFileSync(join(out, "emulator-sdk-58.json"), "utf8")).toBe(
+      `${JSON.stringify(sample, null, 2)}\n`,
+    );
+    expect(readFileSync(join(out, "emulator-sdk-58.md"), "utf8")).toBe(renderEmulator(sample));
+  });
 });

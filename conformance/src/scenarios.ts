@@ -322,7 +322,7 @@ export async function checkRollback(
 }
 
 /** Installs the build afresh and returns its embedded update. */
-async function install(t: Target): Promise<Update> {
+export async function install(t: Target): Promise<Update> {
   await t.device.install(t.build.artifact, t.app.appId);
   return embedded(t.build);
 }
@@ -350,7 +350,7 @@ async function publish(t: Target, name: string): Promise<Update> {
  * Launches the app and reads its reports until it settles, then stops it, so it neither reloads nor requests after
  * the step; returns what it reported and the replies recorded meanwhile.
  */
-async function launch(t: Target): Promise<Trace> {
+export async function launch(t: Target): Promise<Trace> {
   t.device.drain();
   const before = t.stack.responses.length;
   const reports: Report[] = [];

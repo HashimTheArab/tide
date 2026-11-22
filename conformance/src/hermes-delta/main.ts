@@ -22,6 +22,7 @@ import {
   retarget,
   tools,
 } from "./build.ts";
+import { checkOnEmulator } from "./emulator.ts";
 import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, writeResults } from "./measure.ts";
 import { USAGE, UsageError, parseOptions } from "./options.ts";
 
@@ -147,7 +148,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   };
 }
 
-/** Exit 0 for help or a finished run, 2 for a usage error, 1 when a build or measurement fails. */
+/** Exit 0 for help or a finished run, 2 for a usage error, 1 when a build, measurement or emulator path fails. */
 async function main(args: readonly string[]): Promise<number> {
   let options;
   try {
@@ -162,6 +163,11 @@ async function main(args: readonly string[]): Promise<number> {
     return 0;
   }
   try {
+    if (options.emulator) {
+      const { written, passed } = await checkOnEmulator(options.apps, options.avd, OUT, say);
+      for (const json of written) say(`wrote ${json} and its table`);
+      return passed ? 0 : 1;
+    }
     for (const id of options.apps) {
       const app = await measureApp(id, WORK);
       const json = writeResults(OUT, {
