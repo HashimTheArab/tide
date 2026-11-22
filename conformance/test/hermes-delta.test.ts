@@ -23,7 +23,6 @@ import { makeBsdiff } from "../../packages/cli/src/bsdiff.ts";
 import { keepsPatch } from "../../packages/cli/src/publish-patch.ts";
 import { APPS, CHANGES } from "../src/hermes-delta/apps.ts";
 import {
-  claimWork,
   compile,
   hermescIo,
   kotlinArgs,
@@ -42,7 +41,6 @@ import {
 } from "../src/hermes-delta/measure.ts";
 import { USAGE, UsageError, parseOptions } from "../src/hermes-delta/options.ts";
 
-const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const MAIN = fileURLToPath(new URL("../src/hermes-delta/main.ts", import.meta.url));
 const PATCHES = fileURLToPath(new URL("../hermes-delta/patches/", import.meta.url));
 
@@ -294,7 +292,9 @@ describe("openTree", () => {
       "[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n",
     );
     vi.stubEnv("GIT_CONFIG_GLOBAL", config);
-    onTestFinished(() => vi.unstubAllEnvs());
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
 
     const tree = await openTree("sdk-55", APPS["sdk-55"], scratch());
 
