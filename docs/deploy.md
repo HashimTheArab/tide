@@ -258,6 +258,28 @@ still ends without exit 0 (timeout, cancellation or runner loss), start a new ru
 what the bucket holds (`design.md`, Bucket configuration). For `register-build`, `design.md`'s key check is the
 backstop.
 
+### Delta compiles
+
+On a Hermes app, the export job can compile each update against the bundle inside the store build, so patches from
+every base shrink ([0002](decisions/0002-hermes-delta-compiles.md): 70% fewer bytes on a large app once every update
+does it):
+
+```sh
+npx tide export --out "$RUNNER_TEMP/export" --base-bytecode android=index.android.bundle
+```
+
+- **The base** is the file you give `tide register-build --bundle` for that platform's release build of the runtime
+  version being published. Keep it in the repository or a build artifact the export job reads; it needs no secret.
+  Use the same base for every update of a runtime, never an OTA update's bundle: a delta compile keeps every string of
+  its base, so a moving base grows each update.
+- **Strings of the base become public.** Hermes copies the base's whole string table into the update, including
+  strings the update no longer uses. Anything in the store build's bundle is published with every update.
+- **Tide cannot tell the right base.** A matching bytecode version only proves hermesc can read the file. A wrong
+  base (another platform, build or runtime) still gives a correct bundle that every device runs, only larger patches
+  and that base's strings in the update.
+- Export refuses a missing base, a file that is not Hermes bytecode, and a base of another bytecode version than the
+  app's hermesc, before running Expo. It runs on macOS and Linux.
+
 ### Staged rollouts
 
 Deploy the server first: the stored record a rollout writes is read only by servers from the same release
