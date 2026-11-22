@@ -559,6 +559,7 @@ function storedPatches(s: Served): string[] {
 const patchLabels = (s: Served) =>
   new Map(storedPatches(s).map((key) => [sha256File(storePath(s, key)), key]));
 
-const storePath = (s: Pick<Served, "stack">, key: string) => join(s.stack.storeDir, diskPath(key));
+export const storePath = (s: Pick<Served, "stack">, key: string) =>
+  join(s.stack.storeDir, diskPath(key));
 
 const sha256File = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");

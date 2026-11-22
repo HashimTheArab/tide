@@ -54,6 +54,11 @@ export interface Hermesc {
   readonly out: string;
 }
 
+/** Applies (or reverses) patch files in the tree, in order. */
+export function applyPatches(tree: Pick<Tree, "dir">, patches: readonly string[], reverse = false) {
+  for (const patch of patches) git(tree, ["apply", ...(reverse ? ["-R"] : []), patchPath(patch)]);
+}
+
 /** Returns the hash of everything the start commit is made from, so a changed pin rebuilds a cached tree. */
 function startKey(pin: AppPin): string {
   return createHash("sha256")
@@ -319,18 +324,6 @@ export interface Inspection {
   readonly strings: number;
 }
 
-// The HBC file magic, little-endian, then the bytecode version as a 32-bit little-endian integer.
-const HBC_MAGIC = 0x1f1903c103bc1fc6n;
-
-/** Returns the bytecode version in an HBC file's header; anything without the HBC magic throws. */
-export function hbcVersion(hbc: Uint8Array): number {
-  const view = new DataView(hbc.buffer, hbc.byteOffset, hbc.byteLength);
-  if (hbc.length < 12 || view.getBigUint64(0, true) !== HBC_MAGIC) {
-    throw new Error("not a Hermes bytecode file");
-  }
-  return view.getUint32(8, true);
-}
-
 /** Returns the header facts of `hermesc -b -dump-bytecode` output; a dump missing one throws. */
 export function parseDump(lines: readonly string[]): Inspection {
   const field = (name: string) => {
@@ -573,7 +566,7 @@ function packageJson(tree: Tree, name: string, from?: string): string {
 
 const expoBin = (tree: Tree) => join(tree.dir, "node_modules", ".bin", "expo");
 
-export const patchPath = (patch: string) => join(PATCHES, patch);
+const patchPath = (patch: string) => join(PATCHES, patch);
 
 /** Returns a copy of the file at `path` with its own ArrayBuffer. */
 function bytes(path: string): Uint8Array<ArrayBuffer> {
@@ -585,11 +578,19 @@ function write(path: string, data: string | Uint8Array): void {
   writeFileSync(path, data);
 }
 
-/** Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it. */
+/**
+ * Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it.
+ * Git finds no repository above the tree: inside one, `git apply` skips paths outside the tree and still exits 0.
+ */
 function git(tree: Pick<Tree, "dir">, args: readonly string[]): string {
   return execFileSync("git", ["-C", tree.dir, ...args], {
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+    env: {
+      ...process.env,
+      GIT_CEILING_DIRECTORIES: dirname(tree.dir),
+      GIT_CONFIG_GLOBAL: devNull,
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
   });
 }
 

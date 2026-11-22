@@ -25,8 +25,8 @@ import { makeBsdiff } from "../../packages/cli/src/bsdiff.ts";
 import { keepsPatch } from "../../packages/cli/src/publish-patch.ts";
 import { APPS, CHANGES } from "../src/hermes-delta/apps.ts";
 import {
+  applyPatches,
   compile,
-  hbcVersion,
   hermescIo,
   inspect,
   kotlinArgs,
@@ -35,12 +35,7 @@ import {
   parseDump,
   retarget,
 } from "../src/hermes-delta/build.ts";
-import {
-  PATHS,
-  applyPatches,
-  renderEmulator,
-  writeEmulatorResults,
-} from "../src/hermes-delta/emulator.ts";
+import { PATHS, renderEmulator, writeEmulatorResults } from "../src/hermes-delta/emulator.ts";
 import {
   BASES,
   KEEP_RULE,
@@ -531,14 +526,6 @@ describe("bytecode inspection", () => {
     return bytes;
   };
 
-  test("hbcVersion reads the version after the HBC magic and refuses any other file", () => {
-    expect(hbcVersion(header(99))).toBe(99);
-    expect(() => hbcVersion(new TextEncoder().encode("var a = 1;\n"))).toThrow(
-      "not a Hermes bytecode file",
-    );
-    expect(() => hbcVersion(header(99).slice(0, 8))).toThrow("not a Hermes bytecode file");
-  });
-
   test("parseDump reads hermesc's header and refuses a dump without one", () => {
     const dump = [
       "Bytecode File Information:",
@@ -591,11 +578,11 @@ describe("the emulator check", () => {
     writeFileSync(join(app, "App.js"), original);
     const patches = ["conformance/previous.patch", "conformance/feature.patch"];
 
-    applyPatches(app, patches);
+    applyPatches({ dir: app }, patches);
     expect(readFileSync(join(app, "App.js"), "utf8")).toContain("<UpdateDetails />");
     expect(existsSync(join(app, "UpdateDetails.js"))).toBe(true);
 
-    applyPatches(app, patches.toReversed(), true);
+    applyPatches({ dir: app }, patches.toReversed(), true);
     expect(readFileSync(join(app, "App.js"))).toEqual(original);
     expect(readdirSync(app)).toEqual(["App.js"]);
   });
@@ -608,7 +595,7 @@ describe("the emulator check", () => {
     device: { abi: "arm64-v8a" },
     tools: {},
     deltaArgs: ["-emit-binary", "-out", "index.hbc", "index.js", "-O", "-base-bytecode=base.hbc"],
-    bytecodeVersions: { embedded: 99, base: 99 },
+    embeddedBytecodeVersion: 99,
     deltas: [
       {
         marker: "delta-58-1",

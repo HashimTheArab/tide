@@ -1,13 +1,11 @@
 // `pnpm hermes-delta --emulator`: whether an update delta-compiled against one OTA update runs on devices that never
 // ran that update, from Tide's patches and from the full bundle.
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { devNull } from "node:os";
 import { dirname, join } from "node:path";
 
-import { baseKey, contentKey, decodeBaseRecord, diskPath } from "@tide-ota/protocol";
+import { baseKey, contentKey, decodeBaseRecord } from "@tide-ota/protocol";
 
 import type { AndroidDevice } from "../android.ts";
 import type { ExpoVersion } from "../options.ts";
@@ -19,19 +17,18 @@ import type { EmulatorApp } from "./options.ts";
 import { makeBsdiff } from "../../../packages/cli/src/bsdiff.ts";
 import { androidDevice } from "../android.ts";
 import { buildAndroid, exportUpdate, materialise, writeMarker } from "../app.ts";
-import { checkCorruptPatch, checkPatch, install, launch, message } from "../scenarios.ts";
+import {
+  checkCorruptPatch,
+  checkPatch,
+  install,
+  launch,
+  message,
+  storePath,
+} from "../scenarios.ts";
 import { tamperPatch, withStack } from "../stack.ts";
 import { tideCli } from "../tide-cli.ts";
 import { APPS } from "./apps.ts";
-import {
-  compile,
-  exportBundle,
-  exportedBundle,
-  hbcVersion,
-  inspect,
-  patchPath,
-  tools,
-} from "./build.ts";
+import { applyPatches, compile, exportBundle, exportedBundle, inspect, tools } from "./build.ts";
 
 // The OTA base is the update after previous.patch; the delta-compiled update adds feature.patch on top of it.
 const PREVIOUS = "conformance/previous.patch";
@@ -65,7 +62,7 @@ export interface EmulatorResults {
   readonly device: { readonly abi: string };
   readonly tools: unknown;
   readonly deltaArgs: readonly string[];
-  readonly bytecodeVersions: { readonly embedded: number; readonly base: number };
+  readonly embeddedBytecodeVersion: number;
   readonly deltas: readonly DeltaBundle[];
   readonly baseRequested: boolean; // Whether any request named the compile base's update or bundle.
   readonly paths: Readonly<Record<PathId, Outcome>>;
@@ -156,10 +153,10 @@ async function checkApp(
   let deltaArgs: readonly string[] = [];
   let base: Published | undefined;
   try {
-    const older = await publish(t, tree, `older-${version}`, []);
+    const older = await publish(t, `older-${version}`);
     const e = await install(t);
     await checkPatch(t, e, older.update, await launch(t));
-    base = await publish(t, tree, `base-${version}`, [PREVIOUS]);
+    base = await withPatches(tree, [PREVIOUS], () => publish(t, `base-${version}`));
     const delta1 = await publishDelta(t, tree, `delta-${version}-1`, base);
     deltas.push(delta1.facts);
     deltaArgs = delta1.args;
@@ -167,7 +164,7 @@ async function checkApp(
       checkPatch(t, older.update, delta1.update, await launch(t)),
     );
 
-    const older2 = await publish(t, tree, `older-${version}-2`, []);
+    const older2 = await publish(t, `older-${version}-2`);
     await checkPatch(t, await install(t), older2.update, await launch(t));
     const delta2 = await publishDelta(t, tree, `delta-${version}-2`, base);
     deltas.push(delta2.facts);
@@ -198,10 +195,7 @@ async function checkApp(
     device: { abi: device.abi },
     tools: { ...about.versions, hermesc: about.hermesc, hermesRuntime: hermesRuntime(app.dir) },
     deltaArgs,
-    bytecodeVersions: {
-      embedded: hbcVersion(readFileSync(build.bundle)),
-      base: base === undefined ? Number.NaN : hbcVersion(base.bundle),
-    },
+    embeddedBytecodeVersion: (await inspect(tree, readFileSync(build.bundle))).bytecodeVersion,
     deltas,
     baseRequested: stack.responses.some(
       (r) =>
@@ -219,38 +213,33 @@ interface Published {
   readonly bundle: Uint8Array<ArrayBuffer>; // The launch bundle as published.
 }
 
-/**
- * Exports the app with `marker` and `patches` applied, replaces its launch bundle with `replace`'s bytes when given,
- * and publishes it; returns the update as stored, after checking that its launch asset is that bundle.
- */
-async function publish(
-  t: Target,
-  tree: Tree,
-  marker: string,
-  patches: readonly string[],
-  replace?: () => Promise<Uint8Array>,
-): Promise<Published> {
-  applyPatches(t.app.dir, patches);
+/** Applies `patches` to the tree for the length of `fn`. */
+async function withPatches<T>(tree: Tree, patches: readonly string[], fn: () => Promise<T>) {
+  applyPatches(tree, patches);
   try {
-    writeMarker(t.app, marker);
-    const out = join(t.stack.dir, `export-${t.app.version}-${marker}`);
-    await t.cli.export(t.app.dir, out, ["android"]);
-    const dist = join(out, "dist");
-    const path = join(dist, exportedBundle(dist));
-    if (replace !== undefined) writeFileSync(path, await replace());
-    const bundle = new Uint8Array(readFileSync(path));
-    const updateId = (await t.cli.publish(out, t.app.channel)).android;
-    if (updateId === undefined)
-      throw new Error(`tide publish wrote no android pointer for ${marker}`);
-    const record = decodeBaseRecord(
-      readFileSync(join(t.stack.storeDir, diskPath(baseKey(updateId)))),
-    );
-    const hex = contentKey(record.launchAsset.hash);
-    if (hex !== sha256(bundle)) throw new Error(`${marker} was stored with another launch bundle`);
-    return { update: { updateId, marker, hex, embedded: false }, bundle };
+    return await fn();
   } finally {
-    applyPatches(t.app.dir, patches.toReversed(), true);
+    applyPatches(tree, patches.toReversed(), true);
   }
+}
+
+/**
+ * Exports the app with `marker`, replaces its launch bundle with `bundle` when given, and publishes it; returns the
+ * update as stored, after checking that its launch asset is that bundle.
+ */
+async function publish(t: Target, marker: string, bundle?: Uint8Array): Promise<Published> {
+  const out = await exportUpdate(t.stack, t.cli, t.app, marker);
+  const dist = join(out, "dist");
+  const path = join(dist, exportedBundle(dist));
+  if (bundle !== undefined) writeFileSync(path, bundle);
+  const stored = new Uint8Array(readFileSync(path));
+  const updateId = (await t.cli.publish(out, t.app.channel)).android;
+  if (updateId === undefined)
+    throw new Error(`tide publish wrote no android pointer for ${marker}`);
+  const record = decodeBaseRecord(readFileSync(storePath(t, baseKey(updateId))));
+  const hex = contentKey(record.launchAsset.hash);
+  if (hex !== sha256(stored)) throw new Error(`${marker} was stored with another launch bundle`);
+  return { update: { updateId, marker, hex, embedded: false }, bundle: stored };
 }
 
 /**
@@ -258,17 +247,15 @@ async function publish(
  * for the same tree, compiled plain and with -base-bytecode on fixed names; refuses a delta equal to the plain compile.
  */
 async function publishDelta(t: Target, tree: Tree, marker: string, base: Published) {
-  let facts: DeltaBundle | undefined;
-  let args: readonly string[] = [];
-  const published = await publish(t, tree, marker, [PREVIOUS, FEATURE], async () => {
+  return withPatches(tree, [PREVIOUS, FEATURE], async () => {
+    writeMarker(t.app, marker);
     const exported = await exportBundle(tree);
     const plain = await compile(tree, exported.hermesc, exported.js);
     const delta = await compile(tree, exported.hermesc, exported.js, base.bundle);
     if (Buffer.from(delta.hbc).equals(plain.hbc)) {
       throw new Error(`-base-bytecode changed nothing in ${marker}'s bundle`);
     }
-    args = delta.args;
-    facts = {
+    const facts: DeltaBundle = {
       marker,
       delta: {
         bytes: delta.hbc.length,
@@ -285,29 +272,8 @@ async function publishDelta(t: Target, tree: Tree, marker: string, base: Publish
         delta: makeBsdiff(base.bundle, delta.hbc).length,
       },
     };
-    return delta.hbc;
+    return { ...(await publish(t, marker, delta.hbc)), facts, args: delta.args };
   });
-  if (facts === undefined) throw new Error(`${marker} was published without its delta compile`);
-  return { ...published, facts, args };
-}
-
-/**
- * Applies (or reverses) conformance patch files in `dir`. Git must find no repository above `dir`: inside one it skips
- * every path outside its current directory and still exits 0.
- */
-export function applyPatches(dir: string, patches: readonly string[], reverse = false): void {
-  for (const patch of patches) {
-    execFileSync("git", ["apply", ...(reverse ? ["-R"] : []), patchPath(patch)], {
-      cwd: dir,
-      env: {
-        ...process.env,
-        GIT_CEILING_DIRECTORIES: dirname(dir),
-        GIT_CONFIG_GLOBAL: devNull,
-        GIT_CONFIG_NOSYSTEM: "1",
-      },
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-  }
 }
 
 /** Returns the Hermes release react-native builds the app's runtime from. */
@@ -342,9 +308,8 @@ export function renderEmulator(results: EmulatorResults): string {
     `Generated by \`pnpm hermes-delta --emulator\` from the JSON file of the same name beside this file. ${results.about}`,
     "",
     `Device ABI ${results.device.abi}. Delta hermesc arguments: \`${results.deltaArgs.join(" ")}\`. ` +
-      `Bytecode version of the embedded bundle ${results.bytecodeVersions.embedded}, of the base ` +
-      `${results.bytecodeVersions.base}. A request for the base's update or bundle: ` +
-      `${results.baseRequested ? "yes" : "none"}.`,
+      `Bytecode version of the embedded bundle ${results.embeddedBytecodeVersion}. ` +
+      `A request for the base's update or bundle: ${results.baseRequested ? "yes" : "none"}.`,
     "",
     "| Path | Result |",
     "| --- | --- |",

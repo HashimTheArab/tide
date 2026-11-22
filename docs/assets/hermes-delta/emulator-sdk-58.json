@@ -34,10 +34,7 @@
     "-O",
     "-base-bytecode=base.hbc"
   ],
-  "bytecodeVersions": {
-    "embedded": 99,
-    "base": 99
-  },
+  "embeddedBytecodeVersion": 99,
   "deltas": [
     {
       "marker": "delta-58-1",
