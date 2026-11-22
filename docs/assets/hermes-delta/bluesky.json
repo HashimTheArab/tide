@@ -1,0 +1,345 @@
+{
+  "schema": 2,
+  "about": "Android bundles. Bases: the embedded bundle and an OTA export of the app's start tree, and an OTA export one update later (the OTA base); each change is a patch onto that update. Plain bundles are expo export's hermesc command recompiled on fixed relative names; delta bundles add -base-bytecode.",
+  "keepRule": "Tide stores a patch only when its bytes times two are at most the gzip-9 size of the new bundle (packages/cli/src/publish-patch.ts keepsPatch)",
+  "bases": {
+    "ota": "the previous OTA update (the OTA compile base)",
+    "embedded": "the bundle the release build embeds (the embedded compile base)",
+    "older-ota": "an OTA update one release older, from the embedded build's source"
+  },
+  "targets": {
+    "plain": "what expo export writes",
+    "delta-ota": "the same JS and flags, plus -base-bytecode of the OTA base",
+    "delta-embedded": "the same JS and flags, plus -base-bytecode of the embedded base"
+  },
+  "app": {
+    "id": "bluesky",
+    "title": "Bluesky social-app (Expo SDK 58)",
+    "source": {
+      "repository": "https://github.com/bluesky-social/social-app.git",
+      "commit": "17393322eec4f22bfb0d07bd27c3d2af1db8d398"
+    },
+    "platform": "android",
+    "machine": {
+      "os": "Darwin 25.5.0",
+      "arch": "arm64",
+      "cpu": "Apple M3 Pro",
+      "node": "v26.13.1"
+    },
+    "tools": {
+      "expo": "58.0.23",
+      "@expo/cli": "58.1.19",
+      "@expo/metro-config": "58.0.21",
+      "react-native": "0.88.1",
+      "hermes-compiler": "260318099.0.5",
+      "@react-native/gradle-plugin": "0.88.1",
+      "hermesc": {
+        "path": "node_modules/hermes-compiler/hermesc/osx-bin/hermesc",
+        "release": "260318099.0.5",
+        "bytecodeVersion": 99
+      }
+    },
+    "export": {
+      "command": [
+        "expo",
+        "export",
+        "--output-dir",
+        "<dir>",
+        "--platform",
+        "android"
+      ],
+      "env": {
+        "EXPO_NO_DOTENV": "1",
+        "NODE_ENV": "production",
+        "BABEL_ENV": "production",
+        "EXPO_PUBLIC_ENV": "production"
+      },
+      "hermescArgs": [
+        "-emit-binary",
+        "-out",
+        "<tmp>/index.hbc",
+        "<tmp>/index.js",
+        "-O"
+      ],
+      "hermescTempDir": "<tmpdir>/expo-bundler-<Math.random()>-<Date.now()>, removed after the compile",
+      "reproducesExport": true,
+      "bytesDependOnTempPath": true,
+      "noBytecodeJsIsHermescInput": false,
+      "noBytecodeJsBytes": 33516212,
+      "hermescInputBytes": 53646765,
+      "serializer": {
+        "compile": "@expo/metro-config/build/serializer/exportHermes.js buildHermesBundleAsync",
+        "callers": [
+          "@expo/metro-config/build/serializer/hermesArtifacts.js",
+          "@expo/metro-config/build/serializer/chunking/Chunk.js"
+        ],
+        "bytecodeGate": [
+          "@expo/metro-config/build/serializer/chunking/Chunk.js"
+        ]
+      },
+      "hook": "@expo/metro-config/build/serializer/exportHermes.js buildHermesBundleAsync passes hermesc no caller arguments, so -base-bytecode needs one of two seams: a hermesc under REACT_NATIVE_OVERRIDE_HERMES_DIR that appends it (how this study captures each compile), or expo export --no-bytecode followed by Tide's own hermesc run with Expo's flags on the JS bundle it writes; the --no-bytecode JS differs from what Expo compiles"
+    },
+    "embedded": {
+      "bundleCommand": [
+        "node",
+        "node_modules/@expo/cli/build/src/index.js",
+        "export:embed",
+        "--platform",
+        "android",
+        "--dev",
+        "false",
+        "--reset-cache",
+        "--entry-file",
+        "index.ts",
+        "--bundle-output",
+        "android/app/build/generated/assets/react/release/index.android.bundle",
+        "--assets-dest",
+        "android/app/build/generated/res/react/release",
+        "--sourcemap-output",
+        "android/app/build/intermediates/sourcemaps/react/release/index.android.bundle.packager.map",
+        "--minify",
+        "false",
+        "--verbose"
+      ],
+      "hermescArgs": [
+        "-w",
+        "-emit-binary",
+        "-max-diagnostic-width=80",
+        "-out",
+        "android/app/build/generated/assets/react/release/index.android.bundle.hbc",
+        "android/app/build/generated/assets/react/release/index.android.bundle",
+        "-O",
+        "-output-source-map"
+      ],
+      "flagsFrom": [
+        "node_modules/@react-native/gradle-plugin/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/tasks/BundleHermesCTask.kt getHermescCommand",
+        "node_modules/@react-native/gradle-plugin/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactExtension.kt hermesFlags convention",
+        "expo/template.tgz android/app/build.gradle react { bundleCommand } (no hermesFlags)"
+      ]
+    },
+    "delta": {
+      "hermescArgs": [
+        "-emit-binary",
+        "-out",
+        "index.hbc",
+        "index.js",
+        "-O",
+        "-base-bytecode=base.hbc"
+      ]
+    },
+    "bases": {
+      "ota": {
+        "bytes": 38437293,
+        "sha256": "709a245ea3169dc72f42bbf930081d8f03cbf9335592821750236d9024cf822f",
+        "gzip9": 13030790
+      },
+      "embedded": {
+        "bytes": 34703056,
+        "sha256": "e52a98d3ed551b57e527dea7de1378f982088dba80a002434a788ef73949a88d",
+        "gzip9": 11589059
+      },
+      "older-ota": {
+        "bytes": 38438103,
+        "sha256": "2ccf95033437a0b8b3a5db88b5496fcf2c2b8f8c1740d72335bc18ddd6904a1c",
+        "gzip9": 13027789
+      }
+    },
+    "changes": {
+      "one-line": {
+        "patch": "bluesky/one-line.patch",
+        "files": 1,
+        "added": 1,
+        "removed": 1,
+        "targets": {
+          "plain": {
+            "bytes": 38437721,
+            "sha256": "976bc9a1cdcdc76fea7cb7348123acf9c458eb476363aac1d86799a7579ddffe",
+            "gzip9": 13029792,
+            "from": {
+              "ota": {
+                "bytes": 883618,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 2739885,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 1024463,
+                "keep": true
+              }
+            }
+          },
+          "delta-ota": {
+            "bytes": 38437373,
+            "sha256": "9097803d972802233bb85a7f599e49632222aa4ea299578a933387d704de1cc8",
+            "gzip9": 13030804,
+            "from": {
+              "ota": {
+                "bytes": 54442,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 2823217,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 1108977,
+                "keep": true
+              }
+            }
+          },
+          "delta-embedded": {
+            "bytes": 38438661,
+            "sha256": "3c82f728cafefe2154f5bb9f55e764e6273b370109b3d5aac169245ebd22d125",
+            "gzip9": 13027872,
+            "from": {
+              "ota": {
+                "bytes": 1121659,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 1635429,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 87691,
+                "keep": true
+              }
+            }
+          }
+        }
+      },
+      "dependency-bump": {
+        "patch": "bluesky/dependency-bump.patch",
+        "files": 1,
+        "added": 25,
+        "removed": 25,
+        "targets": {
+          "plain": {
+            "bytes": 38439373,
+            "sha256": "57a5048f6d0dc99d8f579ef5784925cf61797198cca863e197633c72bc35a95c",
+            "gzip9": 13031592,
+            "from": {
+              "ota": {
+                "bytes": 1776920,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 3559325,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 1777932,
+                "keep": true
+              }
+            }
+          },
+          "delta-ota": {
+            "bytes": 38438181,
+            "sha256": "859a93893060482f94827ac5cf7fd4690c3f9bcca9628f0a9dc84e2cdd33206e",
+            "gzip9": 13031176,
+            "from": {
+              "ota": {
+                "bytes": 174969,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 2841024,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 1161067,
+                "keep": true
+              }
+            }
+          },
+          "delta-embedded": {
+            "bytes": 38439465,
+            "sha256": "48ab182e5505e26de3af580bbdeac7fbc3c69aa1364505797794065df182b7b2",
+            "gzip9": 13028516,
+            "from": {
+              "ota": {
+                "bytes": 1182232,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 1701375,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 175133,
+                "keep": true
+              }
+            }
+          }
+        }
+      },
+      "feature": {
+        "patch": "bluesky/feature.patch",
+        "files": 2,
+        "added": 151,
+        "removed": 0,
+        "targets": {
+          "plain": {
+            "bytes": 38446440,
+            "sha256": "c54017b1ea1c2f6287628053eb6f9501b17a2140bb52afd795afaf3662160e3d",
+            "gzip9": 13032012,
+            "from": {
+              "ota": {
+                "bytes": 2075570,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 3859147,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 2068544,
+                "keep": true
+              }
+            }
+          },
+          "delta-ota": {
+            "bytes": 38457609,
+            "sha256": "63d1d4bfbac3aef01a46113a38dfbc6c180353526c8cc44b7575641fd812ebf4",
+            "gzip9": 13041925,
+            "from": {
+              "ota": {
+                "bytes": 208673,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 2873783,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 1207711,
+                "keep": true
+              }
+            }
+          },
+          "delta-embedded": {
+            "bytes": 38458905,
+            "sha256": "3f08af5e3fb7c3eb471321e48ee8d45116c7e437e09d3b290fad4d88774a0976",
+            "gzip9": 13034681,
+            "from": {
+              "ota": {
+                "bytes": 1215751,
+                "keep": true
+              },
+              "embedded": {
+                "bytes": 1734324,
+                "keep": true
+              },
+              "older-ota": {
+                "bytes": 210544,
+                "keep": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
