@@ -9,7 +9,7 @@ import {
 } from "@tide-ota/protocol";
 
 import type { Env, KeySource } from "./keys.ts";
-import { KeyError, RSA, isObject, read } from "./keys.ts";
+import { KeyError, isObject, read, rsaKeyBits } from "./keys.ts";
 
 /** The KMS signer's variables; the TIDE_ prefix keeps ambient AWS credentials out. */
 export const KMS_VARIABLES = {
@@ -210,22 +210,10 @@ async function replyPublicKey(text: string | undefined): Promise<Uint8Array<Arra
     throw new KeyError(`KMS key must allow the signing algorithm ${ALGORITHM}`);
   }
   const spki = typeof reply.PublicKey === "string" ? decodeBase64(reply.PublicKey) : undefined;
-  if (spki === undefined || !(await isRsaSpki(spki, bits))) {
+  if (spki === undefined || (await rsaKeyBits(spki)) !== bits) {
     throw new KeyError("KMS GetPublicKey returned 200 with an invalid public key");
   }
   return spki;
-}
-
-/** True when `spki` is exactly the DER of an RSA public key of `bits`, as WebCrypto re-exports it. */
-async function isRsaSpki(spki: Uint8Array<ArrayBuffer>, bits: number): Promise<boolean> {
-  try {
-    const key = await crypto.subtle.importKey("spki", spki, RSA, true, ["verify"]);
-    const { modulusLength } = key.algorithm as { readonly modulusLength?: number };
-    const again = new Uint8Array(await crypto.subtle.exportKey("spki", key));
-    return modulusLength === bits && Buffer.from(again).equals(spki);
-  } catch {
-    return false;
-  }
 }
 
 /** Returns the fixed message for a non-200, naming the error code only when it is allowlisted. */

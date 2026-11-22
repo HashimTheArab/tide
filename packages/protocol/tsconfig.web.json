@@ -7,5 +7,9 @@
     "tsBuildInfoFile": "${configDir}/.cache/tsbuildinfo.web.json"
   },
   "include": ["src", "test"],
-  "exclude": ["test/generate-fixtures.ts", "test/generate-patch-fixtures.ts"] // Node only.
+  "exclude": [
+    "test/generate-fixtures.ts",
+    "test/generate-patch-fixtures.ts",
+    "test/x509.node.test.ts"
+  ] // Node only.
 }

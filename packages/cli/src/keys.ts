@@ -155,6 +155,18 @@ export async function validCertificate(pem: string, source: string, at: number) 
   }
 }
 
+/** Returns the modulus length when `spki` is exactly the DER of an RSA public key as WebCrypto re-exports it. */
+export async function rsaKeyBits(spki: Uint8Array<ArrayBuffer>): Promise<number | undefined> {
+  try {
+    const key = await crypto.subtle.importKey("spki", spki, RSA, true, ["verify"]);
+    const again = new Uint8Array(await crypto.subtle.exportKey("spki", key));
+    if (!Buffer.from(again).equals(spki)) return undefined;
+    return (key.algorithm as { readonly modulusLength?: number }).modulusLength;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Returns `{keyid}` or `{keyid, alg}` from code-signing metadata, a new object holding no other member. `field` names
  * the metadata in each refusal.

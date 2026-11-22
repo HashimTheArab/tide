@@ -5,21 +5,31 @@ import {
   generateKeyPair,
   generateKeyPairSync,
 } from "node:crypto";
-import { readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { KeyObject } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import { codeSigningCertificate } from "@tide-ota/protocol";
+import {
+  certificateChain,
+  codeSigningCertificate,
+  expoSignature,
+  verifyChainedSignature,
+} from "@tide-ota/protocol";
 
 import type { Tlv } from "../../protocol/src/signature.ts";
+import type { CertificateOptions } from "../../protocol/test/fixtures.ts";
 import type { Env } from "../src/keys.ts";
 import type { FakeKms, KmsFault } from "./fake-kms.ts";
-import { readTlv } from "../../protocol/src/signature.ts";
-import { certificate } from "../src/certificate.ts";
-import { openWriter } from "../src/keys.ts";
+import { derOid, derTlv, readTlv, signedCertificate } from "../../protocol/src/signature.ts";
+import {
+  EXTENSION as FIXTURE_EXTENSION,
+  certificate as protocolCertificate,
+} from "../../protocol/test/fixtures.ts";
+import { CERTIFICATE_USAGE, certificate } from "../src/certificate.ts";
+import { RSA, openWriter, signingKey } from "../src/keys.ts";
 import { FAKE_KMS, startFakeKms } from "./fake-kms.ts";
 import { expectNoPem, expectRefusal, run, tempRoot } from "./helpers.ts";
 
@@ -570,13 +580,13 @@ describe("refusals print nothing on stdout", () => {
       "no common name",
       file,
       ["--validity-years", "1"],
-      "--common-name is required; usage: tide certificate --common-name <name> --validity-years <n>",
+      `--common-name is required; ${CERTIFICATE_USAGE}`,
     ],
     [
       "no validity",
       file,
       ["--common-name", "a"],
-      "--validity-years is required; usage: tide certificate --common-name <name> --validity-years <n>",
+      `give exactly one of --validity-years and --validity-days; ${CERTIFICATE_USAGE}`,
     ],
     [
       "a repeated common name",
@@ -588,13 +598,13 @@ describe("refusals print nothing on stdout", () => {
       "an unknown flag",
       file,
       [...ARGS, "--out", "x"],
-      "unrecognised arguments; usage: tide certificate --common-name <name> --validity-years <n>",
+      `unrecognised arguments; ${CERTIFICATE_USAGE}`,
     ],
     [
       "a positional",
       file,
       [...ARGS, "certificate.pem"],
-      "unrecognised arguments; usage: tide certificate --common-name <name> --validity-years <n>",
+      `unrecognised arguments; ${CERTIFICATE_USAGE}`,
     ],
     ...["", " leading", "trailing ", "x".repeat(65), "Tidé", "tab\there", "line\nbreak"].map(
       (name): [string, () => Env, readonly string[], string] => [
@@ -693,8 +703,718 @@ describe("the tide bin", () => {
   test("with no arguments lists the command", async () => {
     const result = await run(MAIN, [], {});
     expect(result.code).toBe(2);
-    expect(result.stderr.split("\n")).toContain(
-      "usage: tide certificate --common-name <name> --validity-years <n>",
+    expect(result.stderr.split("\n")).toContain(CERTIFICATE_USAGE);
+  });
+});
+
+// Chain forms: a fixed whole-second clock, distinct names and descending lifetimes.
+const AT = Date.UTC(2030, 0, 1);
+const P10_ARGS = ["--common-name", "Tide Signing 2028", "--validity-years", "10"];
+const DAY_MS = 86_400_000;
+const ROOT_ARGS = ["--ca", "--common-name", "Tide Root CA", "--validity-years", "10"];
+const INTERMEDIATE_ARGS = [
+  "--ca",
+  "--common-name",
+  "Tide Intermediate CA",
+  "--validity-years",
+  "5",
+];
+const LEAF_ARGS = ["--common-name", "Tide Leaf", "--validity-years", "1"];
+// Basic Constraints cA, critical, without pathLen; Key Usage keyCertSign, critical.
+const BASIC_CONSTRAINTS = "300f0603551d130101ff040530030101ff";
+const KEY_CERT_SIGN = "300e0603551d0f0101ff040403020204";
+const ascii = (s: string) => new Uint8Array(Buffer.from(s, "latin1"));
+
+/** Writes `contents` to a fresh file and returns its path. */
+function inputFile(contents: string | Uint8Array, name = "input.pem"): string {
+  const path = join(tempRoot(), name);
+  writeFileSync(path, contents);
+  return path;
+}
+const publicKeyFile = (key: KeyObject) =>
+  inputFile(createPublicKey(key).export({ type: "spki", format: "pem" }).toString(), "key.pub");
+const chainIssue = (env: Env, args: readonly string[], at = AT) =>
+  issue(env, args, { now: () => at });
+const issuedArgs = (issuer: string, subject: KeyObject, args: readonly string[]) => [
+  "--issuer",
+  inputFile(issuer),
+  "--subject-key",
+  publicKeyFile(subject),
+  ...args,
+];
+/** Each certificate extension's whole DER, as hex. */
+function extensionsOf(pem: string): string[] {
+  const f = fields(pem);
+  const [list] = children(f.der, f.extensions!);
+  return children(f.der, list!).map((e) => hex(f.bytes(e)));
+}
+const cryptoKey = (key: KeyObject, usage: "sign" | "verify") =>
+  (usage === "sign" ? key : createPublicKey(key)).toCryptoKey(RSA, true, [usage]);
+/** A certificate for `subject` signed by `issuer`, built outside the command. */
+const imported = async (subject: KeyObject, issuer: KeyObject, options: CertificateOptions) =>
+  protocolCertificate(
+    cryptoKey(subject, "verify"),
+    cryptoKey(issuer, "sign"),
+    new Date(AT),
+    options,
+  );
+const IMPORTED_CA = [FIXTURE_EXTENSION.ca(), FIXTURE_EXTENSION.keyCertSignOnly];
+
+/** Fails unless the command succeeded with one PEM on stdout and its DER fingerprint on stderr. */
+function expectIssued(result: Awaited<ReturnType<typeof issue>>): string {
+  expect(result.code).toBe(0);
+  expect(result.stdout).toHaveLength(1);
+  expect(result.stderr).toEqual([
+    `tide: certificate DER SHA-256 ${hex(sha256(derOf(result.pem)))}`,
+  ]);
+  return result.pem;
+}
+
+describe("P10 regression", () => {
+  test("the direct form's TBS equals the pinned P10 certificate's once serial and key are swapped in", async () => {
+    const at = Date.UTC(2028, 1, 29, 12, 34, 56, 789);
+    const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+    const result = await issue({ TIDE_SIGNING_KEY: pkcs8(key) }, P10_ARGS, { now: () => at });
+    expect(result.code).toBe(0);
+    const reference = fields(
+      readFileSync(new URL("fixtures/p10-certificate.pem", import.meta.url), "utf8"),
     );
+    const issued = fields(result.pem);
+    const tbsOf = (f: ReturnType<typeof fields>) => f.bytes(f.envelope[0]);
+    const expected = Buffer.from(tbsOf(reference));
+    for (const name of ["serial", "spki"] as const) {
+      const [from, to] = [reference[name]!, issued[name]!];
+      expect(to.end - to.start).toBe(from.end - from.start);
+      const offset = from.start - reference.envelope[0]!.start;
+      expected.set(issued.bytes(to), offset);
+    }
+    expect(hex(tbsOf(issued))).toBe(expected.toString("hex"));
+    expect(hex(issued.bytes(issued.outer))).toBe(SHA256_WITH_RSA);
+    const x509 = new X509Certificate(result.pem);
+    expect(x509.verify(createPublicKey(key))).toBe(true);
+    expectProfile(result.pem, spkiOf(key));
+  });
+});
+
+const KINDS = ["TIDE_SIGNING_KEY_FILE", "TIDE_SIGNING_KEY", "TIDE_KMS_*"] as const;
+const ROTATIONS = [0, 1, 2].map((r) => [0, 1, 2].map((i) => KINDS[(r + i) % 3]!));
+
+describe("a root, an intermediate and a leaf", () => {
+  test.each(ROTATIONS)(
+    "root by %s, intermediate by it, leaf by %s, for a key in %s",
+    async (...kinds) => {
+      // X signs the root and the intermediate, Y the leaf, and Z signs replies under the leaf.
+      const [x, y, z] = kinds.map((kind, i) => ({
+        env: SOURCES[kind]!(BITS[i]!),
+        key: keys[BITS[i]!],
+      }));
+      const root = expectIssued(await chainIssue(x!.env, ROOT_ARGS));
+      const intermediate = expectIssued(
+        await chainIssue(x!.env, issuedArgs(root, y!.key, INTERMEDIATE_ARGS)),
+      );
+      const leaf = expectIssued(
+        await chainIssue(y!.env, issuedArgs(intermediate + root, z!.key, LEAF_ARGS)),
+      );
+
+      const verifyKey = await certificateChain(ascii(leaf + intermediate), root, new Date(AT));
+      const body = new Uint8Array(Buffer.from('{"id":"part"}'));
+      const signedBy = async (
+        sign: (b: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>,
+      ) => expoSignature(body, { keyId: "ignored in chain mode", sign });
+      await expect(
+        verifyChainedSignature(body, await signedBy(signingKey(z!.env, 30_000).sign), verifyKey),
+      ).resolves.toBeUndefined();
+      const otherSign = cryptoKey(other, "sign");
+      await expect(
+        verifyChainedSignature(
+          body,
+          await signedBy(async (b) => new Uint8Array(await crypto.subtle.sign(RSA, otherSign, b))),
+          verifyKey,
+        ),
+      ).rejects.toThrow("does not match");
+
+      // Root and leaf alone also pass.
+      const direct = expectIssued(await chainIssue(x!.env, issuedArgs(root, z!.key, LEAF_ARGS)));
+      await expect(certificateChain(ascii(direct), root, new Date(AT))).resolves.toBeDefined();
+
+      // Node's parser agrees at every link.
+      const [r, i, l] = [root, intermediate, leaf].map((p) => new X509Certificate(p));
+      expect([r!.checkIssued(r!), i!.checkIssued(r!), l!.checkIssued(i!)]).toEqual([
+        true,
+        true,
+        true,
+      ]);
+      expect([r!.verify(r!.publicKey), i!.verify(r!.publicKey), l!.verify(i!.publicKey)]).toEqual([
+        true,
+        true,
+        true,
+      ]);
+      expect([r!.ca, i!.ca, l!.ca]).toEqual([true, true, false]);
+      expect(l!.keyUsage).toEqual(["1.3.6.1.5.5.7.3.3"]);
+      expect([r!.subject, i!.subject, l!.subject]).toEqual([
+        "CN=Tide Root CA",
+        "CN=Tide Intermediate CA",
+        "CN=Tide Leaf",
+      ]);
+      expect(i!.publicKey.export({ type: "spki", format: "der" }).equals(spkiOf(y!.key))).toBe(
+        true,
+      );
+      expect(l!.publicKey.export({ type: "spki", format: "der" }).equals(spkiOf(z!.key))).toBe(
+        true,
+      );
+
+      // The profile's exact DER, and issuer Names copied byte for byte.
+      expect(extensionsOf(root)).toEqual([BASIC_CONSTRAINTS, KEY_CERT_SIGN]);
+      expect(extensionsOf(intermediate)).toEqual([BASIC_CONSTRAINTS, KEY_CERT_SIGN]);
+      expect(extensionsOf(leaf)).toEqual([KEY_USAGE, EXT_KEY_USAGE]);
+      const [fr, fi, fl] = [root, intermediate, leaf].map(fields);
+      expect(hex(fr!.bytes(fr!.issuer))).toBe(hex(fr!.bytes(fr!.subject)));
+      expect(hex(fi!.bytes(fi!.issuer))).toBe(hex(fr!.bytes(fr!.subject)));
+      expect(hex(fl!.bytes(fl!.issuer))).toBe(hex(fi!.bytes(fi!.subject)));
+      // At a whole-second clock, notBefore is the second before it, and the chain passes at that very instant.
+      expect([fr, fi, fl].map((f) => f!.times[0]!.text)).toEqual(Array(3).fill("291231235959Z"));
+      expect([fr, fi, fl].map((f) => f!.times[1]!.text)).toEqual([
+        "391231235959Z",
+        "341231235959Z",
+        "301231235959Z",
+      ]);
+    },
+  );
+
+  test("--path-length is encoded on a root and an intermediate", async () => {
+    const env = SOURCES.TIDE_SIGNING_KEY!(2048);
+    const root = expectIssued(await chainIssue(env, [...ROOT_ARGS, "--path-length", "1"]));
+    const intermediate = expectIssued(
+      await chainIssue(env, [
+        ...issuedArgs(root, keys[3072], INTERMEDIATE_ARGS),
+        "--path-length",
+        "0",
+      ]),
+    );
+    expect(extensionsOf(root)[0]).toBe("30120603551d130101ff040830060101ff020101");
+    expect(extensionsOf(intermediate)[0]).toBe("30120603551d130101ff040830060101ff020100");
+    // A second intermediate is refused under pathLen 0.
+    const env3072 = SOURCES.TIDE_SIGNING_KEY!(3072);
+    expectRefused(
+      await chainIssue(
+        env3072,
+        issuedArgs(intermediate + root, keys[4096], [
+          "--ca",
+          "--common-name",
+          "Tide Lower CA",
+          "--validity-years",
+          "1",
+        ]),
+      ),
+      "the generated certificate: certificate_chain intermediate 1 exceeds the path length its issuers allow",
+    );
+  });
+});
+
+describe("lifetimes", () => {
+  test("--validity-days sets the lifetime of every form", async () => {
+    const env = SOURCES.TIDE_SIGNING_KEY!(2048);
+    const days = ["--validity-days", "30"];
+    const direct = expectIssued(await chainIssue(env, ["--common-name", "Tide Direct", ...days]));
+    const root = expectIssued(
+      await chainIssue(env, ["--ca", "--common-name", "Tide Root CA", ...days]),
+    );
+    const leaf = expectIssued(
+      await chainIssue(env, issuedArgs(root, keys[3072], ["--common-name", "Tide Leaf", ...days])),
+    );
+    const lifetime = (pem: string) => {
+      const x509 = new X509Certificate(pem);
+      return x509.validToDate.getTime() - x509.validFromDate.getTime();
+    };
+    expect([direct, root, leaf].map(lifetime)).toEqual(Array(3).fill(30 * DAY_MS));
+    await codeSigningCertificate(direct, new Date(AT));
+  });
+
+  test("a leaf may end with the root above its issuer, not after it", async () => {
+    const env = SOURCES.TIDE_SIGNING_KEY!(2048);
+    const T = Date.UTC(2030, 0, 1);
+    const root = expectIssued(
+      await chainIssue(env, ["--ca", "--common-name", "Tide Root CA", "--validity-years", "1"], T),
+    );
+    // The client lets a child outlive its parent; Tide does not issue one, so this one is built directly.
+    const rootSubject = fields(root);
+    const intermediate = await signedCertificate(
+      {
+        spki: spkiOf(keys[3072]),
+        commonName: "Tide Intermediate CA",
+        notBefore: new Date(T - 1000),
+        notAfter: new Date(Date.UTC(2035, 0, 1)),
+        issuer: rootSubject.bytes(rootSubject.subject),
+        ca: {},
+      },
+      async (tbs) =>
+        new Uint8Array(await crypto.subtle.sign(RSA, cryptoKey(keys[2048], "sign"), tbs)),
+    );
+    const later = T + 300 * DAY_MS;
+    const leafEnv = SOURCES.TIDE_SIGNING_KEY!(3072);
+    const leaf = expectIssued(
+      await chainIssue(
+        leafEnv,
+        issuedArgs(intermediate + root, keys[4096], [
+          "--common-name",
+          "Tide Leaf",
+          "--validity-days",
+          "65",
+        ]),
+        later,
+      ),
+    );
+    expect(new X509Certificate(leaf).validToDate).toEqual(new X509Certificate(root).validToDate);
+    await expect(
+      certificateChain(ascii(leaf + intermediate), root, new Date(later)),
+    ).resolves.toBeDefined();
+    expectRefused(
+      await chainIssue(
+        leafEnv,
+        issuedArgs(intermediate + root, keys[4096], [
+          "--common-name",
+          "Tide Leaf",
+          "--validity-days",
+          "66",
+        ]),
+        later,
+      ),
+      "the new certificate would expire after a certificate in --issuer, which expires 2030-12-31T23:59:59Z: shorten --validity-days or --validity-years",
+    );
+  });
+});
+
+describe("chain forms and KMS", () => {
+  const BARE_VALIDITY = { notBefore: new Date(AT - DAY_MS), notAfter: new Date(AT + DAY_MS) };
+  const BARE_LEAF_ARGS = ["--common-name", "Tide Leaf", "--validity-days", "1"];
+  const signer = (key: KeyObject) => async (tbs: Uint8Array<ArrayBuffer>) =>
+    new Uint8Array(await crypto.subtle.sign(RSA, cryptoKey(key, "sign"), tbs));
+  /** A root for `key` whose SPKI omits the NULL parameters, an encoding Web Crypto also imports. */
+  const bareRoot = (key: KeyObject) => {
+    const der = spkiOf(key);
+    const [, bitString] = children(der, readTlv(der, 0, der.length));
+    const spki = derTlv(
+      0x30,
+      derTlv(0x30, derOid("1.2.840.113549.1.1.1")),
+      der.subarray(bitString!.start, bitString!.end),
+    );
+    return signedCertificate(
+      { spki, commonName: "Bare Root", ...BARE_VALIDITY, ca: {} },
+      signer(key),
+    );
+  };
+  const SUBJECT_IS_CA =
+    "--subject-key is the key of a certificate in --issuer: give a key of its own";
+  const rootEnv = () => SOURCES.TIDE_SIGNING_KEY!(2048);
+  const root2048 = async () => expectIssued(await chainIssue(rootEnv(), ROOT_ARGS));
+  /** An intermediate for the 3072-bit key under a root of the 2048-bit key, then that root. */
+  const intermediateUnderRoot = async () => {
+    const root = await root2048();
+    const args = issuedArgs(root, keys[3072], INTERMEDIATE_ARGS);
+    return expectIssued(await chainIssue(rootEnv(), args)) + root;
+  };
+  test("a leaf calls GetPublicKey, then Sign of the TBS digest, and runs no probe", async () => {
+    const root = expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ROOT_ARGS));
+    const before = kms.received.length;
+    const leaf = expectIssued(await chainIssue(kmsEnv(), issuedArgs(root, keys[3072], LEAF_ARGS)));
+    const requests = kms.received.slice(before);
+    expect(requests.map((r) => r.target)).toEqual(["GetPublicKey", "Sign"]);
+    const f = fields(leaf);
+    expect(JSON.parse(Buffer.from(requests[1]!.body).toString("utf8"))).toEqual({
+      KeyId: FAKE_KMS.keyId,
+      Message: sha256(f.bytes(f.envelope[0])).toString("base64"),
+      MessageType: "DIGEST",
+      SigningAlgorithm: "RSASSA_PKCS1_V1_5_SHA_256",
+    });
+  });
+
+  test.each<[string, () => readonly string[] | Promise<readonly string[]>, string]>([
+    [
+      "an unreadable --issuer",
+      () => ["--issuer", tempRoot(), "--subject-key", publicKeyFile(keys[3072]), ...LEAF_ARGS],
+      "--issuer unreadable: not a regular file of at most 64 KiB",
+    ],
+    [
+      "an --issuer that is not PEM",
+      () => issuedArgs("hello\n", keys[3072], LEAF_ARGS),
+      "--issuer: must be PEM CERTIFICATE blocks separated by single line ends",
+    ],
+    [
+      "an --issuer that expired",
+      async () =>
+        issuedArgs(
+          await imported(keys[2048], keys[2048], {
+            subject: "Old Root",
+            issuer: "Old Root",
+            extensions: IMPORTED_CA,
+            notBefore: new Date(AT - 10 * DAY_MS),
+            notAfter: new Date(AT - DAY_MS),
+          }),
+          keys[3072],
+          ["--common-name", "Tide Leaf", "--validity-days", "1"],
+        ),
+      "--issuer: root has expired",
+    ],
+    [
+      "an --issuer valid from the sampled instant",
+      async () =>
+        issuedArgs(
+          await imported(keys[2048], keys[2048], {
+            subject: "New Root",
+            issuer: "New Root",
+            extensions: IMPORTED_CA,
+            notBefore: new Date(AT),
+          }),
+          keys[3072],
+          LEAF_ARGS,
+        ),
+      "--issuer: root is not valid yet",
+    ],
+    [
+      "a P10 direct certificate as --issuer",
+      async () =>
+        issuedArgs(
+          (await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ARGS, AT - DAY_MS)).pem,
+          keys[3072],
+          LEAF_ARGS,
+        ),
+      "--issuer: root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "a CA without keyCertSign as --issuer",
+      async () =>
+        issuedArgs(
+          await imported(keys[2048], keys[2048], {
+            subject: "Root",
+            issuer: "Root",
+            extensions: [FIXTURE_EXTENSION.ca(), FIXTURE_EXTENSION.digitalSignature],
+            notBefore: new Date(AT - DAY_MS),
+          }),
+          keys[3072],
+          LEAF_ARGS,
+        ),
+      "--issuer: root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "a subject key that is not PEM",
+      async () => [
+        "--issuer",
+        inputFile(expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ROOT_ARGS))),
+        "--subject-key",
+        inputFile("hello\n"),
+        ...LEAF_ARGS,
+      ],
+      "--subject-key must be one PEM PUBLIC KEY block",
+    ],
+    [
+      "a leaf for the root's own key",
+      async () => issuedArgs(await root2048(), keys[2048], LEAF_ARGS),
+      SUBJECT_IS_CA,
+    ],
+    [
+      "a leaf for the intermediate's key",
+      async () => issuedArgs(await intermediateUnderRoot(), keys[3072], LEAF_ARGS),
+      SUBJECT_IS_CA,
+    ],
+    [
+      "an intermediate for the key of the root above its issuer",
+      async () => issuedArgs(await intermediateUnderRoot(), keys[2048], INTERMEDIATE_ARGS),
+      SUBJECT_IS_CA,
+    ],
+    [
+      "a leaf for the key of a root above its issuer that encodes it without NULL parameters",
+      async () => {
+        const root = await bareRoot(keys[3072]);
+        const intermediate = await signedCertificate(
+          {
+            spki: spkiOf(keys[2048]),
+            commonName: "Tide Intermediate CA",
+            ...BARE_VALIDITY,
+            issuer: fields(root).bytes(fields(root).subject),
+            ca: {},
+          },
+          signer(keys[3072]),
+        );
+        return issuedArgs(intermediate + root, keys[3072], BARE_LEAF_ARGS);
+      },
+      SUBJECT_IS_CA,
+    ],
+  ])("%s is refused before any KMS request", async (_, args, message) => {
+    const before = kms.received.length;
+    expectRefused(await chainIssue(kmsEnv(), await args()), message);
+    expect(kms.received.length).toBe(before);
+  });
+
+  test("an --issuer that encodes the source's key without NULL parameters issues a leaf", async () => {
+    const root = await bareRoot(keys[2048]);
+    const leaf = expectIssued(
+      await chainIssue(kmsEnv(), issuedArgs(root, keys[3072], BARE_LEAF_ARGS)),
+    );
+    await expect(certificateChain(ascii(leaf), root, new Date(AT))).resolves.toBeDefined();
+  });
+
+  test("an --issuer whose key is not the source's is refused after GetPublicKey only", async () => {
+    const root = expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(3072), ROOT_ARGS));
+    const before = kms.received.length;
+    expectRefused(
+      await chainIssue(kmsEnv(), issuedArgs(root, keys[4096], LEAF_ARGS)),
+      "the --issuer certificate's public key is not the signing key's",
+    );
+    expect(kms.received.slice(before).map((r) => r.target)).toEqual(["GetPublicKey"]);
+  });
+
+  test("a root or leaf signed by a KMS Sign key other than GetPublicKey's is refused", async () => {
+    const root = expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ROOT_ARGS));
+    kms.signWith(other);
+    expectRefused(
+      await chainIssue(kmsEnv(), ROOT_ARGS),
+      "the generated certificate: certificate_chain root has a self-signature that does not verify",
+    );
+    expectRefused(
+      await chainIssue(kmsEnv(), issuedArgs(root, keys[3072], LEAF_ARGS)),
+      "the generated certificate: certificate_chain leaf has a signature that does not verify under its issuer's key",
+    );
+  });
+});
+
+describe("chain refusals print nothing on stdout", () => {
+  const rootEnv = () => SOURCES.TIDE_SIGNING_KEY!(2048);
+  let rootPem: Promise<string> | undefined;
+  const rootOf = () => (rootPem ??= chainIssue(rootEnv(), ROOT_ARGS).then((r) => expectIssued(r)));
+  const pemOf = (der: Uint8Array, label: string) =>
+    `-----BEGIN ${label}-----\n${Buffer.from(der)
+      .toString("base64")
+      .match(/.{1,64}/g)!
+      .join("\n")}\n-----END ${label}-----\n`;
+  /** An RSA SubjectPublicKeyInfo with a made-up modulus of `bits` and exponent 65537, which Node parses as given. */
+  const rsaSpki = (bits: number) => {
+    const modulus = new Uint8Array(bits / 8 + 1).fill(0xa5);
+    modulus[0] = 0;
+    modulus[1] = 0xc5;
+    return derTlv(
+      0x30,
+      derTlv(0x30, derOid("1.2.840.113549.1.1.1"), Uint8Array.of(5, 0)),
+      derTlv(
+        0x03,
+        Uint8Array.of(0),
+        derTlv(0x30, derTlv(0x02, modulus), derTlv(0x02, Uint8Array.of(1, 0, 1))),
+      ),
+    );
+  };
+  const subjectKey = (contents: () => string | Uint8Array) => async () => [
+    "--issuer",
+    inputFile(await rootOf()),
+    "--subject-key",
+    inputFile(contents(), "key.pub"),
+    ...LEAF_ARGS,
+  ];
+  const usage = CERTIFICATE_USAGE;
+
+  test.each<[string, () => Promise<readonly string[]> | readonly string[], string]>([
+    [
+      "a private key",
+      subjectKey(() => pkcs8(keys[2048])),
+      "--subject-key must be one PEM PUBLIC KEY block",
+    ],
+    [
+      "a PKCS#1 public key",
+      subjectKey(() =>
+        createPublicKey(keys[2048]).export({ type: "pkcs1", format: "pem" }).toString(),
+      ),
+      "--subject-key must be one PEM PUBLIC KEY block",
+    ],
+    [
+      "an EC key",
+      subjectKey(() =>
+        generateKeyPairSync("ec", { namedCurve: "P-256" })
+          .publicKey.export({ type: "spki", format: "pem" })
+          .toString(),
+      ),
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
+    ],
+    [
+      "a 1024-bit key",
+      subjectKey(() =>
+        generateKeyPairSync("rsa", { modulusLength: 1024 })
+          .publicKey.export({ type: "spki", format: "pem" })
+          .toString(),
+      ),
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
+    ],
+    [
+      "an 8192-bit key",
+      subjectKey(() => pemOf(rsaSpki(8192), "PUBLIC KEY")),
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
+    ],
+    [
+      "trailing bytes after the key",
+      subjectKey(() => pemOf(Buffer.concat([spkiOf(keys[2048]), Buffer.of(0)]), "PUBLIC KEY")),
+      "--subject-key must hold the DER SubjectPublicKeyInfo of an RSA key of 2048 to 4096 bits",
+    ],
+    [
+      "non-canonical base64",
+      subjectKey(() => "-----BEGIN PUBLIC KEY-----\nAB==\n-----END PUBLIC KEY-----\n"),
+      "--subject-key must be canonical base64",
+    ],
+    ["--ca twice", () => ["--ca", ...ROOT_ARGS], "--ca is given twice"],
+    [
+      "--issuer twice",
+      () => ["--issuer", "a", "--issuer", "b", "--subject-key", "k", ...LEAF_ARGS],
+      "--issuer is given twice",
+    ],
+    [
+      "--path-length without --ca",
+      () => ["--path-length", "1", ...LEAF_ARGS],
+      `--path-length goes only with --ca; ${usage}`,
+    ],
+    [
+      "--issuer without --subject-key",
+      () => ["--issuer", "a", ...LEAF_ARGS],
+      `--issuer and --subject-key go together; ${usage}`,
+    ],
+    [
+      "--subject-key without --issuer",
+      () => ["--subject-key", "a", ...ROOT_ARGS],
+      `--issuer and --subject-key go together; ${usage}`,
+    ],
+    ...["8", "-1", "01", "x"].map((n): [string, () => readonly string[], string] => [
+      `--path-length ${n}`,
+      () => [...ROOT_ARGS, `--path-length=${n}`],
+      "--path-length must be a whole number from 0 to 7",
+    ]),
+    [
+      "--validity-days with --validity-years",
+      () => ["--issuer", "a", "--subject-key", "k", ...LEAF_ARGS, "--validity-days", "1"],
+      `give exactly one of --validity-years and --validity-days; ${usage}`,
+    ],
+    [
+      "neither lifetime on a leaf",
+      () => ["--issuer", "a", "--subject-key", "k", "--common-name", "a"],
+      `give exactly one of --validity-years and --validity-days; ${usage}`,
+    ],
+    [
+      "no lifetime on a root",
+      () => ["--ca", "--common-name", "a"],
+      `give exactly one of --validity-years and --validity-days; ${usage}`,
+    ],
+    ...["0", "36501", "1.5"].map((n): [string, () => readonly string[], string] => [
+      `--validity-days ${n}`,
+      () => ["--issuer", "a", "--subject-key", "k", "--common-name", "a", "--validity-days", n],
+      "--validity-days must be a whole number from 1 to 36500",
+    ]),
+    [
+      "--ca with a value",
+      () => ["--ca=yes", "--common-name", "a", "--validity-years", "1"],
+      `unrecognised arguments; ${usage}`,
+    ],
+  ])("%s exits 2", async (_, args, message) => {
+    expectRefused(await chainIssue(rootEnv(), await args()), message);
+  });
+
+  test("a root's lifetime is not bounded, but a leaf's is bounded by its root in years and days", async () => {
+    const env = rootEnv();
+    const root = expectIssued(
+      await chainIssue(env, ["--ca", "--common-name", "Short Root", "--validity-years", "1"]),
+    );
+    const bound =
+      "the new certificate would expire after a certificate in --issuer, which expires 2030-12-31T23:59:59Z: shorten --validity-days or --validity-years";
+    expectRefused(
+      await chainIssue(
+        env,
+        issuedArgs(root, keys[3072], ["--common-name", "Tide Leaf", "--validity-years", "2"]),
+      ),
+      bound,
+    );
+    expectRefused(
+      await chainIssue(
+        env,
+        issuedArgs(root, keys[3072], ["--common-name", "Tide Leaf", "--validity-days", "366"]),
+      ),
+      bound,
+    );
+    expectIssued(
+      await chainIssue(
+        env,
+        issuedArgs(root, keys[3072], ["--common-name", "Tide Leaf", "--validity-days", "365"]),
+      ),
+    );
+  });
+
+  test("an intermediate that would make the next --issuer over 64 KiB is refused", async () => {
+    // A large-name root fits an --issuer file alone, and its intermediate fits a served part, but not both.
+    const big = "R".repeat(16_400);
+    const root = await imported(keys[2048], keys[2048], {
+      subject: big,
+      issuer: big,
+      extensions: IMPORTED_CA,
+      notBefore: new Date(AT - DAY_MS),
+    });
+    expect(root.length).toBeLessThanOrEqual(65_536);
+    expect(root.length).toBeGreaterThan(40_000);
+    const result = await chainIssue(rootEnv(), issuedArgs(root, keys[3072], INTERMEDIATE_ARGS));
+    expectRefused(result, "the generated certificate: issuer must be 1 to 65536 bytes");
+    // A leaf under the same root is fine: it is never an issuer.
+    expectIssued(await chainIssue(rootEnv(), issuedArgs(root, keys[3072], LEAF_ARGS)));
+  });
+});
+
+test("the chain forms read only signing-key variables", async () => {
+  const root = expectIssued(await chainIssue(SOURCES.TIDE_SIGNING_KEY!(2048), ROOT_ARGS));
+  for (const [source, args] of [
+    [SOURCES.TIDE_SIGNING_KEY_FILE!(2048), ROOT_ARGS],
+    [kmsEnv(), issuedArgs(root, keys[3072], LEAF_ARGS)],
+  ] as const) {
+    const read = new Set<string>();
+    const env = new Proxy(
+      {
+        ...source,
+        TIDE_DISK_DIR: join(tempRoot(), "missing"),
+        TIDE_S3_ENDPOINT: "not a url",
+        TIDE_BUILD_KEYID: "\u0000",
+        TIDE_BUILD_CERTIFICATE: "not a certificate",
+      },
+      {
+        get: (target, name, receiver) => {
+          if (typeof name === "string") read.add(name);
+          return Reflect.get(target, name, receiver) as unknown;
+        },
+      },
+    );
+    expectIssued(await chainIssue(env, args));
+    expect([...read].filter((name) => !SIGNING_VARIABLES.includes(name))).toEqual([]);
+  }
+});
+
+describe("the tide bin, chain forms", () => {
+  test("issues a leaf from input files elsewhere and writes no file", async () => {
+    const [cwd, home, tmp, inputs] = [tempRoot(), tempRoot(), tempRoot(), tempRoot()];
+    const pem = pkcs8(keys[2048]);
+    const root = expectIssued(await issue({ TIDE_SIGNING_KEY: pem }, ROOT_ARGS));
+    writeFileSync(join(inputs, "root.pem"), root);
+    writeFileSync(
+      join(inputs, "leaf.pub"),
+      createPublicKey(keys[3072]).export({ type: "spki", format: "pem" }),
+    );
+    const args = [
+      "--issuer",
+      join(inputs, "root.pem"),
+      "--subject-key",
+      join(inputs, "leaf.pub"),
+      ...LEAF_ARGS,
+    ];
+    const result = await run(
+      MAIN,
+      ["certificate", ...args],
+      { PATH: process.env.PATH ?? "", HOME: home, TMPDIR: tmp, TIDE_SIGNING_KEY: pem },
+      cwd,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe(
+      `tide: certificate DER SHA-256 ${hex(sha256(derOf(result.stdout)))}\n`,
+    );
+    await expect(certificateChain(ascii(result.stdout), root, new Date())).resolves.toBeDefined();
+    expectNoPem(result.stderr, pem);
+    for (const dir of [cwd, home, tmp]) expect(readdirSync(dir)).toEqual([]);
+    expect(readdirSync(inputs).sort()).toEqual(["leaf.pub", "root.pem"]);
   });
 });

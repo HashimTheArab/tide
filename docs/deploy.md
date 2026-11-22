@@ -108,6 +108,36 @@ Once per environment, in this order.
    (Publishing), as `TIDE_SIGNING_KEY_FILE`, `TIDE_SIGNING_KEY` or `TIDE_KMS_KEY_ID`. Every writer, `register-build`
    included, and `tide probe` read the builds' identity from `TIDE_BUILD_KEYID` and one of
    `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, taken from a shipped binary.
+
+   **Chain path.** Instead of one self-signed certificate, the app can embed a CA root and trust any leaf the root
+   issues, so the writer's key can change without an app release. Writers do not serve a chain yet (roadmap P11),
+   so do not ship a chain-mode build until they do. Each step runs the same trusted `tide` install, with only the
+   named key source set:
+
+   | Step | Key source set | Command | Output |
+   | --- | --- | --- | --- |
+   | 1 | none | create the root key, an optional intermediate key and the writer's leaf key: separate KMS keys, or files outside every checkout | three keys |
+   | 2 | root key | `tide certificate --ca --common-name "Example Root CA" --validity-years 20` | `root.pem` |
+   | 3 (optional) | root key | `tide certificate --ca --issuer root.pem --subject-key intermediate.pub --common-name "Example Intermediate CA" --validity-years 10` | `intermediate.pem` |
+   | 4 | intermediate key | `cat intermediate.pem root.pem > issuer.pem`, then `tide certificate --issuer issuer.pem --subject-key leaf.pub --common-name "Example Writer 2027" --validity-days 365` | `leaf.pem` |
+   | 4, without step 3 | root key | `tide certificate --issuer root.pem --subject-key leaf.pub --common-name "Example Writer 2027" --validity-days 365` | `leaf.pem` |
+
+   A `.pub` file is the key's SubjectPublicKeyInfo PEM: `openssl pkey -in <key> -pubout`, or for KMS
+   `aws kms get-public-key --key-id <key> --query PublicKey --output text | base64 -d | openssl pkey -pubin -inform DER`.
+
+   - **Keys.** The root and intermediate keys, and any credential allowed to `Sign` with them, never go to the
+     writer job. The writer gets only the leaf key (`kms:Sign` on that key alone).
+   - **The app.** It embeds `root.pem` as its certificate and must opt in to chains: Android meta-data
+     `expo.modules.updates.CODE_SIGNING_INCLUDE_MANIFEST_RESPONSE_CERTIFICATE_CHAIN` set to `true`, and the iOS
+     `Expo.plist` key `EXUpdatesCodeSigningIncludeManifestResponseCertificateChain` set to `true`. Expo's config
+     plugins (SDK 58) do not set either from app config, so a prebuild project needs its own config plugin to write
+     them. Without the opt-in, the app verifies replies with the root's key and refuses every leaf signature.
+   - **A leaked leaf key.** Issuing a new leaf lets the writer switch keys, but it does not revoke the old one: apps
+     trusting the root still accept replies signed by the leaked key, served with its old chain, until that leaf
+     or a certificate above it expires. Keep leaf lifetimes short. A leaked intermediate key can issue leaves until
+     the intermediate expires; a leaked root key needs a new app build with a new root.
+   - **Renewal.** An expired root or intermediate breaks every build that embeds or is served it. A new certificate
+     never outlives one above it, so in an ancestor's last year issue leaves with `--validity-days`.
 6. **Publisher credential.** An R2 Object Read & Write token scoped to the bucket, given to the publish workflow as
    the five `TIDE_S3_*` variables in a protected CI secret (`design.md`, Bucket configuration). The publisher's
    `TIDE_SERVER_URL` is the server origin and `TIDE_ASSET_URL` the asset origin.

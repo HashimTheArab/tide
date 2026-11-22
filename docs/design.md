@@ -21,6 +21,10 @@ CLI refuses to publish without a key. Without it, anyone who can write the bucke
   rollback is a new, newer publish, and a device must never be served an older reply whose filters its running
   update fails.
 - It verifies `expo-signature` over the exact bytes of the multipart part, and each asset's SHA-256.
+- In chain mode (`codeSigningIncludeManifestResponseCertificateChain`) it builds the chain from the reply's
+  `certificate_chain` part (leaf first) and the embedded certificate as root, checks every certificate's validity,
+  links and CA constraints, and ignores the signature's `keyid`. The protocol package's `certificateChain` mirrors
+  those rules, stricter where its comments say.
 - With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
   launch-asset request carries `A-IM: bsdiff`,
   `Expo-Current-Update-ID` (the running update, which can be the embedded one) and `Expo-Requested-Update-ID`.
@@ -531,33 +535,65 @@ deletion gets its own design.
 
 ### `tide certificate`
 
-`tide certificate --common-name <name> --validity-years <n>` prints the self-signed certificate the app embeds,
-signed by the configured key source (Keys), so a key created inside KMS needs no copy anywhere else. It reads only
-the key-source variables: no build pins, no bucket and no project code, and it opens no file for writing.
+`tide certificate` prints a certificate signed by the configured key source (Keys), so a key created inside KMS
+needs no copy anywhere else. It reads only the key-source variables and the files its flags name: no build pins, no
+bucket and no project code, and it opens no file for writing.
 
-- **Arguments.** The common name is 1 to 64 printable ASCII characters with no space at either end; the validity is
-  a whole number of years from 1 to 100.
+| Flags | Issues | Subject key | Signed by |
+| --- | --- | --- | --- |
+| `--common-name <name>` and a lifetime | the self-signed direct-signing certificate the app embeds | source's | source |
+| `--ca [--path-length <n>]` with the above | a CA root, to embed for chain mode | source's | source |
+| `--issuer <chain.pem> --subject-key <public-key.pem> --ca [--path-length <n>]` | an intermediate | the file's | source, as the issuer |
+| `--issuer <chain.pem> --subject-key <public-key.pem>` | a leaf, the writer's chain-mode signer | the file's | source, as the issuer |
+
+- **Arguments.** The common name is 1 to 64 printable ASCII characters with no space at either end. Every form takes
+  exactly one of `--validity-years` (1 to 100) and `--validity-days` (1 to 36500), so a certificate can still be
+  issued in an ancestor's last year. `--path-length` is 0 to 7, the most intermediates a served chain holds; absent
+  means unlimited.
+- **Inputs.** `--issuer` is a regular file of at most 64 KiB in the `certificate_chain` grammar: the issuing
+  certificate first, each one above it, the root last (`cat intermediate.pem root.pem`, or `root.pem` alone).
+  `--subject-key` is one canonical `PUBLIC KEY` PEM block holding an RSA SubjectPublicKeyInfo of 2048 to 4096 bits
+  whose DER re-encodes byte for byte; `openssl pkey -pubout` writes it, and a KMS key's comes from
+  `aws kms get-public-key`.
 - **Certificate.** X.509 v3 with a random positive 16-octet serial, `sha256WithRSAEncryption` with NULL parameters
-  inside and outside the TBS, and one Name as issuer and subject holding only the common name. Validity runs from
-  now, in whole seconds, to the same time `<n>` years later (29 February rolls to 1 March), as UTCTime through 2049
-  and GeneralizedTime from 2050. Then the source's SubjectPublicKeyInfo and exactly two extensions: Key Usage
-  (critical) `digitalSignature` and Extended Key Usage `codeSigning`.
+  inside and outside the TBS, and a subject Name holding only the common name. A self-signed certificate's issuer
+  Name is the same bytes; an issued one's is the issuing certificate's subject Name, byte for byte. Validity runs
+  to the same time `<n>` years later (29 February rolls to 1 March) or `<n>` × 86,400 s later, as UTCTime through
+  2049 and GeneralizedTime from 2050. No form carries SKI, AKI or Expo project information.
+  - Direct and leaf: Key Usage (critical) `digitalSignature` and Extended Key Usage `codeSigning`, nothing else.
+  - Root and intermediate: Basic Constraints (critical) cA with the optional pathLen, and Key Usage (critical)
+    `keyCertSign` only.
+- **Clock.** The command reads the clock once. The direct form starts at that time in whole seconds. The chain
+  forms start at the last whole second strictly before it, and every check runs at the sampled time: the client
+  needs `notBefore < now < notAfter` on every chain member.
 - **Signing.** The source signs the TBS as `publish` signs a part: KMS signs its SHA-256 with `Sign` (`DIGEST`).
   The public key comes from the PEM key, or from KMS `GetPublicKey` on the same request path as `Sign`. A reply is
   refused unless the key is `SIGN_VERIFY`, `RSA_2048`, `RSA_3072` or `RSA_4096`, allows
   `RSASSA_PKCS1_V1_5_SHA_256`, and its public key is an RSA SubjectPublicKeyInfo of that size.
-- **Checks, before any output.** The PEM passes the certificate profile (Keys), its public key is the source's, and
-  `tide signing probe` signed by the source verifies under it, so a KMS key whose `Sign` and `GetPublicKey` disagree
-  is refused.
+- **Checks, before any output.**
+  - Direct: the PEM passes the certificate profile (Keys), its public key is the source's, and `tide signing probe`
+    signed by the source verifies under it, so a KMS key whose `Sign` and `GetPublicKey` disagree is refused.
+  - Issued forms, before any key source call: both files parse, and the issuer path passes the client's chain rules
+    as a CA path (`issuerPath`): at most 8 certificates, at most 32 KiB below the root, every member valid, linked
+    and a CA with `keyCertSign`, and path lengths leaving room for the issuing certificate. `--subject-key` must
+    differ from every key on the path, so a leaf never carries a CA's key. Then the issuing certificate's key must
+    be the source's, and the new certificate must not expire after any certificate on the path. Keys compare as
+    Web Crypto re-exports them, so another encoding of one key still matches.
+  - After signing: a root or an intermediate, followed by its `--issuer`, passes `issuerPath` as the next
+    `--issuer`; a leaf passes `certificateChain`, the client's chain-mode check, as the served part
+    `leaf + intermediates` over the root. The link or root self-signature proves `Sign` and `GetPublicKey` agree,
+    so they run no probe.
 - **Output.** stdout is exactly the PEM, one block of 64-column lines; redirect it to a file outside the app
-  checkout, then copy it into the app (`deploy.md`, Signing identity).
-  stderr is `tide: certificate DER SHA-256 <hex>`, the fingerprint the identity check compares. Exit 0, or 2 on any
-  refusal with nothing on stdout. No message carries a key, credential or provider text.
+  checkout (`deploy.md`, Signing identity). stderr is `tide: certificate DER SHA-256 <hex>`, the fingerprint the
+  identity check compares. Exit 0, or 2 on any refusal with nothing on stdout. No message carries a key,
+  credential or provider text.
 
 ## Keys
 
 A leaked key can ship code to every installed app. Publish only from CI, and sign through KMS where possible. Tide
 supports direct signing only: the app embeds one self-signed certificate, and its key signs every part.
+`tide certificate` already issues chain certificates (a CA root, intermediates and leaves); writers serving a chain
+are roadmap P11.
 
 **Key sources.** Exactly one is configured; an empty variable counts as unset.
 
