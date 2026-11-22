@@ -1,0 +1,16 @@
+name: "Install Betterleaks"
+description: "The secrets scanner the gate runs, checksum-verified"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: 1.10.1
+        SHA256: c174b42d7aa60caf58c0c3e555c0e4bed01fe6b0d99a412bce777b5af4ce913e
+      run: |
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o betterleaks.tar.gz "https://github.com/betterleaks/betterleaks/releases/download/v${VERSION}/betterleaks_${VERSION}_linux_x64.tar.gz"
+        echo "${SHA256}  betterleaks.tar.gz" | sha256sum --check --strict
+        sudo tar -xzf betterleaks.tar.gz -C /usr/local/bin betterleaks
+        betterleaks version

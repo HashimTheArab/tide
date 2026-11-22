@@ -1,0 +1,268 @@
+# Publishes the packages for a v<semver> tag on main. npm's trusted publishers name this file: keep the filename.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Explicit bash adds -o pipefail to every run script.
+defaults:
+  run:
+    shell: bash
+
+env:
+  FORCE_COLOR: 3
+  # Publish order: each package after the @tide-ota packages it depends on.
+  PACKAGES: protocol server cli
+
+jobs:
+  # Proves the tagged commit and packs the tarballs the later jobs publish and attach, byte for byte.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      dist-tag: ${{ steps.tag.outputs.dist-tag }}
+      node: ${{ steps.node.outputs.node }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # SemVer 2.0 without build metadata, which npm drops.
+      - id: tag
+        name: Version from tag
+        run: |
+          node --input-type=module - <<'JS'
+          import { appendFileSync } from "node:fs";
+          const tag = process.env.GITHUB_REF_NAME ?? "";
+          const num = "(0|[1-9]\\d*)";
+          const id = "(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)";
+          const m = new RegExp(`^v${num}\\.${num}\\.${num}(-${id}(?:\\.${id})*)?$`).exec(tag);
+          if (!m) {
+            console.error(`::error::${tag} is not v<semver>`);
+            process.exit(1);
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${tag.slice(1)}\ndist-tag=${m[4] ? "next" : "latest"}\n`);
+          JS
+
+      - id: main
+        name: Tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+
+      - id: node
+        name: Node version for publish
+        run: echo "node=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - id: setup
+        uses: ./.github/actions/setup
+
+      - id: betterleaks
+        uses: ./.github/actions/betterleaks
+
+      # Before the version write: the gate refuses a dirty tree.
+      - id: gate
+        name: Gate
+        run: |
+          status=0
+          node scripts/gate.mjs --base origin/main --out "$RUNNER_TEMP/gate.json" > /dev/null || status=$?
+          jq '{allChecksPassed, tests, checks: (.checks | map_values(.exitCode))}' "$RUNNER_TEMP/gate.json"
+          exit "$status"
+
+      # Inside the run only: the repository stays at 0.0.0 and nothing is committed.
+      - id: version
+        name: Write the version
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          for p in $PACKAGES; do
+            (cd "packages/$p" && npm pkg set "version=$VERSION")
+          done
+
+      # Fixed file names: a long version would otherwise exceed the file name limit.
+      - id: pack
+        name: Pack
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarballs"
+          for p in $PACKAGES; do
+            file="$RUNNER_TEMP/tarballs/tide-ota-$p.tgz"
+            pnpm -C "packages/$p" pack --out "$file"
+            tar -xzOf "$file" package/package.json | jq -e --arg v "$VERSION" \
+              '.version == $v and ([.dependencies // {} | to_entries[] | select(.key | startswith("@tide-ota/")) | .value] | all(. == $v))' > /dev/null \
+              || { echo "::error::$file does not carry $VERSION for itself and its @tide-ota dependencies"; exit 1; }
+          done
+
+      - id: test-pack
+        name: Packed-install test on the tarballs
+        run: pnpm test:pack "$RUNNER_TEMP"/tarballs/*.tgz
+
+      # Named per attempt: a full rerun uploads beside the earlier attempt's artifact instead of colliding with it.
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tarballs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+
+  # The only job that can mint an npm provenance token; it runs no repository code.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    # Runs for one dist-tag queue in order, so the check below and the publishes after it never interleave.
+    concurrency:
+      group: release-publish-${{ needs.build.outputs.dist-tag }}
+      cancel-in-progress: false
+      queue: max
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+    steps:
+      # No registry input: setup-node would write an .npmrc that reads an npm token from the environment.
+      - id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ needs.build.outputs.node }}
+
+      - id: download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/tarballs
+          digest-mismatch: error
+
+      # Trusted publishing needs npm 11.5.1.
+      - id: npm-version
+        name: npm supports trusted publishing
+        run: |
+          printf '%s\n' 11.5.1 "$(npm --version)" | sort -VC || { echo "::error::npm $(npm --version) is older than 11.5.1"; exit 1; }
+
+      # Checks every package before publishing any. A version npm already holds is skipped only with these exact
+      # bytes, and none is published where the dist-tag already names a later version, which --tag would move back.
+      # Trusted publishing: npm exchanges the job's OIDC token, so no npm token exists anywhere.
+      - id: publish
+        name: Publish
+        run: |
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          const { VERSION, DIST_TAG, PACKAGES, RUNNER_TEMP } = process.env;
+          const fail = (message) => {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          // SemVer precedence: a < b.
+          const parts = (v) => {
+            const [core, ...pre] = v.split("+")[0].split("-");
+            return [core.split(".").map(BigInt), pre.length ? pre.join("-").split(".") : []];
+          };
+          const precedes = (a, b) => {
+            const [[ac, ap], [bc, bp]] = [parts(a), parts(b)];
+            for (let i = 0; i < 3; i++) if (ac[i] !== bc[i]) return ac[i] < bc[i];
+            if (!ap.length || !bp.length) return ap.length > bp.length;
+            for (let i = 0; i < Math.min(ap.length, bp.length); i++) {
+              const [x, y] = [ap[i], bp[i]];
+              if (x === y) continue;
+              const [nx, ny] = [/^\d+$/.test(x), /^\d+$/.test(y)];
+              return nx && ny ? BigInt(x) < BigInt(y) : nx !== ny ? nx : x < y;
+            }
+            return ap.length < bp.length;
+          };
+          const registry = execFileSync("npm", ["config", "get", "registry"], { encoding: "utf8" }).trim().replace(/\/?$/, "/");
+          const planned = [];
+          for (const p of PACKAGES.split(" ")) {
+            const name = `@tide-ota/${p}`;
+            const file = `${RUNNER_TEMP}/tarballs/tide-ota-${p}.tgz`;
+            const integrity = `sha512-${createHash("sha512").update(readFileSync(file)).digest("base64")}`;
+            // ?write=true bypasses the CDN, whose cached packument can predate a release published minutes ago.
+            const url = new URL(`${name.replace("/", "%2f")}?write=true`, registry);
+            const res = await fetch(url, { headers: { accept: "application/json" } });
+            if (!res.ok) fail(`${name}: the registry answered ${res.status}`);
+            const doc = await res.json();
+            const existing = doc.versions?.[VERSION];
+            const tagged = doc["dist-tags"]?.[DIST_TAG];
+            if (existing?.dist?.integrity === integrity) console.log(`${name}@${VERSION} is already on npm`);
+            else if (existing) fail(`${name}@${VERSION} is on npm with other bytes`);
+            else if (tagged && precedes(VERSION, tagged)) fail(`${name}@${DIST_TAG} is ${tagged}, later than ${VERSION}`);
+            else planned.push(file);
+          }
+          for (const file of planned)
+            execFileSync("npm", ["publish", file, "--provenance", "--access", "public", "--tag", DIST_TAG], { stdio: "inherit" });
+          JS
+
+  release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PRERELEASE: ${{ needs.build.outputs.dist-tag == 'next' }}
+    steps:
+      - id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ needs.build.outputs.node }}
+
+      - id: download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/tarballs
+          digest-mismatch: error
+
+      # Rerunnable: keeps a finished asset with these bytes, fails on one with other bytes before changing anything,
+      # and uploads missing or unfinished ones. --clobber deletes before uploading, so it only meets unfinished ones.
+      - id: assets
+        name: GitHub Release
+        run: |
+          node --input-type=module - <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readdirSync, readFileSync } from "node:fs";
+          const { GITHUB_REF_NAME: tag, RUNNER_TEMP, PRERELEASE } = process.env;
+          const gh = (command, ...args) =>
+            execFileSync("gh", ["release", command, tag, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+          try {
+            execFileSync("gh", ["release", "view", tag], { stdio: "ignore" });
+          } catch {
+            gh("create", "--verify-tag", "--generate-notes", "--draft");
+          }
+          const attached = new Map(JSON.parse(gh("view", "--json", "assets")).assets.map((a) => [a.name, a]));
+          const upload = [];
+          const dir = `${RUNNER_TEMP}/tarballs`;
+          for (const name of readdirSync(dir).filter((n) => n.endsWith(".tgz")).sort()) {
+            const file = `${dir}/${name}`;
+            const digest = `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+            const found = attached.get(name);
+            if (found?.state !== "uploaded") upload.push(file);
+            else if (found.digest === digest) console.log(`${name} is already attached`);
+            else {
+              console.error(`::error::${name} is attached with other bytes`);
+              process.exit(1);
+            }
+          }
+          if (upload.length > 0) gh("upload", ...upload, "--clobber");
+          gh("edit", "--draft=false", `--prerelease=${PRERELEASE}`);
+          JS
