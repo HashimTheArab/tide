@@ -119,6 +119,8 @@ this order, no whitespace, no trailing newline:
 - Decode refuses any record encode would not write byte for byte: another key order, whitespace, escape or number
   spelling, an unknown or missing field, or a record over 2 MiB. Both bodies are the exact signed bytes, carried as
   strings like a version-1 body.
+- Only `tide publish --rollout` and `tide rollout` write version 2 (CLI, Staged rollouts); servers read it from the
+  same release, and must be deployed first.
 
 ### Base records
 
@@ -276,7 +278,7 @@ with no body and cancels every stream it holds.
 
 ## CLI
 
-**One writer at a time.** `publish`, `rollback`, `republish` and `register-build` run only as CI jobs in one
+**One writer at a time.** `publish`, `rollout`, `rollback`, `republish` and `register-build` run only as CI jobs in one
 concurrency group (for example `concurrency: tide-publish`) that runs them one at a time (`deploy.md`, Publishing). There is no lock
 object: a lease lock in a bucket cannot stop a delayed write from landing after another writer takes over. As a
 backstop, the pointer write is conditional, so an accidental second writer fails cleanly instead of overwriting.
@@ -310,12 +312,13 @@ empty counts as unset). A configuration error exits before any request.
 
 `tide status` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
 read from the stored signed part without re-serialising it) and whether `reply/no-update` is present, unreadable or
-missing. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. An unreadable record is
+missing. A rollout prints `<channel> <runtime> <platform> rollout <percent> new <updateId> <createdAt> earlier <kind>
+<updateId|-> <createdAt|commitTime>`, or `earlier none`, with both sides checked. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. An unreadable record is
 reported by its key, the same name a readable row prints, with a fixed reason; a name outside the key grammar and a
 stored field are never printed.
 
 **Project code.** Only `tide export` runs project code, and it reads no credential; the writers (`publish`,
-`rollback`, `republish`, `register-build`) start no process. A child of a process holding a key could read it as the
+`rollout`, `rollback`, `republish`, `register-build`) start no process. A child of a process holding a key could read it as the
 same user, so no environment allowlist would protect a writer that ran Expo.
 
 `tide export --out <dir> [--platform ios|android]... [--runtime-version <v>] [--project-root <dir>]
@@ -350,8 +353,8 @@ shell and an allowlisted environment: `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAG
 one), `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or, when unset or empty, `production`: the
 mode `expo export` forces, so config, runtime and bundle agree.
 
-`tide publish --from <dir> --channel <name>` publishes one update per platform the export names. Exit 0 means every
-pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
+`tide publish --from <dir> --channel <name> [--rollout <percent>]` publishes one update per platform the export names
+(`--rollout`: Staged rollouts). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
 one line per pointer written: `<key> <updateId> <createdAt>`.
 
 **Configuration.** `TIDE_SERVER_URL` (the Tide server) and `TIDE_ASSET_URL` (the bucket's public domain) are each an
@@ -433,6 +436,45 @@ is unreadable or names another ID; a record whose runtime differs from `--runtim
 pointer; a referenced bundle or asset that is not stored; and any asset key two retained records disagree on. A lost
 race or unknown outcome behaves as publish; a record whose PUT has an unknown outcome is named, and no pointer refers
 to it yet.
+
+**Staged rollouts.** `tide publish ... --rollout <percent>` composes and signs as publish does, then writes each
+pointer as a version-2 rollout record (Stored replies). `new` is the reply just signed. `earlier` is the exact stored
+reply the pointer held (a manifest or a rollback), a complete rollout's new reply (what every device was getting), or
+none when there was no pointer, so devices outside the rollout get `reply/no-update`. Over any other rollout it
+refuses: finish that one with `tide rollout complete`, or replace it with a plain publish, republish or rollback. A
+percentage is 0.01 to 99.99 in steps of 0.01, written as a plain decimal (`12.5`); 0 and 100 are `revert` and
+`complete`. A value starting with `-` is a usage error, since the argument parser reads it as an option. stdout and
+exit codes as publish.
+
+`tide rollout <percent>|complete|revert --channel <name> --runtime-version <v> [--platform ios|android]...` rewrites
+each existing rollout from its stored bodies, byte for byte, and signs nothing: it reads the build pins (Keys) and
+needs no key, and refuses a bucket whose `reply/no-update` is absent or signed under another identity. `complete`
+writes the record at 100%, which serves exactly what a version-1 pointer to the new reply serves (GET /manifest).
+`revert` writes it at 0%: every device gets the earlier reply, or `reply/no-update`, except a device already running
+the new update, which keeps getting signed no-update and stays on it. A version-1 pointer to the earlier reply would
+drop that guard, and Expo's filter-aware selection would then move only some of those devices back. To move them all
+off the new update, use `tide rollback --to <earlier updateId>` or `--embedded`, or publish a fix. Both records keep
+the new update's `createdAt`, so later writers still stamp after it. stdout, one line per platform whether written or
+not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused before any write, 1 after.
+
+- **Forward only.** A percentage only rises. The same percentage writes nothing, and a lower one refuses: lowering
+  never moves a device back, since a client applies only a newer `createdAt`, so use `revert` or `tide rollback`.
+  `complete` and `revert` end a rollout; rerunning either writes nothing and any other rollout command refuses. The
+  rollout commands stamp no time, and disk ETags (SHA-256) and S3 and R2 single-part ETags (MD5) are content hashes,
+  so this rule is what keeps a key from returning to bytes it held: a delayed PUT conditioned on an earlier record's
+  ETag can then never land over a later identical one.
+- **Copied bodies are verified.** Every body a write copies (both sides for `tide rollout`, the kept reply for
+  `publish --rollout`) must verify under the configured certificate and `keyid`, whatever `reply/no-update` holds.
+  Plain publish, republish and rollback copy nothing, so they still replace a pointer that fails; that repairs it.
+- **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
+  version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
+- **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
+  writes nothing to a target already at its goal. `publish --rollout` skips a target whose rollout is at the same
+  percentage and whose new update's release record is the one this export would write there (same code, channel,
+  URLs and `expoClient`), once both its sides verify, and prints that target's stored line; at another percentage it
+  refuses. So a rerun after a partial write, or after a committed PUT whose response was lost, writes only the
+  targets left.
+- **Probe.** `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side.
 
 `tide storage` reports, read-only, every object under `assets/`, `bundles/` and `updates/` that nothing
 references, one `<name> <bytes>` row each in byte order, then `<n> unreferenced objects, <total> bytes`. Referenced
@@ -536,7 +578,8 @@ credential or provider text.
 **One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
 exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
 certificate and `keyid`. When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
-the same way (an empty `reply/` is a new bucket), so no writer repairs another identity's bucket. A new key or key
+the same way, both bodies of a rollout included (an empty `reply/` is a new bucket), so no writer repairs another
+identity's bucket. A new key or key
 ID therefore needs a new bucket and `updates.url`. `publish`, `rollback` and `republish` create a missing
 `reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; and they re-check
 the certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer

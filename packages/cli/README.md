@@ -25,6 +25,8 @@ every signature against your app's certificate, and writes to the bucket named b
 
 | Command                         | What it does                                                |
 | ------------------------------- | ----------------------------------------------------------- |
+| `tide publish --rollout <p>`    | Sends a new update to a share of devices                    |
+| `tide rollout`                  | Raises a rollout's share, sends it to everyone, or stops it |
 | `tide register-build`           | Lets fresh installs get a patch instead of the whole bundle |
 | `tide rollback --embedded`      | Sends apps back to the bundle inside the store build        |
 | `tide rollback --to <updateId>` | Serves an earlier update again                              |

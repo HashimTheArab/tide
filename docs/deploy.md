@@ -105,7 +105,7 @@ so a mismatched runtime looks healthy until the probe, run with the build's own 
 ## Publishing
 
 Only `tide export` runs project code (the app config, Babel and Metro), and it reads no credential. The writers
-(`publish --from`, `rollback`, `republish`, `register-build`) start no process (`design.md`, CLI). The two run in
+(`publish --from`, `rollout`, `rollback`, `republish`, `register-build`) start no process (`design.md`, CLI). The two run in
 separate jobs of one workflow:
 
 - **Export job.** A GitHub-hosted runner; `permissions: contents: read`; no `environment`, no `secrets.*`, no
@@ -172,7 +172,8 @@ The writer job also reads `TIDE_BUILD_KEYID` and the build certificate, and refu
 `keyid` is not the builds'. What it cannot prove is that the directory is the one this run exported: that is the
 binding above.
 
-**One concurrency group.** Every writer for a bucket is a job in one repository sharing one `concurrency` group with
+**One concurrency group.** Every writer for a bucket (`publish`, `rollout`, `rollback`, `republish` and
+`register-build`) is a job in one repository sharing one `concurrency` group with
 `cancel-in-progress: false` and `queue: max`; the export job is outside it. GitHub does not guarantee queue order
 ([Workflow syntax, `concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)),
 so the head check, not the queue, keeps older code from publishing over newer.
@@ -182,6 +183,28 @@ nothing. Never use Re-run on a writer job: the rerun queues again, so another wr
 still ends without exit 0 (timeout, cancellation or runner loss), start a new run at the branch head. It starts from
 what the bucket holds (`design.md`, Bucket configuration). For `register-build`, `design.md`'s key check is the
 backstop.
+
+### Staged rollouts
+
+Deploy the server first: the stored record a rollout writes is read only by servers from the same release
+([Upgrade order](#upgrade-order)). Then publish to a share of devices, picked per install by `EAS-Client-ID`:
+
+```sh
+tide publish --from "$RUNNER_TEMP/export" --channel main --rollout 10
+tide rollout 50 --channel main --runtime-version 1.0.0
+tide rollout complete --channel main --runtime-version 1.0.0
+```
+
+- `tide rollout` is a writer: run it as a job in the same concurrency group, in the same retry loop as publish. It
+  signs nothing, so it needs the build pins and the bucket but no signing key.
+- A percentage only rises. Lowering it would never move a device back (a client applies only a newer `createdAt`),
+  so it is refused. `tide rollout revert` serves the earlier reply to every device that has not yet taken the new
+  update; devices already on it stay there. To move those back too, use `tide rollback --to <earlier updateId>` or
+  `tide rollback --embedded`, or publish a fix.
+- `complete` and `revert` end a rollout. The next `tide publish --rollout` starts another over a complete one; over
+  one in progress or reverted it refuses, so finish it or replace it with a plain publish, republish or rollback.
+- `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side, and `tide status` prints each
+  rollout's percentage and both sides.
 
 ## Routine deploys
 
@@ -211,9 +234,11 @@ How production is gated depends on the GitHub plan:
 A release whose CLI writes a new stored reply version (`design.md`, Stored replies) needs servers that read it first.
 Deploy a server release that reads the version to every server sharing the bucket, staging and production, Workers
 and containers, before raising the CLI version pinned in the publish workflow to one that writes it. Version 2
-(rollouts) is read by servers from the release that added it; no CLI writes it yet. Never roll a server back below
-that release while any pointer holds the version: an older server answers 503 for that pointer, so first replace
-each such pointer with a version-1 reply.
+(rollouts) is read by servers and written by the CLI (`tide publish --rollout`, `tide rollout`) from the same
+release, so deploy that server everywhere before using any CLI that writes version 2. Never roll a server or the
+pinned CLI back below that release while any pointer holds the version, a complete or reverted rollout included: an
+older server answers 503 for that pointer and an older CLI refuses to write over it, so first replace each such
+pointer with a plain publish, republish or rollback.
 
 ## The container
 
