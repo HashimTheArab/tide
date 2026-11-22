@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-21
+updated: 2026-11-22
 ---
 
 # Deploying
@@ -14,8 +14,8 @@ are placeholders.
 [`examples/operator/`](../examples/operator/) is the reference, built with `wrangler deploy --dry-run` and tested on
 workerd in Tide's gate:
 
-- `package.json` depends on `@tide-ota/server`. Until it is on npm, the project lives in a checkout of Tide's workspace
-  like the example.
+- `package.json` depends on `@tide-ota/server` from npm (`npm install @tide-ota/server`) and on `wrangler`. The
+  example links the workspace copy instead, so the gate tests it against the current source.
 - `worker.ts` is one line: `export { default } from "@tide-ota/server/workers";`. The Worker is configured only by its
   bindings and vars.
 - `wrangler.jsonc` has a top-level `name`, `main` and `compatibility_date`, and one block per environment under
@@ -109,26 +109,32 @@ Only `tide export` runs project code (the app config, Babel and Metro), and it r
 separate jobs of one workflow:
 
 - **Export job.** A GitHub-hosted runner; `permissions: contents: read`; no `environment`, no `secrets.*`, no
-  `id-token`, and no credential in its environment, files or profiles. It checks out the app and Tide at a pinned
-  commit, both with `persist-credentials: false` (otherwise `actions/checkout` leaves the job token in `.git/config`,
-  where project code can read it), runs `tide export --out <dir>`, and uploads `<dir>` with `actions/upload-artifact`, exposing its
-  `artifact-id` output as a job output. Expo's tools get only an allowlisted environment (`design.md`, CLI); pass
-  anything else the app config needs with `--pass-env`.
+  `id-token`, and no credential in its environment, files or profiles. It checks out the app with
+  `persist-credentials: false` (otherwise `actions/checkout` leaves the job token in `.git/config`, where project code
+  can read it), installs the app's dependencies, `@tide-ota/cli` among them, runs `npx tide export --out <dir>`, and
+  uploads `<dir>` with `actions/upload-artifact`, exposing its `artifact-id` output as a job output. Expo's tools get
+  only an allowlisted environment (`design.md`, CLI); pass anything else the app config needs with `--pass-env`.
 - **Writer job.** `needs` the export job and runs in the protected environment holding the key and bucket secrets.
   - **Runner.** GitHub-hosted, or a self-hosted runner freshly provisioned or reset for each job: a just-in-time
     registration limits a runner to one job, but a reused host keeps files and processes from earlier ones. Never a
     runner that could have run an export job. GitHub, Security hardening: hosted runners "execute code within
     ephemeral and clean isolated virtual machines"; self-hosted runners "can be persistently compromised by untrusted
     code in a workflow".
-  - **Trusted CLI.** It checks out only Tide, at a commit SHA written in the workflow file (never one the export job
-    chose), with `persist-credentials: false`. Node comes from that checkout's `.nvmrc` and pnpm from its
-    `package.json` (`pnpm/action-setup` with `package_json_file`; Node 26 does not bundle Corepack). From that
-    checkout it runs `pnpm install --frozen-lockfile --prod --ignore-scripts --filter "@tide-ota/cli..."`, then
-    `node packages/cli/src/main.ts publish --from <path> --channel <name>`. The app is never checked out; it is
-    present only as artifact data.
+  - **Trusted CLI.** It installs `@tide-ota/cli` at an exact version written in the workflow file, kept equal to the
+    app's (never one the export job chose), into a fresh directory under `${{ runner.temp }}`, on Node 24.11 or later
+    from `actions/setup-node`, and checks its registry signatures and provenance before running it. The CLI's only
+    dependency is `@tide-ota/protocol` at the same version, and npm never reuses a version, so that one version pins
+    every byte the job runs. The app is never checked out; it is present only as artifact data.
+
+    ```sh
+    npm install --prefix "$RUNNER_TEMP/tide" --ignore-scripts --no-fund @tide-ota/cli@0.1.0
+    npm audit signatures --prefix "$RUNNER_TEMP/tide"
+    echo "$RUNNER_TEMP/tide/node_modules/.bin" >> "$GITHUB_PATH"
+    ```
+
   - **Binding.** A step fails when the export job's `artifact-id` is empty. `actions/download-artifact` takes it as
     `artifact-ids` (not `name`), with `digest-mismatch: error` and `path` a fresh directory under
-    `${{ runner.temp }}`, outside the Tide checkout. A single artifact by ID is "extracted directly to the specified
+    `${{ runner.temp }}`, outside the CLI's directory. A single artifact by ID is "extracted directly to the specified
     path" (`actions/download-artifact` v8.0.2 README).
   - **Head check.** Once, at the start of the job and before downloading, a publish checks through the GitHub API
     that its commit is still the branch head, as [`examples/deploy-workers.yml`](examples/deploy-workers.yml) does
@@ -146,7 +152,7 @@ separate jobs of one workflow:
     ```sh
     for attempt in 1 2 3 4 5; do
       status=0
-      node packages/cli/src/main.ts publish --from "$RUNNER_TEMP/export" --channel main || status=$?
+      tide publish --from "$RUNNER_TEMP/export" --channel main || status=$?
       if [ "$status" -ne 1 ]; then exit "$status"; fi
       sleep 30
     done
@@ -193,7 +199,15 @@ How production is gated depends on the GitHub plan:
 
 ## The container
 
-`packages/server/Dockerfile` runs the Node entry. Build it from the repository root with BuildKit, which reads
+The Node entry runs from the npm package in any image with Node 24.11 or later:
+
+```sh
+npm install @tide-ota/server
+node node_modules/@tide-ota/server/dist/node.js
+```
+
+Tide's repository also has a reference image, `packages/server/Dockerfile`, which CI's `container` job tests and
+the list under the table describes. Build it from a checkout's root with BuildKit, which reads
 `packages/server/Dockerfile.dockerignore`; a builder that reads only the root `.dockerignore` gets an empty context
 and fails:
 
