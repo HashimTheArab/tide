@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -283,6 +284,20 @@ describe("openTree", () => {
 
     for (const path of built) expect(existsSync(path), path).toBe(false);
     expect(readFileSync(join(tree.dir, "marker.js"), "utf8")).toBe(marker);
+  });
+
+  test("refuses an app dir that links out of the cache and deletes nothing through it", async () => {
+    const work = scratch();
+    const outside = scratch();
+    const precious = join(outside, "tmp", "precious");
+    mkdirSync(dirname(precious));
+    writeFileSync(precious, "keep");
+    symlinkSync(outside, join(work, "sdk-55"));
+
+    await expect(openTree("sdk-55", APPS["sdk-55"], work)).rejects.toThrow("not a directory");
+
+    expect(readFileSync(precious, "utf8")).toBe("keep");
+    expect(readdirSync(outside)).toEqual(["tmp"]);
   });
 
   test("builds the start commit under a git config that signs every commit and tag", async () => {

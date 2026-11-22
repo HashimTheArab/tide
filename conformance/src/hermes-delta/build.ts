@@ -6,6 +6,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -70,6 +71,11 @@ export async function openTree(app: AppId, pin: AppPin, work: string): Promise<T
     log: join(appWork, "log.txt"),
     tmp: join(appWork, "tmp"),
   };
+  // A link would make the deletes below reach a directory this cache does not own.
+  const stat = lstatSync(appWork, { throwIfNoEntry: false });
+  if (stat !== undefined && !stat.isDirectory()) {
+    throw new Error(`${appWork} is not a directory; not deleting through it`);
+  }
   const key = startKey(pin);
   const keyFile = join(tree.dir, ".git", "hermes-delta-start");
   mkdirSync(tree.tmp, { recursive: true });
