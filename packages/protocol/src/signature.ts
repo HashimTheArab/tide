@@ -238,13 +238,18 @@ export const MAX_CHAIN_CERTIFICATES = 8;
 const CHAIN_GRAMMAR = "must be PEM CERTIFICATE blocks separated by single line ends";
 
 /**
- * Returns the DER of each block of a `certificate_chain` part body, leaf first. Stricter than the client: the body
- * is ASCII and holds nothing but blocks, separated by one line end, with one optional trailing line end.
+ * Returns the DER of each block of a `certificate_chain` part body, leaf first, reported against `field`. Stricter
+ * than the client: the body is ASCII and holds nothing but blocks, separated by one line end, with one optional
+ * trailing line end.
  */
-function readCertificateChain(body: Uint8Array): Uint8Array<ArrayBuffer>[] {
-  const fail = (message: string) => new ProtocolError("certificate_chain", message);
-  if (body.length === 0 || body.length > MAX_CHAIN_BYTES) {
-    throw fail(`must be 1 to ${MAX_CHAIN_BYTES} bytes`);
+function readCertificateChain(
+  body: Uint8Array,
+  field: string,
+  maxBytes: number,
+): Uint8Array<ArrayBuffer>[] {
+  const fail = (message: string) => new ProtocolError(field, message);
+  if (body.length === 0 || body.length > maxBytes) {
+    throw fail(`must be 1 to ${maxBytes} bytes`);
   }
   let text = "";
   for (const byte of body) {
@@ -278,27 +283,52 @@ export async function certificateChain(
   root: string,
   now: Date,
 ): Promise<CryptoKey> {
+  const ders =
+    served === undefined ? [] : readCertificateChain(served, "certificate_chain", MAX_CHAIN_BYTES);
+  const rootDer = pemCertificateDer(root, "+", (message) => chainError(`root ${message}`));
+  const { members, top } = await linkedChain([...ders, rootDer], now, (i) =>
+    i === 0 ? "leaf" : `intermediate ${i}`,
+  );
+  const leaf = members[0] ?? top;
+  if (members.length > 1) checkAuthorities(top, members.slice(1, -1));
+  if (!hasKeyUsage(leaf.keyUsage, DIGITAL_SIGNATURE)) {
+    throw chainError("leaf must have Key Usage digitalSignature");
+  }
+  if (!leaf.extendedKeyUsages.includes(CODE_SIGNING)) {
+    throw chainError("leaf must have Extended Key Usage codeSigning");
+  }
+  checkProject(members);
+  return leaf.key;
+}
+
+const chainError = (message: string) => new ProtocolError("certificate_chain", message);
+
+/**
+ * Returns the members of `ders` (root last), each valid at `now`, linked by name and signature to a self-signed root;
+ * `role` names each one below the root.
+ */
+async function linkedChain(
+  ders: readonly Uint8Array<ArrayBuffer>[],
+  now: Date,
+  role: (index: number) => string,
+): Promise<{ readonly members: Member[]; readonly top: Member }> {
   // A NaN instant would pass every validity comparison.
   if (Number.isNaN(now.getTime())) throw new ProtocolError("now", "must be a valid Date");
-  const fail = (message: string) => new ProtocolError("certificate_chain", message);
-  const ders = served === undefined ? [] : readCertificateChain(served);
-  const rootDer = pemCertificateDer(root, "+", (message) => fail(`root ${message}`));
   const members: Member[] = [];
   for (const [i, der] of ders.entries()) {
-    members.push(await chainMember(der, now, i === 0 ? "leaf" : `intermediate ${i}`));
+    members.push(await chainMember(der, now, i === ders.length - 1 ? "root" : role(i)));
   }
-  const top = await chainMember(rootDer, now, "root");
-  const leaf = members[0] ?? top;
-  members.push(top);
+  const top = members.at(-1);
+  if (top === undefined) throw chainError("must hold a root");
 
   for (const [i, child] of members.entries()) {
     const issuer = members[i + 1];
     if (issuer === undefined) break;
     if (!same(child.issuer, issuer.subject)) {
-      throw fail(`${child.role} is not issued by the certificate above it`);
+      throw chainError(`${child.role} is not issued by the certificate above it`);
     }
     if (!(await signedBy(child.der, child.cert, issuer.key))) {
-      throw fail(`${child.role} has a signature that does not verify under its issuer's key`);
+      throw chainError(`${child.role} has a signature that does not verify under its issuer's key`);
     }
     // Apple's trust evaluation links a child's authority key ID to its issuer's subject key ID.
     if (
@@ -306,41 +336,41 @@ export async function certificateChain(
       issuer.subjectKeyId &&
       !same(child.authorityKeyId, issuer.subjectKeyId)
     ) {
-      throw fail(`${child.role} names another authority key identifier than its issuer's`);
+      throw chainError(`${child.role} names another authority key identifier than its issuer's`);
     }
   }
   for (const [i, m] of members.entries()) {
     if (members.some((o, j) => j > i && same(o.subject, m.subject))) {
-      throw fail(`${m.role} has the subject of another certificate in the chain`);
+      throw chainError(`${m.role} has the subject of another certificate in the chain`);
     }
   }
-  if (!same(top.issuer, top.subject)) throw fail("root must be self-issued");
+  if (!same(top.issuer, top.subject)) throw chainError("root must be self-issued");
   if (!(await signedBy(top.der, top.cert, top.key))) {
-    throw fail("root has a self-signature that does not verify");
+    throw chainError("root has a self-signature that does not verify");
   }
+  return { members, top };
+}
 
-  if (members.length > 1) {
-    const isCa = (m: Member) => m.ca && hasKeyUsage(m.keyUsage, KEY_CERT_SIGN);
-    if (!isCa(top)) throw fail("root must be a CA with Key Usage keyCertSign");
-    let maxPathLen = top.pathLen;
-    // Android's walk, from the intermediate under the root down to the one above the leaf.
-    for (const m of members.slice(1, -1).reverse()) {
-      if (!isCa(m)) throw fail(`${m.role} must be a CA with Key Usage keyCertSign`);
-      if (maxPathLen <= 0) throw fail(`${m.role} exceeds the path length its issuers allow`);
-      maxPathLen = Math.min(maxPathLen - 1, m.pathLen);
-    }
+/** Android's CA walk: `top` and each of `intermediates` (leaf side first) a CA, within every path length above it. */
+function checkAuthorities(top: Member, intermediates: readonly Member[]): void {
+  const isCa = (m: Member) => m.ca && hasKeyUsage(m.keyUsage, KEY_CERT_SIGN);
+  if (!isCa(top)) throw chainError("root must be a CA with Key Usage keyCertSign");
+  let maxPathLen = top.pathLen;
+  // From the intermediate under the root down to the one above the leaf.
+  for (const m of [...intermediates].reverse()) {
+    if (!isCa(m)) throw chainError(`${m.role} must be a CA with Key Usage keyCertSign`);
+    if (maxPathLen <= 0) throw chainError(`${m.role} exceeds the path length its issuers allow`);
+    maxPathLen = Math.min(maxPathLen - 1, m.pathLen);
   }
-  if (!hasKeyUsage(leaf.keyUsage, DIGITAL_SIGNATURE)) {
-    throw fail("leaf must have Key Usage digitalSignature");
-  }
-  if (!leaf.extendedKeyUsages.includes(CODE_SIGNING)) {
-    throw fail("leaf must have Extended Key Usage codeSigning");
-  }
-  // The client makes every certificate below one with project information carry it too, then checks the leaf's
-  // against the reply's EAS project, which Tide's replies never name. Checked last, so every client rule runs first.
+}
+
+/**
+ * The client makes every certificate below one with project information carry it too, then checks the leaf's
+ * against the reply's EAS project, which Tide's replies never name. Checked last, so every client rule runs first.
+ */
+function checkProject(members: readonly Member[]): void {
   const carrier = members.find((m) => m.project);
-  if (carrier) throw fail(`${carrier.role} must not carry Expo project information`);
-  return leaf.key;
+  if (carrier) throw chainError(`${carrier.role} must not carry Expo project information`);
 }
 
 const DIGITAL_SIGNATURE = 0;
@@ -354,6 +384,7 @@ interface Member {
   readonly issuer: Uint8Array;
   readonly subject: Uint8Array;
   readonly key: CryptoKey;
+  readonly notAfter: number; // Epoch ms.
   readonly ca: boolean;
   readonly pathLen: number; // Infinity when absent.
   readonly keyUsage: KeyUsage | undefined;
@@ -425,6 +456,7 @@ async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Pr
     issuer: bytesOf(der, cert.issuer),
     subject: bytesOf(der, cert.subject),
     key,
+    notAfter,
     ...basicConstraints(value(BASIC_CONSTRAINTS), malformed),
     keyUsage: usage === undefined ? undefined : keyUsage(usage, malformed),
     extendedKeyUsages: usages,
@@ -922,26 +954,37 @@ export function readTlv(der: Uint8Array, start: number, limit: number): Tlv {
   return { tag, start, body, end: body + length };
 }
 
-/** What a self-signed direct-signing certificate names; each date is whole seconds from 1950 through 9999. */
-export interface SelfSignedFields {
+/** Largest issuer path `issuerPath` reads; the root is embedded, not served, so it may exceed `MAX_CHAIN_BYTES`. */
+export const MAX_ISSUER_BYTES = 65_536;
+
+/** What a certificate names; each date is whole seconds from 1950 through 9999. */
+export interface CertificateFields {
   readonly spki: Uint8Array; // SubjectPublicKeyInfo DER, embedded as given.
-  readonly commonName: string; // The subject's and issuer's only attribute.
+  readonly commonName: string; // The subject's only attribute.
   readonly notBefore: Date;
   readonly notAfter: Date;
+  readonly issuer?: Uint8Array | undefined; // The issuer's subject Name DER, inserted as given. Absent: self-issued.
+  readonly ca?: { readonly pathLen?: number } | undefined; // A CA certificate, with pathLen 0 to 127 when given.
 }
 
 const COMMON_NAME = "2.5.4.3";
 const TRUE = new Uint8Array([BOOLEAN, 1, 0xff]);
 const DIGITAL_SIGNATURE_ONLY = new Uint8Array([BIT_STRING, 2, 7, 0x80]);
+const KEY_CERT_SIGN_ONLY = new Uint8Array([BIT_STRING, 2, 2, 0x04]);
 
 /**
- * Returns the PEM of a v3 certificate whose TBSCertificate `sign` signs with RSASSA-PKCS1-v1_5 SHA-256; its only
- * extensions are critical Key Usage digitalSignature and Extended Key Usage codeSigning.
+ * Returns the PEM of a v3 certificate whose TBSCertificate `sign` signs with RSASSA-PKCS1-v1_5 SHA-256. A code-signing
+ * certificate has critical Key Usage digitalSignature and Extended Key Usage codeSigning; a CA has critical Basic
+ * Constraints and critical Key Usage keyCertSign.
  */
-export async function selfSignedCertificate(
-  { spki, commonName, notBefore, notAfter }: SelfSignedFields,
+export async function signedCertificate(
+  { spki, commonName, notBefore, notAfter, issuer, ca }: CertificateFields,
   sign: Signer["sign"],
 ): Promise<string> {
+  const pathLen = ca?.pathLen;
+  if (pathLen !== undefined && !(Number.isInteger(pathLen) && pathLen >= 0 && pathLen <= 127)) {
+    throw new ProtocolError("certificate", "pathLen must be a whole number from 0 to 127");
+  }
   const algorithm = derTlv(SEQUENCE, derOid(SHA256_WITH_RSA), NULL);
   const cn = new TextEncoder().encode(commonName);
   const name = derTlv(
@@ -950,32 +993,85 @@ export async function selfSignedCertificate(
   );
   const random = crypto.getRandomValues(new Uint8Array(16));
   random[0] = 0x40 | ((random[0] ?? 0) & 0x3f); // Positive, and 16 octets once minimal.
+  const extension = (id: string, critical: boolean, value: Uint8Array) =>
+    derTlv(SEQUENCE, derOid(id), ...(critical ? [TRUE] : []), derTlv(OCTET_STRING, value));
+  const extensions =
+    ca === undefined
+      ? [
+          extension(KEY_USAGE, true, DIGITAL_SIGNATURE_ONLY),
+          extension(EXT_KEY_USAGE, false, derTlv(SEQUENCE, derOid(CODE_SIGNING))),
+        ]
+      : [
+          extension(
+            BASIC_CONSTRAINTS,
+            true,
+            derTlv(
+              SEQUENCE,
+              TRUE,
+              ...(pathLen === undefined ? [] : [derTlv(INTEGER, Uint8Array.of(pathLen))]),
+            ),
+          ),
+          extension(KEY_USAGE, true, KEY_CERT_SIGN_ONLY),
+        ];
   const tbs = derTlv(
     SEQUENCE,
     V3,
     derTlv(INTEGER, random),
     algorithm,
-    name, // Issuer, the same bytes as the subject.
+    issuer ?? name,
     derTlv(SEQUENCE, derTime(notBefore), derTime(notAfter)),
     name,
     spki,
-    derTlv(
-      EXTENSIONS,
-      derTlv(
-        SEQUENCE,
-        derTlv(SEQUENCE, derOid(KEY_USAGE), TRUE, derTlv(OCTET_STRING, DIGITAL_SIGNATURE_ONLY)),
-        derTlv(
-          SEQUENCE,
-          derOid(EXT_KEY_USAGE),
-          derTlv(OCTET_STRING, derTlv(SEQUENCE, derOid(CODE_SIGNING))),
-        ),
-      ),
-    ),
+    derTlv(EXTENSIONS, derTlv(SEQUENCE, ...extensions)),
   );
   const signature = await sign(tbs);
-  const der = derTlv(SEQUENCE, tbs, algorithm, derTlv(BIT_STRING, new Uint8Array([0]), signature));
+  return certificatePem(
+    derTlv(SEQUENCE, tbs, algorithm, derTlv(BIT_STRING, new Uint8Array([0]), signature)),
+  );
+}
+
+/** Returns `der` as one CERTIFICATE block of 64-column lines, ending in a line end. */
+function certificatePem(der: Uint8Array): string {
   const lines = base64(der).match(/.{1,64}/g) ?? [];
   return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
+}
+
+/** The certificate an issued certificate names as its issuer, and the path above it. */
+export interface IssuerPath {
+  readonly subject: Uint8Array; // The issuing certificate's subject Name DER.
+  readonly spkis: readonly [Uint8Array, ...Uint8Array[]]; // Each member's SubjectPublicKeyInfo DER, the issuing certificate's first.
+  readonly notAfter: number; // The earliest notAfter on the path, in epoch ms.
+  readonly served: string | undefined; // Canonical PEMs below the root, issuer first; undefined for a root.
+  readonly root: string; // The root's canonical PEM.
+}
+
+/**
+ * Returns the issuer path in `bytes`: the issuing certificate first, then each one above it, the root last, in the
+ * `certificate_chain` grammar. Refuses unless it is a CA path at `now` that a certificate issued under its first
+ * member extends within the client's chain rules: every member a CA with keyCertSign, path lengths counting the
+ * first member as an intermediate.
+ */
+export async function issuerPath(bytes: Uint8Array, now: Date): Promise<IssuerPath> {
+  const ders = readCertificateChain(bytes, "issuer", MAX_ISSUER_BYTES);
+  const below = ders.slice(0, -1).map(certificatePem).join("");
+  if (below.length > MAX_CHAIN_BYTES) {
+    throw new ProtocolError(
+      "issuer",
+      `must hold at most ${MAX_CHAIN_BYTES} bytes of certificates below the root, the most a reply serves`,
+    );
+  }
+  const { members, top } = await linkedChain(ders, now, (i) => `intermediate ${i + 1}`);
+  checkAuthorities(top, members.slice(0, -1));
+  checkProject(members);
+  const first = members[0] ?? top;
+  const spkiOf = (m: Member) => bytesOf(m.der, m.cert.spki).slice();
+  return {
+    subject: first.subject.slice(),
+    spkis: [spkiOf(first), ...members.slice(1).map(spkiOf)],
+    notAfter: Math.min(...members.map((m) => m.notAfter)),
+    served: below === "" ? undefined : below,
+    root: certificatePem(top.der),
+  };
 }
 
 /** Returns one DER TLV with a minimal definite length, as `readTlv` reads; `tag` must have a low tag number. */
