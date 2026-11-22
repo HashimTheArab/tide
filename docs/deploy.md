@@ -250,7 +250,8 @@ binding above.
 `register-build`) is a job in one repository sharing one `concurrency` group with
 `cancel-in-progress: false` and `queue: max`; the export job is outside it. GitHub does not guarantee queue order
 ([Workflow syntax, `concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)),
-so the head check, not the queue, keeps older code from publishing over newer.
+so the head check, not the queue, keeps older code from publishing over newer. A bucket's writers share its group
+whatever keyid they sign for.
 
 **Recovery.** A writer retries itself in the same job while it exits 1, so it keeps the group's slot. Exit 2 wrote
 nothing. Never use Re-run on a writer job: the rerun queues again, so another writer can run before it. If a job

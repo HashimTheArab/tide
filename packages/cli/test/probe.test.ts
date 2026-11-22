@@ -29,12 +29,15 @@ import {
   MAIN,
   T,
   diskObjects,
+  entryOf,
   env,
+  identitiesNoUpdate,
   main,
   other,
   artifact,
   s3,
   s3Env,
+  seededPointer,
   signedManifest,
   useFixture,
 } from "./publish-fixture.ts";
@@ -296,6 +299,67 @@ describe.each([
     expect(await tide(args(base))).toEqual(
       failure(PROBE_EXIT.bundleMissing, "GET launch asset answered 404"),
     );
+  });
+
+  test("each pinned keyid is sent, and gets and verifies its own identity's entry or no-update", async () => {
+    const { base, updateId, hash, launchUrl } = store.published();
+    const rootId = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
+    const manifest = async (id: string, by: typeof main, keyid: string) => {
+      const body = buildManifest({
+        id,
+        createdAt: new Date(T),
+        runtimeVersion: "1.0.0",
+        launchAsset: {
+          hash,
+          contentType: "application/javascript",
+          fileExtension: ".bundle",
+          url: launchUrl,
+        },
+        assets: [],
+        metadata: {},
+        extra: {},
+      });
+      const signature = await expoSignature(body, cryptoKeySigner(by.keys.privateKey, keyid));
+      const multipart = encodeMultipart([{ name: "manifest", body, signature }]);
+      return { kind: "manifest" as const, updateId: id, manifestFilters: "", ...multipart };
+    };
+    const ios = new Map([
+      ["main", await manifest(updateId, main, "main")],
+      ["root", await manifest(rootId, other, "root")],
+    ]);
+    store.put(IOS, encodeIdentityPointer(ios));
+    const rollbackOfMain = entryOf(await seededPointer("rollback", T, main));
+    store.put(
+      "reply/main/1.0.0/android",
+      encodeIdentityPointer(new Map([["main", rollbackOfMain]])),
+    );
+    store.put("reply/no-update", await identitiesNoUpdate({ main, root: other }));
+    const sent: (string | null)[] = [];
+    const watched = await proxy(base, {
+      request: (h) => {
+        sent.push(h.get("expo-expect-signature"));
+      },
+    });
+    const verified = (id: string) => ({
+      code: 0,
+      stdout: `manifest ${id}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
+      stderr: "",
+    });
+    expect(await tide(args(watched))).toEqual(verified(updateId));
+    const root = pins(other.certificate, "root");
+    expect(await tide(args(watched), root)).toEqual(verified(rootId));
+    // The Android pointer has no root entry, so root gets its own no-update.
+    expect(await tide(args(watched, "main", [], "android"), root)).toEqual({
+      code: 0,
+      stdout:
+        "directive noUpdateAvailable: signature verified; a directive has no bundle to check\n",
+      stderr: "",
+    });
+    expect(sent).toEqual([
+      'sig, keyid="main", alg="rsa-v1_5-sha256"',
+      'sig, keyid="root", alg="rsa-v1_5-sha256"',
+      'sig, keyid="root", alg="rsa-v1_5-sha256"',
+    ]);
   });
 
   test("a version-3 entry whose multipart body is over MAX_REPLY_BYTES passes", async () => {

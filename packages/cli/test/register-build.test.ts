@@ -3,7 +3,13 @@ import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
 import type { BaseAsset } from "@tide-ota/protocol";
-import { baseKey, contentKey, encodeBaseRecord, sha256Base64Url } from "@tide-ota/protocol";
+import {
+  baseKey,
+  contentKey,
+  encodeBaseRecord,
+  encodeIdentityPointer,
+  sha256Base64Url,
+} from "@tide-ota/protocol";
 
 import { encodeRecord, recordKey } from "../src/publish-record.ts";
 import { publish } from "../src/publish.ts";
@@ -18,9 +24,13 @@ import {
   MAIN,
   PNG_MD5,
   SERVER_URL,
+  T,
   artifact,
+  directBinding,
   diskObjects,
+  entryOf,
   env,
+  identitiesNoUpdate,
   identity,
   main,
   noUpdateBy,
@@ -29,6 +39,7 @@ import {
   s3,
   s3Env,
   s3Snapshot,
+  seededPointer,
   serveMain,
   tree,
   useFixture,
@@ -504,6 +515,94 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       expect(s3.puts).toEqual([]);
     },
   );
+
+  describe("several keyids", () => {
+    const IOS = "reply/main/1.0.0/ios";
+    const rootPins = () => ({
+      TIDE_BUILD_KEYID: "root",
+      TIDE_BUILD_CERTIFICATE: otherIdentity.certificate,
+    });
+    /** main and root in reply/no-update and a pointer, both bound; `change` replaces objects before the snapshot. */
+    async function twoIdentities(change: Record<string, Uint8Array<ArrayBuffer>> = {}) {
+      const store = STORES[kind]();
+      const bucket = bucketFromEnv(store.env);
+      const pointer = new Map([
+        ["main", entryOf(await seededPointer("manifest", T, main))],
+        ["root", entryOf(await seededPointer("rollback", T, otherIdentity, "root"))],
+      ]);
+      const seed = {
+        "reply/no-update": await identitiesNoUpdate({ main, root: otherIdentity }),
+        [IOS]: encodeIdentityPointer(pointer),
+        ...Object.fromEntries([
+          await directBinding(main),
+          await directBinding(otherIdentity, "root"),
+        ]),
+        ...change,
+      };
+      for (const [key, bytes] of Object.entries(seed)) await bucket.put(key, bytes);
+      s3.puts.length = 0;
+      return store;
+    }
+    const replies = (store: Store) =>
+      [...store.objects()].filter(([key]) => key.startsWith("reply/"));
+
+    test("main and root each register on a version-3 bucket, and every reply keeps its bytes", async () => {
+      const store = await twoIdentities();
+      const before = replies(store);
+      expect((await register(args(build()), store)).code).toBe(0);
+      expect((await register(args(build({ id: OTHER_ID })), store, rootPins())).code).toBe(0);
+      expect(replies(store)).toEqual(before);
+    });
+
+    test.each<[string, () => Promise<Record<string, Uint8Array<ArrayBuffer>>>, string]>([
+      [
+        "main's reply/no-update entry under another certificate",
+        async () => ({ "reply/no-update": await identitiesNoUpdate({ main: otherIdentity }) }),
+        'reply/no-update: keyid "main" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid',
+      ],
+      [
+        "a reply/no-update without main's entry",
+        async () => ({ "reply/no-update": await identitiesNoUpdate({ root: otherIdentity }) }),
+        'reply/no-update holds no reply for keyid "main": tide publish, republish or rollback writes it',
+      ],
+    ])("%s is refused", async (_, change, message) => {
+      const store = await twoIdentities(await change());
+      const before = store.snapshot();
+      expect(await register(args(build()), store)).toEqual({
+        code: 2,
+        out: [],
+        err: [`tide: ${message}`],
+      });
+      expect(store.snapshot()).toEqual(before);
+    });
+
+    test("a version-1 reply/no-update beside a version-3 pointer is refused: the server cannot serve it", async () => {
+      const store = await twoIdentities({ "reply/no-update": await noUpdateBy(main) });
+      const before = store.snapshot();
+      expect(await register(args(build()), store)).toEqual({
+        code: 2,
+        out: [],
+        err: [
+          `tide: ${IOS} holds replies for several keyids, but reply/no-update holds one reply for every keyid`,
+        ],
+      });
+      expect(store.snapshot()).toEqual(before);
+    });
+
+    test("root is refused while a legacy pointer serves main's reply to every keyid", async () => {
+      const store = await twoIdentities({ [IOS]: await seededPointer("manifest", T, main) });
+      const before = store.snapshot();
+      expect(await register(args(build()), store, rootPins())).toEqual({
+        code: 2,
+        out: [],
+        err: [
+          `tide: ${IOS} still serves another keyid's reply to every keyid: keyid "root" is served only once tide publish has converted every pointer`,
+        ],
+      });
+      expect(store.snapshot()).toEqual(before);
+      expect((await register(args(build()), store)).code).toBe(0);
+    });
+  });
 
   test("an unreadable base record refuses, since the key check cannot be proven", async () => {
     const store = await open();

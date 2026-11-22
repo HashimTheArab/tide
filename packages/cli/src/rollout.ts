@@ -1,13 +1,20 @@
 import { parseArgs } from "node:util";
 
-import type { Rollout } from "@tide-ota/protocol";
-import { ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
+import type { PointerEntry, Rollout } from "@tide-ota/protocol";
+import { ProtocolError, encodeIdentityPointer, encodeRollout, replyKey } from "@tide-ota/protocol";
 
 import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
 import type { Side } from "./status.ts";
-import { buildIdentity, checkCopied, checkLive, sameBytes, servingBucket } from "./keys.ts";
+import {
+  buildIdentity,
+  checkCopied,
+  checkLive,
+  mixedLayout,
+  sameBytes,
+  servingBucket,
+} from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
   PublishError,
@@ -50,17 +57,21 @@ export async function rollout(
     const identity = await buildIdentity(env, now());
     const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
-    await servingBucket(
+    const fallback = await servingBucket(
       bucket,
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
     );
     const writes: (PointerWrite & { readonly rise?: Side })[] = [];
     for (const key of keys) {
-      const previous = await readPointer(bucket, key);
-      const { reply, sides = [] } = previous;
-      if (reply === undefined) throw new PublishError(`${key} does not exist: there is no rollout`);
-      if (reply.kind !== "rollout") throw new PublishError(`${key} holds no rollout`);
+      const previous = await readPointer(bucket, key, identity.keyId);
+      const { reply, sides = [], others } = previous;
+      // Only the pointers moved: an emergency revert must not wait on an unrelated key.
+      if (others !== undefined && fallback === "legacy") throw new PublishError(mixedLayout(key));
+      if (previous.etag === undefined) {
+        throw new PublishError(`${key} does not exist: there is no rollout`);
+      }
+      if (reply?.kind !== "rollout") throw new PublishError(`${key} holds no rollout`);
       if (reply.percent !== goal) forward(key, reply.percent, goal);
       await checkCopied(key, sides, identity);
       // A rise serves the new reply to devices the earlier one served; revert restores what they got before.
@@ -70,7 +81,14 @@ export async function rollout(
         key,
         previous,
         // Encoded here, so a record over the size limit refuses before any write.
-        reply: reply.percent === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal }),
+        reply:
+          reply.percent === goal
+            ? undefined
+            : rolloutRecord(
+                key,
+                { ...reply, percent: goal },
+                others && { keyId: identity.keyId, others },
+              ),
         line: `${key} ${reply.new.updateId} ${goal}`,
         ...(rise && { rise }),
       });
@@ -96,10 +114,18 @@ export async function rollout(
   });
 }
 
-/** Returns the record for `rollout` at `key`; one over the size limit refuses, naming the key. */
-export function rolloutRecord(key: string, rollout: Rollout): Uint8Array<ArrayBuffer> {
+/**
+ * Returns the record for `rollout` at `key`: version 2, or with `entries` a version-3 record holding it as `keyId`'s
+ * entry beside the `others` read, copied as they were. One over the size limit refuses, naming the key.
+ */
+export function rolloutRecord(
+  key: string,
+  rollout: Rollout,
+  entries?: { readonly keyId: string; readonly others: ReadonlyMap<string, PointerEntry> },
+): Uint8Array<ArrayBuffer> {
   try {
-    return encodeRollout(rollout);
+    if (entries === undefined) return encodeRollout(rollout);
+    return encodeIdentityPointer(new Map([...entries.others, [entries.keyId, rollout]]));
   } catch (e) {
     if (!(e instanceof ProtocolError)) throw e;
     throw new PublishError(`${key}: ${e.message}`);

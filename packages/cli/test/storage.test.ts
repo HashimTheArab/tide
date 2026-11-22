@@ -2,7 +2,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { LEGACY_MAP_KEY, baseKey, contentKey, sha256Base64Url } from "@tide-ota/protocol";
+import {
+  LEGACY_MAP_KEY,
+  baseKey,
+  contentKey,
+  encodeIdentityPointer,
+  sha256Base64Url,
+} from "@tide-ota/protocol";
 
 import { FAKE_S3 } from "../../server/test/fakes/s3.ts";
 import { byteOrder } from "../src/bucket.ts";
@@ -18,13 +24,19 @@ import {
   IOS,
   MAIN,
   SERVER_URL,
+  T,
   diskObjects,
+  entryOf,
   env,
   artifact,
+  identitiesNoUpdate,
+  main,
+  other,
   pins,
   s3,
   s3Env,
   s3Snapshot,
+  seededPointer,
   signedManifest,
   tree,
   useFixture,
@@ -207,6 +219,36 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
     });
     expect(store.snapshot()).toEqual(snapshot);
     expect([s3.puts.length, s3.deletes.length]).toEqual([puts, deletes]);
+  });
+
+  test("two identities' releases report the same whether their replies are version 3 or not", async () => {
+    const store = open();
+    const bucket = bucketFromEnv(store.env);
+    await write("publish", ["--channel", "main", "--from", artifact()], env(store.env));
+    // root's release, as its own publish would store it, and one object nothing references.
+    const rootBundle = utf8("root's bundle");
+    await bucket.put(await contentOf("bundles", rootBundle), rootBundle);
+    await bucket.put(recordKey(UPDATE_ID), await record(rootBundle));
+    const orphan = utf8("orphan");
+    const orphanKey = await contentOf("assets", orphan);
+    await bucket.put(orphanKey, orphan);
+    const expected = { code: 0, stdout: report([[orphanKey, orphanKey, orphan]]), stderr: "" };
+    expect(await storage(store)).toEqual(expected);
+
+    const ios = store.objects().get(IOS);
+    if (ios === undefined) throw new Error(`${IOS} is absent`);
+    const root = entryOf(await seededPointer("rollback", T, other, "root"));
+    await bucket.put(
+      IOS,
+      encodeIdentityPointer(
+        new Map([
+          ["main", entryOf(ios)],
+          ["root", root],
+        ]),
+      ),
+    );
+    await bucket.put("reply/no-update", await identitiesNoUpdate({ main, root: other }));
+    expect(await storage(store)).toEqual(expected);
   });
 
   test("an empty bucket reports nothing", async () => {
