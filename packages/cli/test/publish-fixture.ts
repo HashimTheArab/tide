@@ -1,7 +1,15 @@
 // Identities, projects, stores and readers shared by the write-command tests. Keys and certificates are generated
 // per run; nothing here is a committed secret.
 import { createHash, KeyObject, X509Certificate } from "node:crypto";
-import { chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach } from "vitest";
@@ -34,6 +42,7 @@ import { bucketFromEnv } from "../src/storage.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("fake-expo.ts", import.meta.url));
+const FAKE_HERMESC = fileURLToPath(new URL("fake-hermesc.ts", import.meta.url));
 export const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 export const EXPORT = fileURLToPath(new URL("fixtures/export", import.meta.url));
 export const SERVER_URL = "https://updates.example.com";
@@ -113,6 +122,44 @@ export function installFakeExpo(dir: string): void {
     writeFileSync(shim, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_EXPO}' ${tool} "$@"\n`);
     chmodSync(shim, 0o755);
   }
+}
+
+/** One run of the fake hermesc. */
+export interface HermescRun {
+  readonly args: string[];
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+}
+
+/**
+ * Installs react-native and hermes-compiler under `dir/node_modules`, with a fake hermesc shim where react-native 0.83
+ * and later put it or, for `sdks`, where older ones do. Returns the reader of its log, kept in `dir`.
+ */
+export function installFakeHermes(dir: string, at: "compiler" | "sdks" = "compiler") {
+  const modules = join(dir, "node_modules");
+  for (const name of ["react-native", "hermes-compiler"]) {
+    mkdirSync(join(modules, name), { recursive: true });
+    writeFileSync(join(modules, name, "package.json"), JSON.stringify({ name, version: "0.0.0" }));
+  }
+  const host = process.platform === "darwin" ? "osx-bin" : "linux64-bin";
+  const bin = {
+    compiler: join(modules, "hermes-compiler", "hermesc", host),
+    sdks: join(modules, "react-native", "sdks", "hermesc", host),
+  }[at];
+  mkdirSync(bin, { recursive: true });
+  const log = join(dir, "fake-hermesc.log");
+  writeFileSync(
+    join(bin, "hermesc"),
+    `#!/bin/sh\nexec '${process.execPath}' '${FAKE_HERMESC}' '${log}' "$@"\n`,
+  );
+  chmodSync(join(bin, "hermesc"), 0o755);
+  return (): HermescRun[] =>
+    existsSync(log)
+      ? readFileSync(log, "utf8")
+          .trimEnd()
+          .split("\n")
+          .map((l) => JSON.parse(l) as HermescRun)
+      : [];
 }
 
 /**

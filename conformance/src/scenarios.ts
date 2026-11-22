@@ -156,6 +156,21 @@ export const STEPS: Record<Scenario, Step> = {
       };
     },
   },
+  "patch-delta": {
+    from: "ota",
+    async run(t, from) {
+      const plain = ran(from);
+      const to = await publish(t, "u5", t.build.bundle);
+      await checkPatch(t, plain, to, await launch(t));
+      const e = await install(t);
+      await checkPatch(t, e, to, await launch(t));
+      checkDeltaCompiled(t, plain, to);
+      return {
+        running: to,
+        saw: `ran ${to.updateId}, compiled against the embedded bundle, from patches on update ${plain.updateId} and on embedded update ${e.updateId}`,
+      };
+    },
+  },
 };
 
 /**
@@ -334,10 +349,30 @@ const embedded = (build: Build): Update => ({
   embedded: true,
 });
 
-/** Exports the app with a new marker, publishes it to the app's channel and returns the update as stored. */
-async function publish(t: Target, name: string): Promise<Update> {
+/**
+ * Throws unless the launch bundle of `delta` holds the embedded build's marker and that of `plain`, the same app
+ * compiled alone, does not: only a compile against the embedded bundle keeps that string, which no source holds now.
+ */
+export function checkDeltaCompiled(
+  s: Served & Pick<Target, "build">,
+  plain: Update,
+  delta: Update,
+) {
+  const marker = Buffer.from(s.build.marker);
+  const holds = (u: Update) => readFileSync(storePath(s, `bundles/${u.hex}`)).includes(marker);
+  if (holds(plain)) throw new Error(`plain update ${plain.updateId} holds the build marker`);
+  if (!holds(delta)) {
+    throw new Error(`update ${delta.updateId} was not compiled against the embedded bundle`);
+  }
+}
+
+/**
+ * Exports the app with a new marker, delta-compiled against `compileBase` when given, publishes it to the app's
+ * channel and returns the update as stored.
+ */
+async function publish(t: Target, name: string, compileBase?: string): Promise<Update> {
   const marker = `${name}-${t.app.version}-${randomUUID().slice(0, 8)}`;
-  const from = await exportUpdate(t.stack, t.cli, t.app, marker);
+  const from = await exportUpdate(t.stack, t.cli, t.app, marker, undefined, compileBase);
   const updateId = (await t.cli.publish(from, t.app.channel))[t.app.platform];
   if (updateId === undefined) {
     throw new Error(`tide publish wrote no ${t.app.platform} pointer for ${marker}`);

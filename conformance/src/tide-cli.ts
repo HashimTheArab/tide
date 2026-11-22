@@ -17,12 +17,13 @@ interface Pointer {
 }
 
 export interface TideCli {
-  /** Runs `tide export` on the project at `projectRoot` into the new directory `out`. */
+  /** Runs `tide export` on the project at `projectRoot` into the new directory `out`, delta-compiled against `base`. */
   export(
     projectRoot: string,
     out: string,
     platforms: readonly Platform[],
     runtimeVersion?: string,
+    base?: string,
   ): Promise<void>;
   /** Publishes the export at `from` and returns each written pointer's update ID by platform. */
   publish(from: string, channel: string): Promise<Partial<Record<Platform, string>>>;
@@ -61,14 +62,15 @@ export function tideCli(stack: Stack): TideCli {
     p.platform,
   ];
   return {
-    async export(projectRoot, out, platforms, runtimeVersion) {
+    async export(projectRoot, out, platforms, runtimeVersion, base) {
       const env = hostEnv();
       // The export stages Expo's output under TMPDIR, so a killed export leaves nothing outside the stack.
       env.TMPDIR = await mkdtemp(join(stack.dir, "tmp-"));
       const selected = platforms.flatMap((p) => ["--platform", p]);
       const runtime = runtimeVersion === undefined ? [] : ["--runtime-version", runtimeVersion];
+      const based = base === undefined ? [] : ["--base-bytecode", `${platforms[0]}=${base}`];
       await tide(
-        ["export", "--project-root", projectRoot, "--out", out, ...selected, ...runtime],
+        ["export", "--project-root", projectRoot, "--out", out, ...selected, ...runtime, ...based],
         env,
       );
     },

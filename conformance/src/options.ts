@@ -18,6 +18,8 @@ export const SCENARIOS = {
   "corrupt-patch": "a tampered patch falls back to the full bundle",
   rollback: "a rollback directive returns to the embedded update",
   "patch-embedded": "an update patches from the embedded bundle",
+  "patch-delta":
+    "an update compiled against the embedded bundle patches from an OTA update and the embedded one",
 } as const;
 export type Scenario = keyof typeof SCENARIOS;
 

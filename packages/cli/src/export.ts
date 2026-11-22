@@ -7,10 +7,18 @@ import { parseArgs } from "node:util";
 import type { JsonObject } from "@tide-ota/protocol";
 import { replyKey } from "@tide-ota/protocol";
 
+import type { Runner } from "./hermes-delta.ts";
 import type { Env } from "./keys.ts";
 import type { ProjectExport } from "./publish-export.ts";
 import type { Platform } from "./publish-record.ts";
 import type { PublishOptions } from "./publish.ts";
+import {
+  OVERRIDE_VARIABLE,
+  appHermesc,
+  checkDelta,
+  deltaWrapper,
+  readBase,
+} from "./hermes-delta.ts";
 import {
   KeyError,
   isObject,
@@ -31,7 +39,7 @@ import { PublishError, platformsOf } from "./publish-record.ts";
 import { parsed, report } from "./publish.ts";
 
 export const EXPORT_USAGE =
-  "usage: tide export --out <dir> [--platform ios|android]... [--runtime-version <version>] [--project-root <dir>] [--pass-env <name>]...";
+  "usage: tide export --out <dir> [--platform ios|android]... [--runtime-version <version>] [--project-root <dir>] [--pass-env <name>]... [--base-bytecode <platform>=<file>]";
 const STDOUT_LIMIT = 16 * 1024 * 1024;
 // What every child sees from the caller: locale, paths and CI flags, and what Expo inlines into the public bundle.
 const INHERITED = /^(?:PATH|HOME|TMPDIR|LANG|LANGUAGE|TZ|CI|LC_[A-Z]+|EXPO_PUBLIC_\w+)$/;
@@ -61,8 +69,12 @@ async function run(
   env: Env,
   { out: print, now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
-  const { out, platforms, runtimeVersion, projectRoot, passEnv } = parse(args, cwd);
+  const { out, platforms, runtimeVersion, projectRoot, passEnv, base } = parse(args, cwd);
   const childEnv = environment(env, passEnv);
+  const runner: Runner = (command, path, args, dir, stdout) =>
+    runChild(command, path, args, dir, childEnv, stdout);
+  // Before any Expo tool runs, so a missing compiler or a base it cannot read leaves no trace.
+  const compiler = base === undefined ? undefined : await appHermesc(projectRoot, base, runner);
 
   const config = await expoJson(projectRoot, childEnv, ["config", "--json"], "expo");
   const updates = member(config, "updates");
@@ -136,17 +148,26 @@ async function run(
     );
   }
   const staging = mkdtempSync(join(tmpdir(), "tide-export-"));
+  const wrapper = compiler === undefined ? undefined : deltaWrapper(compiler);
   try {
     const selected = platforms.flatMap((p) => ["--platform", p]);
-    await runTool(projectRoot, childEnv, "expo", ["export", "--output-dir", staging, ...selected]);
-    const { files } = await readExport(
+    await runTool(
+      projectRoot,
+      wrapper === undefined ? childEnv : { ...childEnv, [OVERRIDE_VARIABLE]: wrapper.override },
+      "expo",
+      ["export", "--output-dir", staging, ...selected],
+    );
+    const exported = await readExport(
       staging,
       platforms.map((platform) => ({ platform })),
     );
+    if (wrapper !== undefined) checkDelta(exported.platforms, wrapper);
     // Only what metadata.json names: Expo also copies the project's public/ folder into its output.
-    for (const [path, bytes] of files) write(join(out, "dist", path), bytes);
+    for (const [path, bytes] of exported.files) write(join(out, "dist", path), bytes);
   } finally {
-    rmSync(staging, { recursive: true, force: true });
+    for (const dir of [staging, wrapper?.scratch]) {
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    }
   }
   // Written last, under its name only once complete, so a partial export is never read as one.
   const temporary = join(out, `.${EXPORT_FILE}.partial`);
@@ -165,6 +186,7 @@ function parse(args: readonly string[], cwd: string) {
         "runtime-version": { type: "string" },
         "project-root": { type: "string" },
         "pass-env": { type: "string", multiple: true },
+        "base-bytecode": { type: "string", multiple: true },
       },
       strict: true,
       allowPositionals: false,
@@ -182,13 +204,15 @@ function parse(args: readonly string[], cwd: string) {
       );
     }
   }
+  const platforms = platformsOf(values.platform);
   return {
-    // Both against the caller's directory, before any child runs elsewhere.
+    // All against the caller's directory, before any child runs elsewhere.
     out: resolve(cwd, values.out),
     projectRoot: resolve(cwd, values["project-root"] ?? "."),
-    platforms: platformsOf(values.platform),
+    platforms,
     runtimeVersion,
     passEnv,
+    base: readBase(values["base-bytecode"] ?? [], platforms, passEnv, cwd),
   };
 }
 
@@ -272,7 +296,7 @@ function toolPath(projectRoot: string, tool: string): string {
   }
 }
 
-/** Runs `tool` with no shell; its stdout is returned, or with "stderr" passed through as progress. */
+/** Runs `tool` from the project's own dependencies in the project root. */
 function runTool(
   projectRoot: string,
   env: Record<string, string>,
@@ -281,12 +305,29 @@ function runTool(
   stdout: "pipe" | "stderr" = "stderr",
 ): Promise<string> {
   const command = `${tool} ${args[0] ?? ""}`;
-  const child = spawn(toolPath(projectRoot, tool), args, {
-    cwd: projectRoot,
-    env,
-    shell: false,
-    stdio: ["ignore", stdout === "pipe" ? "pipe" : process.stderr, "inherit"],
-  });
+  return runChild(command, toolPath(projectRoot, tool), args, projectRoot, env, stdout);
+}
+
+/** Runs `path` with no shell; its stdout is returned, or with "stderr" passed through as progress. */
+function runChild(
+  command: string,
+  path: string,
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string>,
+  stdout: "pipe" | "stderr",
+): Promise<string> {
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(path, args, {
+      cwd,
+      env,
+      shell: false,
+      stdio: ["ignore", stdout === "pipe" ? "pipe" : process.stderr, "inherit"],
+    });
+  } catch {
+    return Promise.reject(new PublishError(`${command} could not be started`));
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
