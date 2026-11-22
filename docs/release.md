@@ -28,6 +28,9 @@ done
 npm trust list @tide-ota/cli
 ```
 
+A trusted publisher does not stop token publishes. On npmjs.com, set each package's Settings → Publishing access to
+"Require two-factor authentication and disallow tokens", and check it after any redo; trusted publishing keeps working.
+
 ## Before each release
 
 A failed step stops the release until a fix lands on `main`.

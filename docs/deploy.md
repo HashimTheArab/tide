@@ -125,11 +125,17 @@ separate jobs of one workflow:
     package's `engines` allows, from `actions/setup-node`, and checks its registry signatures and provenance before
     running it. The CLI's only dependency is `@tide-ota/protocol` at the same version, and npm never reuses a version,
     so that one version pins every byte the job runs. The app is never checked out; it is present only as artifact
-    data.
+    data. `npm audit signatures` passes a package with no provenance at all, so the `jq` step requires verified
+    provenance from Tide's `release.yml` for both packages:
 
     ```sh
     npm install --prefix "$RUNNER_TEMP/tide" --ignore-scripts --no-fund @tide-ota/cli@0.1.0
-    npm audit signatures --prefix "$RUNNER_TEMP/tide"
+    npm audit signatures --prefix "$RUNNER_TEMP/tide" --json --include-attestations > "$RUNNER_TEMP/audit.json"
+    jq -e --arg repo https://github.com/HashimTheArab/tide '["@tide-ota/cli", "@tide-ota/protocol"] - [.verified[]
+      | select(any(.attestationBundles[]; .predicateType == "https://slsa.dev/provenance/v1"
+        and (.bundle.dsseEnvelope.payload | @base64d | fromjson | .predicate.buildDefinition.externalParameters.workflow
+          | .repository == $repo and .path == ".github/workflows/release.yml")))
+      | .name] == []' "$RUNNER_TEMP/audit.json"
     echo "$RUNNER_TEMP/tide/node_modules/.bin" >> "$GITHUB_PATH"
     ```
 
