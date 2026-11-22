@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { MAX_REPLY_BYTES, signV4 } from "@tide-ota/protocol";
+import { MAX_IDENTITIES_BYTES, signV4 } from "@tide-ota/protocol";
 
 import type { Behaviour, FakeEvent } from "../shared/fake-s3.ts";
 import { BEHAVIOURS, FAKE_S3, STALL_BODY } from "../shared/fake-s3.ts";
@@ -313,7 +313,7 @@ export async function startFakeS3(): Promise<FakeS3> {
         return void released(key).promise.then(() => res.end(body.subarray(half)));
       }
       case "oversize":
-        res.writeHead(200, { "content-length": MAX_REPLY_BYTES + 1, etag: '"big"' });
+        res.writeHead(200, { "content-length": MAX_IDENTITIES_BYTES + 1, etag: '"big"' });
         res.flushHeaders();
         return event("flushed", key).resolve();
       case undefined:
