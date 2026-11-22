@@ -1,6 +1,6 @@
 // Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status
-// front matter, when deploy.md omits a permission the server's S3 credentials need, or when README.md drifts from the
-// tagline, the files it links or the CLI's commands and flags.
+// front matter, when deploy.md omits a permission the server's S3 credentials need, when README.md drifts from the
+// tagline, the files it links or the CLI's commands and flags, or when the CLI's README misses a command or flag.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -53,7 +53,7 @@ for (const permission of permissions) {
   }
 }
 
-// README (or the file argv names): opens with the package description as its tagline, links only to files that exist,
+// README (or the file argv[2] names): opens with the package description as its tagline, links only to files that exist,
 // and names only the CLI commands and flags the CLI's own usage lists, across shell line continuations.
 const readme = readFileSync(process.argv[2] ?? join(root, "README.md"), "utf8");
 const tagline =
@@ -80,17 +80,32 @@ for (const [, command, rest] of usage.matchAll(/^(?:usage:)?\s*tide ([a-z-]+)(.*
   flags.set(command, known);
 }
 if (flags.size === 0) errors.push("packages/cli/src/main.ts: printed no usage");
-for (const [, command, rest] of readme
-  .replaceAll(/\\\n\s*/g, " ")
-  .matchAll(/\btide ([a-z][a-z-]*)([^\n`|]*)/g)) {
-  const known = flags.get(command);
-  if (known === undefined) {
-    errors.push(`README.md: names tide ${command}, which the CLI does not have`);
-    continue;
+/** Returns the CLI commands `doc` names, adding an error for each command or flag the CLI does not have. */
+const commandsIn = (/** @type {string} */ doc, /** @type {string} */ name) => {
+  const named = new Set();
+  for (const [, command, rest] of doc
+    .replaceAll(/\\\n\s*/g, " ")
+    .matchAll(/\btide ([a-z][a-z-]*)([^\n`|]*)/g)) {
+    const known = flags.get(command);
+    if (known === undefined) {
+      errors.push(`${name}: names tide ${command}, which the CLI does not have`);
+      continue;
+    }
+    named.add(command);
+    for (const [flag] of rest.matchAll(/--[a-z-]+/g)) {
+      if (!known.has(flag)) errors.push(`${name}: tide ${command} has no ${flag}`);
+    }
   }
-  for (const [flag] of rest.matchAll(/--[a-z-]+/g)) {
-    if (!known.has(flag)) errors.push(`README.md: tide ${command} has no ${flag}`);
-  }
+  return named;
+};
+commandsIn(readme, "README.md");
+// The CLI's npm README (or the file argv[3] names) lists every command.
+const cliNamed = commandsIn(
+  readFileSync(process.argv[3] ?? join(root, "packages/cli/README.md"), "utf8"),
+  "packages/cli/README.md",
+);
+for (const command of flags.keys()) {
+  if (!cliNamed.has(command)) errors.push(`packages/cli/README.md: does not name tide ${command}`);
 }
 
 if (errors.length > 0) {

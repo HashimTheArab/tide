@@ -42,6 +42,24 @@ test("the docs check rejects an unknown flag on a continued command line", () =>
   expect(typo.stderr).toContain("README.md: tide register-build has no --asset-dirr");
 });
 
+test("the docs check requires the CLI README to name every command, tide certificate among them", () => {
+  const cli = readFileSync(join(ROOT, "packages/cli/README.md"), "utf8");
+  expect(cli).toContain("tide certificate --common-name <name> --validity-years <n>");
+  const check = (text: string) => {
+    const path = join(tempRoot(), "README.md");
+    writeFileSync(path, text);
+    return spawnSync(
+      process.execPath,
+      [join(ROOT, "scripts/check-docs.mjs"), join(ROOT, "README.md"), path],
+      { encoding: "utf8" },
+    );
+  };
+  expect(check(cli).status).toBe(0);
+  const missing = check(cli.replaceAll("tide certificate", "tide"));
+  expect(missing.status).toBe(1);
+  expect(missing.stderr).toContain("packages/cli/README.md: does not name tide certificate");
+});
+
 test("the README names every build pin tide probe requires", () => {
   const pins = variables(section(DESIGN, "### `tide probe`"));
   expect(pins.size).toBeGreaterThan(0);
