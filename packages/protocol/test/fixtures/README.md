@@ -2,7 +2,7 @@
 
 Tests compare these bytes exactly.
 
-Regenerate `certificate.pem`, the signed Tide multiparts, the `.reply.json` stored replies wrapping them and the
+Regenerate `certificate.pem`, `second-certificate.pem`, the signed Tide multiparts, the `.reply.json` stored replies wrapping them and the
 chain goldens with fresh in-memory keys: `node packages/protocol/test/generate-fixtures.ts [--out <dir>]`.
 `--replies-only` rewraps the committed multiparts without signing. Then check the certificate's code-signing profile
 once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.pem`.
@@ -19,6 +19,13 @@ codesign chain-leaf.pem`.
 with its own boundary, `tide_fixture_next`. It is the new side of the version-2 rollout goldens
 `rollout-manifest.reply.json` (12.5%, earlier `manifest.reply.json`), `rollout-rollback.reply.json` (50%, earlier
 `rollback.reply.json`) and `rollout-none.reply.json` (0.01%, no earlier reply).
+
+`second-certificate.pem` and `second-*.multipart` are a second direct identity, keyid `root`, signed with its own key:
+`second-manifest.multipart` (from `manifest-next.json`), `second-rollback.multipart` and `second-no-update.multipart`,
+framed with boundary `tide_fixture_second`. To regenerate them without changing the other signed goldens, run the
+generator with `--out` to an empty directory, copy only `second-*`, then run `--replies-only`. The version-3 goldens
+hold main's goldens under `main` and the second identity's under `root`: `identities-manifest.reply.json` (manifest),
+`identities-rollout.reply.json` (the 12.5% rollout; root a rollback) and `identities-no-update.reply.json`.
 
 `compat-v1-*.reply.json` are the version-1 stored replies as the encoder wrote them before version 2 existed. Their
 bodies are signed by an earlier certificate; they pin the version-1 bytes and are never regenerated.

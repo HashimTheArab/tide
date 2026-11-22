@@ -229,6 +229,46 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     expect([point.blobs[0], point.blobs[6]]).toEqual(["503", "none"]);
   });
 
+  const keyid = (id: string) => `sig, keyid="${id}", alg="rsa-v1_5-sha256"`;
+  test.each<[string, string, Record<string, string>, [string, string]]>([
+    ["main's new side", "main", { "eas-client-id": CLIENT_LOW }, ["manifest", "new"]],
+    ["main's earlier side", "main", { "eas-client-id": CLIENT_HIGH }, ["manifest", "earlier"]],
+    ["root's rollback", "root", {}, ["rollBackToEmbedded", "none"]],
+    [
+      "main's no-update on the new update",
+      "main",
+      { "eas-client-id": CLIENT_LOW, "expo-current-update-id": NEW_ID },
+      ["noUpdateAvailable", "new"],
+    ],
+  ])("a version-3 pointer records %s", async (_, id, change, [reply, side]) => {
+    await harness.put(NO_UPDATE_KEY, fixture("identities-no-update.reply.json"));
+    await pointer("an-v3", fixture("identities-rollout.reply.json"));
+    const point = await onePoint(() =>
+      get("an-v3", { ...change, "expo-expect-signature": keyid(id) }),
+    );
+    expect([point.blobs[0], point.blobs[6]]).toEqual([reply, side]);
+  });
+
+  test.each<[number, string | undefined]>([
+    [400, "sig, keyid=main"],
+    [404, keyid("other")],
+  ])("a version-3 %i records no point", async (status, value) => {
+    await harness.put(NO_UPDATE_KEY, fixture("identities-no-update.reply.json"));
+    await pointer("an-v3-refused", fixture("identities-manifest.reply.json"));
+    const points = harness.capture();
+    const { res } = await get("an-v3-refused", { "expo-expect-signature": value });
+    expect(res.status).toBe(status);
+    expect(points()).toEqual([]);
+  });
+
+  test("a version-3 pointer over a version-1 no-update records a 503 when it needs no-update", async () => {
+    await pointer("an-v3-mixed", fixture("identities-manifest.reply.json"));
+    const point = await onePoint(() =>
+      get("an-v3-mixed", { "expo-expect-signature": keyid("other") }),
+    );
+    expect([point.blobs[0], point.blobs[6]]).toEqual(["503", "none"]);
+  });
+
   // The largest point: an earlier-side rollback with every bounded field at its longest.
   test("the largest point is 352 bytes of blobs, 7 of them the side", async () => {
     const runtime = "r".repeat(64);

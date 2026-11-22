@@ -463,12 +463,12 @@ describe("publish to disk", () => {
       [
         "a malformed keyid",
         fields({ codeSigningMetadata: { keyid: { nested: "x" } } }),
-        "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
+        "tide-export.json codeSigningMetadata.keyid must be non-empty printable ASCII",
       ],
       [
         "an unprintable keyid",
         fields({ codeSigningMetadata: { keyid: "ma\u00efn" } }),
-        "tide-export.json codeSigningMetadata.keyid must be printable ASCII",
+        "tide-export.json codeSigningMetadata.keyid must be non-empty printable ASCII",
       ],
       [
         "no keyid",

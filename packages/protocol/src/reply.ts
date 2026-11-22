@@ -29,6 +29,7 @@ export type StoredReply =
 type Kind = StoredReply["kind"];
 type ManifestReply = Extract<StoredReply, { kind: "manifest" }>;
 type RollbackReply = Extract<StoredReply, { kind: "rollBackToEmbedded" }>;
+export type NoUpdateReply = Extract<StoredReply, { kind: "noUpdateAvailable" }>;
 
 /**
  * A pointer that serves `new` to `percent` of devices and `earlier` to the rest; an absent earlier reply means the
@@ -41,6 +42,15 @@ export interface Rollout {
   readonly earlier: ManifestReply | RollbackReply | undefined;
 }
 
+/** What one identity's entry in a version-3 pointer serves. */
+export type PointerEntry = ManifestReply | RollbackReply | Rollout;
+
+/** A version-3 record: one entry per signing identity, by the keyid its clients send in `expo-expect-signature`. */
+export interface Identities<E> {
+  readonly kind: "identities";
+  readonly entries: ReadonlyMap<string, E>; // In keyid order.
+}
+
 /** The key of the signed noUpdateAvailable reply served when no pointer applies. */
 export const NO_UPDATE_KEY = "reply/no-update";
 /** The content keys that URLs published by earlier servers name, written by the legacy import. */
@@ -49,9 +59,23 @@ export const LEGACY_MAP_KEY = "legacy/map.json";
 export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 /** The longest `expo-manifest-filters` value, well under the smallest client header budget. */
 export const MAX_FILTERS_BYTES = 4096;
+/** The most identities one version-3 record holds. */
+export const MAX_IDENTITIES = 16;
+/** The longest keyid, escaped: its header and a stock client's others fit Node's default 16 KiB request head. */
+export const MAX_KEYID_BYTES = 4 * 1024;
+/**
+ * The largest version-3 record at its padded size. The margin over `MAX_REPLY_BYTES` lets every valid version-1 or
+ * version-2 record become a one-entry record under any keyid. No served body is longer than the record holding it.
+ */
+export const MAX_IDENTITIES_BYTES = MAX_REPLY_BYTES + 2 * MAX_KEYID_BYTES;
 
 const VERSION = 1;
 const ROLLOUT_VERSION = 2;
+const IDENTITIES_VERSION = 3;
+const LONGEST_PERCENT = 5; // "12.34": no k/100 from 0 to 100 is spelled longer.
+const KEYID = /^[\x20-\x7E]+$/;
+const POINTER_KINDS = ["manifest", "rollBackToEmbedded", "rollout"];
+const NO_UPDATE_KINDS = ["noUpdateAvailable"];
 const BUCKETS = 10_000; // One per 0.01 percentage point.
 // Fields each kind's record may hold; a directive has no update ID or filters.
 const RECORD_FIELDS: Record<Kind, readonly string[]> = {
@@ -96,12 +120,82 @@ export function decodeStoredReply(bytes: Uint8Array): StoredReply {
   return readReply(record);
 }
 
-/** Returns what a pointer key holds: a version-1 reply or a version-2 rollout. */
-export function decodePointer(bytes: Uint8Array): StoredReply | Rollout {
-  const { record, text, version } = parseRecord(bytes);
+/** Returns the version-3 pointer bytes for `entries`, written in keyid order. */
+export function encodeIdentityPointer(
+  entries: ReadonlyMap<string, PointerEntry>,
+): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(encoder.encode(serializeIdentities(entryFields(entries))));
+  decodePointer(bytes); // Encode never writes what decode refuses.
+  return bytes;
+}
+
+/** Returns the version-3 `reply/no-update` bytes for `entries`, written in keyid order. */
+export function encodeIdentityNoUpdate(
+  entries: ReadonlyMap<string, NoUpdateReply>,
+): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(encoder.encode(serializeIdentities(entryFields(entries))));
+  decodeNoUpdate(bytes); // Encode never writes what decode refuses.
+  return bytes;
+}
+
+/** Returns what a pointer key holds: a version-1 reply, a version-2 rollout or a version-3 record. */
+export function decodePointer(bytes: Uint8Array): StoredReply | Rollout | Identities<PointerEntry> {
+  const { record, text, version } = parseRecord(bytes, MAX_IDENTITIES_BYTES);
   if (version === VERSION) return readReply(record);
   if (version === ROLLOUT_VERSION) return readRollout(record, text);
+  if (version === IDENTITIES_VERSION) {
+    return readIdentities(record, text, bytes.length, POINTER_KINDS) as Identities<PointerEntry>;
+  }
   throw new ProtocolError("version", "is not supported");
+}
+
+/** Returns what `reply/no-update` holds: a version-1 noUpdateAvailable reply or a version-3 record. */
+export function decodeNoUpdate(bytes: Uint8Array): NoUpdateReply | Identities<NoUpdateReply> {
+  const { record, text, version } = parseRecord(bytes, MAX_IDENTITIES_BYTES);
+  if (version === VERSION) {
+    const reply = readReply(record);
+    if (reply.kind !== "noUpdateAvailable") {
+      throw new ProtocolError("kind", "must be noUpdateAvailable");
+    }
+    return reply;
+  }
+  if (version === IDENTITIES_VERSION) {
+    return readIdentities(record, text, bytes.length, NO_UPDATE_KINDS) as Identities<NoUpdateReply>;
+  }
+  throw new ProtocolError("version", "is not supported");
+}
+
+/** Returns `value` when a version-3 record may hold it as a keyid: printable ASCII, escaped at most MAX_KEYID_BYTES. */
+export function checkKeyId(value: unknown): string {
+  if (typeof value !== "string" || !KEYID.test(value)) {
+    throw new ProtocolError("keyid", "must be non-empty printable ASCII");
+  }
+  // The RFC 8941 and JSON escapes agree on printable ASCII: each `"` and `\` takes two bytes.
+  if (value.length + (value.match(/["\\]/g)?.length ?? 0) > MAX_KEYID_BYTES) {
+    throw new ProtocolError("keyid", `is longer than ${MAX_KEYID_BYTES} bytes escaped`);
+  }
+  return value;
+}
+
+/**
+ * Returns the keyid an `expo-expect-signature` value names, or `root` when it names none. Undefined when the value is
+ * absent or malformed, or its keyid is not a string `checkKeyId` accepts.
+ */
+export function expectedKeyId(header: string | undefined): string | undefined {
+  if (header === undefined || header === "") return undefined;
+  let keyid;
+  try {
+    keyid = parseSfvDictionary(header, "expo-expect-signature").get("keyid");
+  } catch {
+    return undefined;
+  }
+  if (keyid === undefined) return "root";
+  if (keyid.kind !== "string") return undefined;
+  try {
+    return checkKeyId(keyid.text);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Returns `header` lowercased when it is exactly one UUID, else undefined. */
@@ -154,14 +248,21 @@ function bodyText(body: Uint8Array): string {
   }
 }
 
+interface Bodies {
+  readonly new: string;
+  readonly earlier: string | undefined;
+}
+
+/** The exact version-2 record text for `rollout`; `bodies` as for `rolloutFields`. */
+function serializeRollout(rollout: Rollout, bodies?: Bodies): string {
+  return JSON.stringify({ version: ROLLOUT_VERSION, ...rolloutFields(rollout, bodies) });
+}
+
 /**
- * The exact version-2 record text for `rollout`; an absent reply is written as null. `bodies` are the replies' bodies
+ * A rollout's record fields without `version`; an absent reply is written as null. `bodies` are the replies' bodies
  * as strings when the caller already holds them, so a read does not decode the bytes it just encoded.
  */
-function serializeRollout(
-  rollout: Rollout,
-  bodies?: { new: string; earlier: string | undefined },
-): string {
+function rolloutFields(rollout: Rollout, bodies?: Bodies): Record<string, unknown> {
   // `unknown`: a JavaScript caller may pass null or a missing reply, which decode then refuses.
   const nested = (field: string, reply: unknown, body: string | undefined) => {
     if (typeof reply !== "object" || reply === null) return null;
@@ -171,24 +272,59 @@ function serializeRollout(
       throw prefixed(field, e);
     }
   };
-  return JSON.stringify({
-    version: ROLLOUT_VERSION,
+  return {
     kind: "rollout",
     percent: rollout.percent,
     new: nested("new", rollout.new, bodies?.new),
     earlier: nested("earlier", rollout.earlier, bodies?.earlier),
+  };
+}
+
+/** One entry of a version-3 record: its keyid and the fields written after it. */
+interface Entry {
+  readonly keyid: string;
+  readonly fields: Record<string, unknown>;
+}
+
+/** The exact version-3 record text for `entries`, in the order given. */
+function serializeIdentities(entries: readonly Entry[]): string {
+  return JSON.stringify({
+    version: IDENTITIES_VERSION,
+    identities: entries.map(({ keyid, fields }) => ({ keyid, ...fields })),
   });
 }
 
-/** Parses a record up to its version; every decoder starts here. */
-function parseRecord(bytes: Uint8Array): {
+/** The entries of `map` in keyid order; decode then refuses whatever a record may not hold. */
+function entryFields(map: ReadonlyMap<string, unknown>): Entry[] {
+  return [...map.keys()].sort().map((keyid, i) => {
+    // A JavaScript caller may pass anything; a non-object gets no fields, which decode refuses.
+    const entry = map.get(keyid);
+    if (typeof entry !== "object" || entry === null) return { keyid, fields: {} };
+    try {
+      const fields =
+        (entry as { kind?: unknown }).kind === "rollout"
+          ? rolloutFields(entry as Rollout)
+          : replyFields(entry as StoredReply);
+      return { keyid, fields };
+    } catch (e) {
+      throw prefixed(`identities[${i}]`, e);
+    }
+  });
+}
+
+/**
+ * Parses a record of at most `limit` bytes up to its version; every decoder starts here. Only version 3 may pass
+ * `MAX_REPLY_BYTES`; its padded size is checked once decoded.
+ */
+function parseRecord(
+  bytes: Uint8Array,
+  limit = MAX_REPLY_BYTES,
+): {
   record: Record<string, unknown>;
   text: string;
   version: number;
 } {
-  if (bytes.length > MAX_REPLY_BYTES) {
-    throw new ProtocolError("record", `is too large: over ${MAX_REPLY_BYTES} bytes`);
-  }
+  if (bytes.length > limit) tooLarge(limit);
   let text: string;
   try {
     text = utf8.decode(bytes);
@@ -205,7 +341,12 @@ function parseRecord(bytes: Uint8Array): {
   // Version first, so a later layout is reported as unsupported rather than as malformed.
   const version = present(parsed, "version");
   if (!Number.isInteger(version)) throw new ProtocolError("version", "must be an integer");
+  if (version !== IDENTITIES_VERSION && bytes.length > MAX_REPLY_BYTES) tooLarge(MAX_REPLY_BYTES);
   return { record: parsed, text, version: version as number };
+}
+
+function tooLarge(limit: number): never {
+  throw new ProtocolError("record", `is too large: over ${limit} bytes`);
 }
 
 /** Reads a version-1 reply, or a reply inside a rollout, whose exact-text check refuses a nested `version`. */
@@ -244,6 +385,16 @@ function readReply(r: Record<string, unknown>): StoredReply {
  * other key, kind, order or spelling.
  */
 function readRollout(r: Record<string, unknown>, text: string): Rollout {
+  const [rollout, bodies] = readRolloutFields(r);
+  // Refuses another key order, whitespace, escape or number spelling.
+  if (serializeRollout(rollout, bodies) !== text) {
+    throw new ProtocolError("record", "must be exactly what encodeRollout writes");
+  }
+  return rollout;
+}
+
+/** Reads a rollout's percent and sides, and both bodies as strings; the caller compares the exact text. */
+function readRolloutFields(r: Record<string, unknown>): [Rollout, Bodies] {
   const percent = present(r, "percent");
   if (
     typeof percent !== "number" ||
@@ -261,12 +412,65 @@ function readRollout(r: Record<string, unknown>, text: string): Rollout {
   if (earlier?.kind === "manifest" && earlier.updateId === next.updateId) {
     throw new ProtocolError("earlier.updateId", "must differ from new.updateId");
   }
-  const rollout: Rollout = { kind: "rollout", percent, new: next, earlier };
-  // Refuses another key order, whitespace, escape or number spelling.
-  if (serializeRollout(rollout, { new: newBody, earlier: earlierBody }) !== text) {
-    throw new ProtocolError("record", "must be exactly what encodeRollout writes");
+  return [
+    { kind: "rollout", percent, new: next, earlier },
+    { new: newBody, earlier: earlierBody },
+  ];
+}
+
+/**
+ * Reads a version-3 record of `size` bytes whose entries each have one of `kinds`. It must be exactly what encode
+ * writes, which refuses any other key, and fit `MAX_IDENTITIES_BYTES` with each rollout's percent padded to its
+ * longest spelling, so a later percent change never makes a stored record too large.
+ */
+function readIdentities(
+  r: Record<string, unknown>,
+  text: string,
+  size: number,
+  kinds: readonly string[],
+): Identities<PointerEntry | NoUpdateReply> {
+  const list = present(r, "identities");
+  if (!Array.isArray(list) || list.length === 0 || list.length > MAX_IDENTITIES) {
+    throw new ProtocolError("identities", `must be an array of 1 to ${MAX_IDENTITIES} entries`);
   }
-  return rollout;
+  const entries = new Map<string, PointerEntry | NoUpdateReply>();
+  const written: Entry[] = [];
+  let padded = size;
+  for (const [i, value] of (list as unknown[]).entries()) {
+    const field = `identities[${i}]`;
+    if (!isObject(value)) throw new ProtocolError(field, "must be an object");
+    try {
+      const keyid = checkKeyId(present(value, "keyid"));
+      const previous = written.at(-1)?.keyid;
+      if (previous !== undefined && keyid <= previous) {
+        throw new ProtocolError("keyid", keyid === previous ? "is repeated" : "is out of order");
+      }
+      const { keyid: _, ...fields } = value;
+      const kind = present(fields, "kind");
+      if (typeof kind !== "string" || !kinds.includes(kind)) {
+        throw new ProtocolError("kind", `must be ${kinds.join(" or ")}`);
+      }
+      if (kind === "rollout") {
+        const [rollout, bodies] = readRolloutFields(fields);
+        padded += LONGEST_PERCENT - JSON.stringify(rollout.percent).length;
+        entries.set(keyid, rollout);
+        written.push({ keyid, fields: rolloutFields(rollout, bodies) });
+      } else {
+        const reply = readReply(fields);
+        entries.set(keyid, reply);
+        // readReply has checked that `body` is a well-formed string.
+        written.push({ keyid, fields: replyFields(reply, fields.body as string) });
+      }
+    } catch (e) {
+      throw prefixed(field, e);
+    }
+  }
+  // Refuses another key order, whitespace, escape or number spelling, and a repeated JSON key.
+  if (serializeIdentities(written) !== text) {
+    throw new ProtocolError("record", "must be exactly what encode writes");
+  }
+  if (padded > MAX_IDENTITIES_BYTES) tooLarge(MAX_IDENTITIES_BYTES);
+  return { kind: "identities", entries };
 }
 
 /** Reads the reply at rollout field `field`, which must be one of `kinds`, and returns it with its body string. */

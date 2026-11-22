@@ -1,5 +1,5 @@
-// Writes certificate.pem, the signed Tide multiparts, the stored replies wrapping them and the chain goldens, with
-// fresh keys that never leave memory. `--replies-only` rewraps the committed multiparts without signing.
+// Writes certificate.pem, second-certificate.pem, the signed Tide and second-identity multiparts, the stored replies
+// wrapping them and the chain goldens, with fresh keys that never leave memory. `--replies-only` rewraps the committed multiparts without signing.
 // Usage: node packages/protocol/test/generate-fixtures.ts [--out <dir>] [--replies-only]
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { cryptoKeySigner } from "../src/index.ts";
 import {
   RSA_SHA256,
+  SECOND_GOLDEN,
   certificate,
   chainFixtures,
   replyGoldens,
@@ -30,6 +31,13 @@ if (values["replies-only"] !== true) {
     await certificate(keys.publicKey, keys.privateKey, new Date()),
   );
   multiparts = await signedFixtures(read, cryptoKeySigner(keys.privateKey, "main"));
+  const second = await crypto.subtle.generateKey(RSA_SHA256, false, ["sign", "verify"]);
+  writeFileSync(
+    resolve(out, "second-certificate.pem"),
+    await certificate(second.publicKey, second.privateKey, new Date()),
+  );
+  const signer = cryptoKeySigner(second.privateKey, "root");
+  Object.assign(multiparts, await signedFixtures(read, signer, SECOND_GOLDEN));
   const pair = () => crypto.subtle.generateKey(RSA_SHA256, false, ["sign", "verify"]);
   const chain = await chainFixtures(read, {
     root: await pair(),

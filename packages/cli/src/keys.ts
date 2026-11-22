@@ -9,6 +9,7 @@ import {
   ProtocolError,
   certificateChain,
   certificateChainAtIssue,
+  checkKeyId,
   codeSigningCertificate,
   encodeMultipart,
   expoSignature,
@@ -98,7 +99,6 @@ export const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
 const KEY_FILE = "TIDE_SIGNING_KEY_FILE";
 const KEY_PEM = "TIDE_SIGNING_KEY";
 export const BUILD_KEYID = "TIDE_BUILD_KEYID";
-const KEYID = /^[\x20-\x7E]+$/;
 const CERTIFICATE_FILE = "TIDE_BUILD_CERTIFICATE_FILE";
 const CERTIFICATE_PEM = "TIDE_BUILD_CERTIFICATE";
 const BUILD_CHAIN = "TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN";
@@ -170,7 +170,7 @@ export async function buildIdentity(env: Env, now: number): Promise<Identity> {
   if (keyId === undefined) {
     throw new KeyError(`${BUILD_KEYID} is not set: set it to the keyid the builds embed`);
   }
-  if (!KEYID.test(keyId)) throw new KeyError(`${BUILD_KEYID} must be printable ASCII`);
+  checkedKeyId(keyId, BUILD_KEYID);
   const mode = read(env, BUILD_CHAIN);
   // Unset is the client's default.
   if (mode !== undefined && mode !== "true" && mode !== "false") {
@@ -276,13 +276,21 @@ export function signingMetadata(metadata: unknown, field: string): SigningMetada
   const keyid = member(metadata, "keyid");
   // Expo would fall back to "root"; an implicit key ID is refused instead.
   if (keyid === undefined) throw new KeyError(`${field}.keyid is missing`);
-  if (typeof keyid !== "string" || !KEYID.test(keyid)) {
-    throw new KeyError(`${field}.keyid must be printable ASCII`);
-  }
+  checkedKeyId(keyid, `${field}.keyid`);
   const alg = member(metadata, "alg");
   if (alg === undefined) return { keyid };
   if (alg !== "rsa-v1_5-sha256") throw new KeyError(`${field}.alg must be rsa-v1_5-sha256`);
   return { keyid, alg };
+}
+
+/** Refuses a keyid no version-3 record could hold, as a `KeyError` naming `name`. */
+function checkedKeyId(keyid: unknown, name: string): asserts keyid is string {
+  try {
+    checkKeyId(keyid);
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw new KeyError(`${name}${e.message.slice(e.field.length)}`);
+  }
 }
 
 /** Returns the one configured key source; every refusal names variables, never a value. */

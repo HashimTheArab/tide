@@ -27,7 +27,7 @@ export const BEHAVIOURS = [
   "stall", // 500 headers flushed, then no body
   "stall-body", // 200 declaring STALL_BODY.size, then STALL_BODY.sent bytes and nothing more
   "pause-body", // 200 with the stored object's first half; the rest follows `release`
-  "oversize", // 200 declaring MAX_REPLY_BYTES + 1, headers flushed, no body
+  "oversize", // 200 declaring MAX_IDENTITIES_BYTES + 1, the largest record limit, headers flushed, no body
   "nested-404", // 404 whose only Code is inside another element
   "duplicate-404", // 404 with two Code children
   "encoding-access-key", // 200 whose Content-Encoding is the access key ID

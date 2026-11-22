@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import type { Signer } from "@tide-ota/protocol";
 import {
+  MAX_KEYID_BYTES,
   certificatePublicKey,
   cryptoKeySigner,
   decodeStoredReply,
@@ -394,7 +395,11 @@ const REFUSALS: Record<string, () => Promise<Refusal> | Refusal> = {
   }),
   "an unprintable TIDE_BUILD_KEYID": () => ({
     env: { TIDE_BUILD_KEYID: "ma\u00efn" },
-    message: "TIDE_BUILD_KEYID must be printable ASCII",
+    message: "TIDE_BUILD_KEYID must be non-empty printable ASCII",
+  }),
+  "a TIDE_BUILD_KEYID no version-3 record could hold": () => ({
+    env: { TIDE_BUILD_KEYID: "a".repeat(MAX_KEYID_BYTES + 1) },
+    message: `TIDE_BUILD_KEYID is longer than ${MAX_KEYID_BYTES} bytes escaped`,
   }),
   "no build certificate": () => ({
     env: { TIDE_BUILD_CERTIFICATE: "" },
@@ -607,6 +612,14 @@ describe.each(["disk", "s3"] as const)("bucket identity on %s", (kind) => {
       "main",
       "reply/no-update is unreadable: not a stored reply",
     ],
+    // The CLI does not read version-3 records yet, so it refuses them and writes nothing.
+    [
+      "a version-3 record",
+      () => Promise.resolve(fixture("identities-no-update.reply.json")),
+      () => main,
+      "main",
+      "reply/no-update is unreadable: not a stored reply",
+    ],
     [
       "a signed rollback in a noUpdateAvailable wrapper",
       () => noUpdateReply(main.keys.privateKey, "main", "directive-rollback.json"),
@@ -672,6 +685,11 @@ describe.each(["disk", "s3"] as const)("a %s bucket without reply/no-update", (k
     [
       "an unreadable pointer",
       () => Promise.resolve(utf8("garbage")),
+      "reply/main/1.0.0/ios is unreadable: not a stored reply",
+    ],
+    [
+      "a version-3 pointer",
+      () => Promise.resolve(fixture("identities-manifest.reply.json")),
       "reply/main/1.0.0/ios is unreadable: not a stored reply",
     ],
   ])("%s is refused, so nothing repairs another identity's bucket", async (_, reply, message) => {
