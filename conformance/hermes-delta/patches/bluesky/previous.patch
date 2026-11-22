@@ -1,0 +1,19 @@
+diff --git a/src/screens/Settings/AboutSettings.tsx b/src/screens/Settings/AboutSettings.tsx
+index 286bbe8..9ffb520 100644
+--- a/src/screens/Settings/AboutSettings.tsx
++++ b/src/screens/Settings/AboutSettings.tsx
+@@ -103,6 +103,14 @@ export function AboutSettingsScreen({}: Props) {
+               <Trans>Privacy Policy</Trans>
+             </SettingsList.ItemText>
+           </SettingsList.LinkItem>
++          <SettingsList.LinkItem
++            to="https://bsky.social/about/support/community-guidelines"
++            label={_(msg`Community Guidelines`)}>
++            <SettingsList.ItemIcon icon={NewspaperIcon} />
++            <SettingsList.ItemText>
++              <Trans>Community Guidelines</Trans>
++            </SettingsList.ItemText>
++          </SettingsList.LinkItem>
+           <SettingsList.LinkItem
+             to={STATUS_PAGE_URL}
+             label={_(msg`Status Page`)}>

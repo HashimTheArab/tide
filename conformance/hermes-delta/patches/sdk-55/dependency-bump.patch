@@ -1,0 +1,39 @@
+diff --git a/package-lock.json b/package-lock.json
+index 1f8ad7d..bf53082 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -9,7 +9,7 @@
+       "version": "1.0.0",
+       "dependencies": {
+         "expo": "55.0.32",
+-        "expo-updates": "55.0.28",
++        "expo-updates": "55.0.33",
+         "react": "19.2.0",
+         "react-native": "0.83.10"
+       }
+@@ -3988,9 +3988,9 @@
+       "license": "MIT"
+     },
+     "node_modules/expo-updates": {
+-      "version": "55.0.28",
+-      "resolved": "https://registry.npmjs.org/expo-updates/-/expo-updates-55.0.28.tgz",
+-      "integrity": "sha512-XYYyKWkCWVkV+TxcIuCi1YkdD7jTuJOFIop3swis6hmBdQBDSXYMy4N8QMdQJ4C4nvhuy+vB/H8h3sRAPaDqlQ==",
++      "version": "55.0.33",
++      "resolved": "https://registry.npmjs.org/expo-updates/-/expo-updates-55.0.33.tgz",
++      "integrity": "sha512-4KJF2o37o7LOaVtFFoIThR/j4vVsZfMjjT32yoWzMpgJ5zd0OXDjSyA8/dDLDfW6kqpJJR+3QfHYGoWgifswdg==",
+       "license": "MIT",
+       "dependencies": {
+         "@expo/code-signing-certificates": "^0.0.6",
+diff --git a/package.json b/package.json
+index 2e51738..851a405 100644
+--- a/package.json
++++ b/package.json
+@@ -5,7 +5,7 @@
+   "main": "index.js",
+   "dependencies": {
+     "expo": "55.0.32",
+-    "expo-updates": "55.0.28",
++    "expo-updates": "55.0.33",
+     "react": "19.2.0",
+     "react-native": "0.83.10"
+   }

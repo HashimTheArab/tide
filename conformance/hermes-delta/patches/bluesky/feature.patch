@@ -1,0 +1,175 @@
+diff --git a/src/screens/Settings/AboutSettings.tsx b/src/screens/Settings/AboutSettings.tsx
+index 9ffb520..fcbd151 100644
+--- a/src/screens/Settings/AboutSettings.tsx
++++ b/src/screens/Settings/AboutSettings.tsx
+@@ -30,6 +30,7 @@ import {IS_ANDROID, IS_IOS, IS_NATIVE} from '#/env'
+ import {useDemoMode} from '#/storage/hooks/demo-mode'
+ import {useDevMode} from '#/storage/hooks/dev-mode'
+ import {OTAInfo} from './components/OTAInfo'
++import {StorageUsage} from './components/StorageUsage'
+ 
+ type Props = NativeStackScreenProps<CommonNavigatorParams, 'AboutSettings'>
+ export function AboutSettingsScreen({}: Props) {
+@@ -146,6 +147,8 @@ export function AboutSettingsScreen({}: Props) {
+               {isClearingImageCache && <SettingsList.ItemIcon icon={Loader} />}
+             </SettingsList.PressableItem>
+           )}
++          <StorageUsage />
++          <SettingsList.Divider />
+           <SettingsList.PressableItem
+             label={_(msg`Version ${env.APP_VERSION}`)}
+             accessibilityHint={_(msg`Copies build version to clipboard`)}
+diff --git a/src/screens/Settings/components/StorageUsage.tsx b/src/screens/Settings/components/StorageUsage.tsx
+new file mode 100644
+index 0000000..26df5f1
+--- /dev/null
++++ b/src/screens/Settings/components/StorageUsage.tsx
+@@ -0,0 +1,148 @@
++import {useCallback, useMemo} from 'react'
++import {Directory, Paths} from 'expo-file-system'
++import {Image} from 'expo-image'
++import {msg} from '@lingui/core/macro'
++import {useLingui} from '@lingui/react'
++import {Trans} from '@lingui/react/macro'
++import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
++
++import {purgeTemporaryImageFiles} from '#/state/gallery'
++import {atoms as a, useTheme} from '#/alf'
++import {Button, ButtonIcon, ButtonText} from '#/components/Button'
++import {ArrowRotateCounterClockwise_Stroke2_Corner0_Rounded as RefreshIcon} from '#/components/icons/ArrowRotate'
++import {CircleInfo_Stroke2_Corner0_Rounded as InfoIcon} from '#/components/icons/CircleInfo'
++import {Trash_Stroke2_Corner0_Rounded as TrashIcon} from '#/components/icons/Trash'
++import {Loader} from '#/components/Loader'
++import * as Toast from '#/components/Toast'
++import {Text} from '#/components/Typography'
++import {IS_NATIVE} from '#/env'
++import * as SettingsList from './SettingsList'
++
++const RQKEY = ['storage-usage']
++const MEGABYTE = 1024 * 1024
++
++type Usage = {
++  cacheBytes: number
++  freeBytes: number
++  totalBytes: number
++}
++
++function directorySize(directory: Directory): number {
++  try {
++    return directory.size ?? 0
++  } catch {
++    return 0
++  }
++}
++
++async function readUsage(): Promise<Usage> {
++  return {
++    cacheBytes: directorySize(new Directory(Paths.cache)),
++    freeBytes: Paths.availableDiskSpace,
++    totalBytes: Paths.totalDiskSpace,
++  }
++}
++
++function useStorageUsage() {
++  return useQuery({
++    queryKey: RQKEY,
++    queryFn: readUsage,
++    staleTime: 30e3,
++    enabled: IS_NATIVE,
++  })
++}
++
++export function StorageUsage() {
++  const {_, i18n} = useLingui()
++  const t = useTheme()
++  const queryClient = useQueryClient()
++  const {data, isPending, isFetching, isError, refetch} = useStorageUsage()
++
++  const format = useCallback(
++    (bytes: number) =>
++      i18n.number(bytes / MEGABYTE, {
++        notation: 'compact',
++        style: 'unit',
++        unit: 'megabyte',
++      }),
++    [i18n],
++  )
++
++  const usedShare = useMemo(() => {
++    if (!data || data.totalBytes <= 0) return undefined
++    return 1 - data.freeBytes / data.totalBytes
++  }, [data])
++
++  const {mutate: clearCache, isPending: isClearing} = useMutation({
++    mutationFn: async () => {
++      const before = await readUsage()
++      purgeTemporaryImageFiles()
++      await Image.clearDiskCache()
++      await Image.clearMemoryCache()
++      const after = await readUsage()
++      return Math.max(0, before.cacheBytes - after.cacheBytes)
++    },
++    onSuccess: freed => {
++      Toast.show(_(msg`Freed ${format(freed)} of cached files`))
++      void queryClient.invalidateQueries({queryKey: RQKEY})
++    },
++    onError: error => {
++      Toast.show(_(msg`Could not clear cached files: ${error.message}`), {
++        type: 'error',
++      })
++    },
++  })
++
++  if (!IS_NATIVE) {
++    return null
++  }
++
++  return (
++    <SettingsList.Group iconInset={false}>
++      <SettingsList.ItemIcon icon={InfoIcon} />
++      <SettingsList.ItemText>
++        <Trans>Storage</Trans>
++      </SettingsList.ItemText>
++      <Text style={[a.text_sm, a.leading_snug, t.atoms.text_contrast_medium]}>
++        {isPending ? (
++          <Trans>Checking how much space Bluesky uses…</Trans>
++        ) : isError || !data ? (
++          <Trans>Storage details are not available on this device.</Trans>
++        ) : (
++          <Trans>
++            Cached files use {format(data.cacheBytes)}. Your device has{' '}
++            {format(data.freeBytes)} free of {format(data.totalBytes)}
++            {usedShare === undefined
++              ? ''
++              : ` (${i18n.number(usedShare, {style: 'percent'})} used)`}
++            .
++          </Trans>
++        )}
++      </Text>
++      <Button
++        label={_(msg`Refresh storage details`)}
++        disabled={isFetching || isClearing}
++        variant="solid"
++        size="small"
++        color="secondary"
++        onPress={() => void refetch()}>
++        <ButtonIcon icon={isFetching ? Loader : RefreshIcon} />
++        <ButtonText>
++          <Trans>Refresh</Trans>
++        </ButtonText>
++      </Button>
++      <Button
++        label={_(msg`Clear cached files`)}
++        disabled={isClearing || !data || data.cacheBytes === 0}
++        variant="solid"
++        size="small"
++        color="negative"
++        onPress={() => clearCache()}>
++        <ButtonIcon icon={isClearing ? Loader : TrashIcon} />
++        <ButtonText>
++          <Trans>Clear cached files</Trans>
++        </ButtonText>
++      </Button>
++    </SettingsList.Group>
++  )
++}

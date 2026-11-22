@@ -1,0 +1,172 @@
+// Patch sizes as Tide stores them: makeBsdiff patches that pass the publish self-check, judged by the keep rule.
+import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
+
+import { sha256Base64Url } from "@tide-ota/protocol";
+
+import type { AppId, ChangeId } from "./apps.ts";
+import { makeBsdiff } from "../../../packages/cli/src/bsdiff.ts";
+import { checkPatch } from "../../../packages/cli/src/publish-patch.ts";
+import { CHANGES } from "./apps.ts";
+
+/** The bundles a device can be running when the measured update is published. */
+export const BASES = {
+  ota: "the previous OTA update (the OTA compile base)",
+  embedded: "the bundle the release build embeds (the embedded compile base)",
+  "older-ota": "an OTA update one release older, from the embedded build's source",
+} as const;
+export type BaseKind = keyof typeof BASES;
+
+/** The new bundle, built three ways from the same JS. */
+export const TARGETS = {
+  plain: "what expo export writes",
+  "delta-ota": "the same JS and flags, plus -base-bytecode of the OTA base",
+  "delta-embedded": "the same JS and flags, plus -base-bytecode of the embedded base",
+} as const;
+export type TargetKind = keyof typeof TARGETS;
+
+export const KEEP_RULE =
+  "Tide stores a patch only when its bytes times two are at most the gzip-9 size of the new bundle " +
+  "(packages/cli/src/publish-patch.ts preparePatches)";
+
+/** Whether Tide keeps a patch of `patch` bytes for a new bundle of `gzip9` gzipped bytes; as preparePatches. */
+export const keeps = (patch: number, gzip9: number) => patch * 2 <= gzip9;
+
+export interface Bundle {
+  readonly bytes: number;
+  readonly sha256: string; // Hex.
+  readonly gzip9: number;
+}
+
+interface PatchSize {
+  readonly bytes: number;
+  readonly keep: boolean;
+}
+
+export type MeasuredTarget = Bundle & { readonly from: Readonly<Record<BaseKind, PatchSize>> };
+
+/** Returns a bundle's size, hex SHA-256 and gzip-9 size. */
+export function describe(bytes: Uint8Array): Bundle {
+  return {
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    gzip9: gzipSync(bytes, { level: 9 }).length,
+  };
+}
+
+/**
+ * Returns each target's size and the patch to it from each base. Every patch is Tide's makeBsdiff output and has
+ * passed checkPatch against the target's SHA-256; a patch that does not reproduce its target throws.
+ */
+export async function measureTargets(
+  bases: Readonly<Record<BaseKind, Uint8Array<ArrayBuffer>>>,
+  targets: Readonly<Record<TargetKind, Uint8Array<ArrayBuffer>>>,
+): Promise<Record<TargetKind, MeasuredTarget>> {
+  const out: Partial<Record<TargetKind, MeasuredTarget>> = {};
+  for (const kind of Object.keys(TARGETS) as TargetKind[]) {
+    const bytes = targets[kind];
+    const bundle = describe(bytes);
+    const hash = await sha256Base64Url(bytes);
+    const from: Partial<Record<BaseKind, PatchSize>> = {};
+    for (const base of Object.keys(BASES) as BaseKind[]) {
+      const patch = makeBsdiff(bases[base], bytes);
+      await checkPatch(bases[base], patch, { bytes, hash }, `${base} to ${kind}`);
+      from[base] = { bytes: patch.length, keep: keeps(patch.length, bundle.gzip9) };
+    }
+    out[kind] = { ...bundle, from: from as Record<BaseKind, PatchSize> };
+  }
+  return out as Record<TargetKind, MeasuredTarget>;
+}
+
+/** One app's measurements and the facts needed to rerun and read them. */
+export interface AppResult {
+  readonly id: AppId;
+  readonly title: string;
+  readonly source: Readonly<Record<string, string>>;
+  readonly platform: "android";
+  readonly machine: Readonly<Record<string, string>>;
+  readonly tools: unknown;
+  readonly export: unknown;
+  readonly embedded: unknown;
+  readonly delta: { readonly hermescArgs: readonly string[] };
+  readonly bases: Readonly<Record<BaseKind, Bundle>>;
+  readonly changes: Readonly<Record<ChangeId, ChangeResult>>;
+}
+
+/** One change: its patch file, its size in files and lines, and the targets built from it. */
+export interface ChangeResult {
+  readonly patch: string;
+  readonly files: number;
+  readonly added: number;
+  readonly removed: number;
+  readonly targets: Readonly<Record<TargetKind, MeasuredTarget>>;
+}
+
+export interface Results {
+  readonly schema: 1;
+  readonly about: string;
+  readonly keepRule: string;
+  readonly bases: typeof BASES;
+  readonly targets: typeof TARGETS;
+  readonly apps: readonly AppResult[];
+}
+
+const OTHER = { ota: "embedded", embedded: "ota" } as const;
+const n = (x: number) => x.toLocaleString("en-US");
+const saved = (plain: number, delta: number) =>
+  plain === 0 ? "0%" : `${(((plain - delta) / plain) * 100).toFixed(1)}%`;
+const yn = (p: PatchSize) => (p.keep ? "yes" : "no");
+
+/** Returns the results as Markdown: per app, one row per change and compile base, then totals. */
+export function renderTable(results: Results): string {
+  const lines = [
+    "# Hermes delta compiles: raw results",
+    "",
+    `Generated by \`pnpm hermes-delta\` into results.json beside this file. ${results.about}`,
+    "",
+    `Patch bytes are Tide's makeBsdiff output, each checked with checkPatch. ${results.keepRule}.`,
+    "Each cell gives the patch to the plain bundle, then to the bundle delta-compiled against the compile base.",
+    "",
+  ];
+  for (const app of results.apps) {
+    lines.push(
+      `## ${app.title}`,
+      "",
+      `Source: ${Object.values(app.source).join(" ")}. Bases: embedded ${n(app.bases.embedded.bytes)} B, ` +
+        `OTA ${n(app.bases.ota.bytes)} B, older OTA ${n(app.bases["older-ota"].bytes)} B.`,
+      "",
+      "| Change | Compile base | From compile base | Saved | From other base | From older OTA | " +
+        "Target gzip-9 plain / delta | Kept plain / delta (compile, other, older) |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    );
+    const totals = { ota: [0, 0, 0, 0, 0, 0], embedded: [0, 0, 0, 0, 0, 0] };
+    for (const change of Object.keys(CHANGES) as ChangeId[]) {
+      const c = app.changes[change];
+      for (const base of ["ota", "embedded"] as const) {
+        const plain = c.targets.plain;
+        const delta = c.targets[`delta-${base}`];
+        const pairs = [base, OTHER[base], "older-ota"] as const;
+        const t = totals[base];
+        pairs.forEach((b, i) => {
+          t[2 * i] = (t[2 * i] ?? 0) + plain.from[b].bytes;
+          t[2 * i + 1] = (t[2 * i + 1] ?? 0) + delta.from[b].bytes;
+        });
+        const cell = (b: BaseKind) => `${n(plain.from[b].bytes)} → ${n(delta.from[b].bytes)}`;
+        const kept = (t: MeasuredTarget) => pairs.map((b) => yn(t.from[b])).join(" ");
+        lines.push(
+          `| ${change} (+${c.added} −${c.removed}) | ${base} | ${cell(base)} | ` +
+            `${saved(plain.from[base].bytes, delta.from[base].bytes)} | ${cell(OTHER[base])} | ` +
+            `${cell("older-ota")} | ${n(plain.gzip9)} / ${n(delta.gzip9)} | ${kept(plain)} / ${kept(delta)} |`,
+        );
+      }
+    }
+    for (const base of ["ota", "embedded"] as const) {
+      const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0] = totals[base];
+      lines.push(
+        `| all changes | ${base} | ${n(a)} → ${n(b)} | ${saved(a, b)} | ${n(c)} → ${n(d)} | ${n(e)} → ${n(f)} | | |`,
+      );
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}

@@ -1,0 +1,13 @@
+diff --git a/src/state/queries/post-liked-by.ts b/src/state/queries/post-liked-by.ts
+index b59c5f5..8477797 100644
+--- a/src/state/queries/post-liked-by.ts
++++ b/src/state/queries/post-liked-by.ts
+@@ -9,7 +9,7 @@ import {
+ import {useAppviewClient} from '#/state/session'
+ import {app} from '#/lexicons'
+ 
+-const PAGE_SIZE = 30
++const PAGE_SIZE = 50
+ type RQPageParam = string | undefined
+ 
+ // TODO refactor invalidate on mutate?
