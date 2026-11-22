@@ -10,6 +10,7 @@ import type {
 import {
   MAX_BASE_BYTES,
   MAX_IDENTITIES_BYTES,
+  MAX_KEYID_BYTES,
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   applyBsdiff,
@@ -1094,6 +1095,30 @@ export function manifestCases(harness: Harness): void {
           encodeIdentityPointer(new Map([[keyid, MAIN_MANIFEST as PointerEntry]])),
         );
         expectServed(await get("v3-long", as(keyid)), MAIN_MANIFEST);
+      });
+
+      // Node refuses a request head over 16 KiB with 431, before the app sees it.
+      test("serves a keyid of escaped length MAX_KEYID_BYTES beside a stock client's other headers", async () => {
+        const keyid = '"\\'.repeat(MAX_KEYID_BYTES / 4);
+        const escaped = keyid.replace(/["\\]/g, "\\$&");
+        expect(escaped.length).toBe(MAX_KEYID_BYTES);
+        await pointer(
+          "v3-longest",
+          encodeIdentityPointer(new Map([[keyid, MAIN_MANIFEST as PointerEntry]])),
+        );
+        const got = await get("v3-longest", {
+          "expo-expect-signature": `sig, keyid="${escaped}", alg="rsa-v1_5-sha256"`,
+          "expo-api-version": "1",
+          "expo-updates-environment": "PRODUCTION",
+          "expo-json-error": "true",
+          "expo-current-update-id": NEW_ID,
+          "expo-embedded-update-id": EMBEDDED_ID,
+          "expo-recent-failed-update-ids": `"${NEW_ID}"`,
+          "expo-extra-params": 'build="1234", locale="en-US"',
+          "eas-client-id": CLIENT_LOW,
+          "user-agent": "okhttp/4.12.0",
+        });
+        expectServed(got, MAIN_MANIFEST);
       });
 
       test("a keyid without an entry is 404 with a fixed body, under no-update signed per keyid", async () => {

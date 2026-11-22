@@ -7,7 +7,16 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
-import { diskPath, encodeStoredReply } from "@tide-ota/protocol";
+import {
+  MAX_REPLY_BYTES,
+  buildManifest,
+  cryptoKeySigner,
+  diskPath,
+  encodeIdentityPointer,
+  encodeMultipart,
+  encodeStoredReply,
+  expoSignature,
+} from "@tide-ota/protocol";
 
 import type { Objects } from "./publish-fixture.ts";
 import { startServer, storeFromEnv } from "../../server/src/node.ts";
@@ -18,6 +27,7 @@ import { run, utf8 } from "./helpers.ts";
 import {
   IOS,
   MAIN,
+  T,
   diskObjects,
   env,
   main,
@@ -120,6 +130,7 @@ interface Published {
   readonly updateId: string;
   readonly hash: string;
   readonly bundleKey: string;
+  readonly launchUrl: string;
 }
 
 /**
@@ -145,6 +156,7 @@ async function publishThrough(
     updateId: manifest.id,
     hash: manifest.launchAsset.hash,
     bundleKey: new URL(manifest.launchAsset.url).pathname.slice(1),
+    launchUrl: manifest.launchAsset.url,
   };
 }
 
@@ -284,6 +296,40 @@ describe.each([
     expect(await tide(args(base))).toEqual(
       failure(PROBE_EXIT.bundleMissing, "GET launch asset answered 404"),
     );
+  });
+
+  test("a version-3 entry whose multipart body is over MAX_REPLY_BYTES passes", async () => {
+    const { base, updateId, hash, launchUrl } = store.published();
+    const signer = cryptoKeySigner(main.keys.privateKey, "main");
+    const entry = async (pad: number) => {
+      const body = buildManifest({
+        id: updateId,
+        createdAt: new Date(T),
+        runtimeVersion: "1.0.0",
+        launchAsset: {
+          hash,
+          contentType: "application/javascript",
+          fileExtension: ".bundle",
+          url: launchUrl,
+        },
+        assets: [],
+        metadata: {},
+        extra: { pad: "a".repeat(pad) },
+      });
+      const multipart = encodeMultipart([
+        { name: "manifest", body, signature: await expoSignature(body, signer) },
+      ]);
+      return { kind: "manifest" as const, updateId, manifestFilters: "", ...multipart };
+    };
+    const overhead = (await entry(0)).body.length;
+    const reply = await entry(MAX_REPLY_BYTES + 1 - overhead);
+    expect(reply.body.length).toBe(MAX_REPLY_BYTES + 1);
+    store.put(IOS, encodeIdentityPointer(new Map([["main", reply]])));
+    expect(await tide(args(base))).toEqual({
+      code: 0,
+      stdout: `manifest ${updateId}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
+      stderr: "",
+    });
   });
 
   test("a pointer that is not multipart fails as unparseable", async () => {

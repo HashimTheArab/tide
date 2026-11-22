@@ -61,13 +61,15 @@ export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 export const MAX_FILTERS_BYTES = 4096;
 /** The most identities one version-3 record holds. */
 export const MAX_IDENTITIES = 16;
-/** The longest keyid, escaped: Node's default request head limit, so every keyid that reaches both runtimes fits. */
-export const MAX_KEYID_BYTES = 16 * 1024;
+/** The longest keyid, escaped: its header and a stock client's others fit Node's default 16 KiB request head. */
+export const MAX_KEYID_BYTES = 4 * 1024;
 /**
  * The largest version-3 record at its padded size. The margin over `MAX_REPLY_BYTES` lets every valid version-1 or
  * version-2 record become a one-entry record under any keyid.
  */
 export const MAX_IDENTITIES_BYTES = MAX_REPLY_BYTES + 2 * MAX_KEYID_BYTES;
+/** The largest multipart body the server serves: a body is never longer than the record that carries it. */
+export const MAX_REPLY_BODY_BYTES = MAX_IDENTITIES_BYTES;
 
 const VERSION = 1;
 const ROLLOUT_VERSION = 2;

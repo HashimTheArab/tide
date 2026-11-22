@@ -148,10 +148,10 @@ version-2 rollout without `version`:
 - An array, sorted by keyid in code-unit order, each keyid once, 1 to 16 entries. A pointer entry is a `manifest`,
   `rollBackToEmbedded` or `rollout` (every version-2 rule applies); a `reply/no-update` entry is `noUpdateAvailable`.
 - A keyid is non-empty printable ASCII whose escaped length (each `"` and `\` counts twice, the same in JSON and in
-  the RFC 8941 header string) is at most 16 KiB, Node's default request head limit. So every keyid a request can
-  carry to both runtimes fits, and protocol `checkKeyId` applies the one rule to records, requests and the keyids the
-  CLI accepts.
-- Size: at most 2 MiB plus 32 KiB, measured with each rollout's percent padded to its longest spelling (5
+  the RFC 8941 header string) is at most 4 KiB, leaving room in Node's default 16 KiB request head for the
+  `expo-expect-signature` syntax and a stock client's other headers. Protocol `checkKeyId` applies the one rule to
+  records, requests and the keyids the CLI accepts.
+- Size: at most 2 MiB plus 8 KiB, measured with each rollout's percent padded to its longest spelling (5
   characters), so a later percent change never makes a stored record too large. The margin lets any valid version-1
   or version-2 record become a one-entry record under any keyid, body bytes unchanged.
 - Decode refuses anything encode would not write byte for byte, as for version 2, naming the field where it can.
@@ -160,7 +160,7 @@ Migration rules, for the writers:
 
 - A version-1 or version-2 record counts as the one identity its signatures carry. The server never reads that
   keyid and serves the record to every request, so buckets written before version 3 keep serving the same bytes.
-  A legacy keyid over 16 KiB keeps serving, but the CLI refuses to publish under it.
+  A legacy keyid over 4 KiB keeps serving, but the CLI refuses to publish under it.
 - Convert `reply/no-update` to version 3 first, then every pointer, each as one entry for the existing identity. Add
   an entry for a second identity only when no version-1 or version-2 record is left: a legacy pointer would serve the
   old identity's manifest to the new identity's builds.

@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import type { Part, StoredReply } from "@tide-ota/protocol";
 import {
   HEADER_VALUE,
-  MAX_REPLY_BYTES,
+  MAX_REPLY_BODY_BYTES,
   ProtocolError,
   UUID,
   assetHash,
@@ -368,12 +368,12 @@ async function get(
 async function readReply(res: Response): Promise<Uint8Array<ArrayBuffer>> {
   let body: Uint8Array<ArrayBuffer> | undefined;
   try {
-    body = await readLimited(res, MAX_REPLY_BYTES);
+    body = await readLimited(res, MAX_REPLY_BODY_BYTES);
   } catch {
     throw new ProbeFailure("unreachable", "GET /manifest failed: the body did not arrive in time");
   }
   if (body === undefined) {
-    throw new ProbeFailure("unparseable", `the reply is over ${MAX_REPLY_BYTES} bytes`);
+    throw new ProbeFailure("unparseable", `the reply is over ${MAX_REPLY_BODY_BYTES} bytes`);
   }
   return body;
 }
