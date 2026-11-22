@@ -400,8 +400,9 @@ async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Pr
   if (now.getTime() >= notAfter) throw fail("has expired");
 
   const extensions = chainExtensions(der, cert.extensions, fail);
+  const scopes = { tbs: iosOids(der, cert.tbs), extensions: iosOids(der, cert.extensions) };
   for (const [id, scope] of IOS_LOOKUPS) {
-    const found = iosFindOid(der, scope === "tbs" ? cert.tbs : cert.extensions, id);
+    const found = scopes[scope].find((t) => iosOid(der, t) === id)?.start;
     if (found !== extensions.get(id)?.id.start) {
       throw fail("has a field that hides an extension from the iOS client");
     }
@@ -517,29 +518,26 @@ const IOS_LOOKUPS: readonly (readonly [string, "tbs" | "extensions"])[] = [
 ];
 
 /**
- * Returns the offset of the first OID equal to `target` in iOS's depth-first search under `parent`. iOS also reads
- * an OCTET STRING's contents as DER when they parse; contents only a lenient reader would parse are not searched.
+ * Appends the OIDs under `parent` to `out` in iOS's depth-first order, visiting each node once. iOS also reads an
+ * OCTET STRING's contents as DER when they parse; contents only a lenient reader would parse are not searched.
  */
-function iosFindOid(der: Uint8Array, parent: Tlv | undefined, target: string): number | undefined {
-  if (parent === undefined) return undefined;
+function iosOids(der: Uint8Array, parent: Tlv | undefined, out: Tlv[] = []): Tlv[] {
+  if (parent === undefined) return out;
   for (const child of children(der, parent)) {
     if (child.tag === OID) {
-      if (iosOid(der, child) === target) return child.start;
-      continue;
-    }
-    if (child.tag === OCTET_STRING) {
+      out.push(child);
+    } else if (child.tag === OCTET_STRING) {
+      const mark = out.length;
       try {
-        iosFindOid(der, child, ""); // No OID decodes to "", so this only parses the contents.
+        iosOids(der, child, out);
       } catch {
-        continue;
+        out.length = mark;
       }
-    } else if ((child.tag & 0x20) === 0) {
-      continue;
+    } else if ((child.tag & 0x20) !== 0) {
+      iosOids(der, child, out);
     }
-    const found = iosFindOid(der, child, target);
-    if (found !== undefined) return found;
   }
-  return undefined;
+  return out;
 }
 
 /** Returns the OID at `tlv` as iOS's ASN1Decoder prints it: lenient, with 64-bit arcs. */
@@ -590,16 +588,18 @@ interface KeyUsage {
   readonly bytes: Uint8Array;
 }
 
-/** Returns a strict DER Key Usage value: unused count 0 to 7, 0 when empty, and zero padding bits. */
+/** Returns a strict DER Key Usage value: unused count 0 to 7, one or two content octets, and zero padding bits. */
 function keyUsage(value: Uint8Array, malformed: () => ProtocolError): KeyUsage {
   const tlv = readTlv(value, 0, value.length);
   if (tlv.tag !== BIT_STRING || tlv.end !== value.length || tlv.body === tlv.end) throw malformed();
   const unused = value[tlv.body] ?? 0;
   const bytes = value.subarray(tlv.body + 1, tlv.end);
-  // iOS reads the first byte whole, so a set padding bit would count there and not on Android.
+  // Apple's parser takes only one or two content octets. iOS reads the first byte whole, so a set padding bit would
+  // count there and not on Android.
   if (
     unused > 7 ||
-    (bytes.length === 0 && unused > 0) ||
+    bytes.length < 1 ||
+    bytes.length > 2 ||
     ((bytes.at(-1) ?? 0) & ((1 << unused) - 1)) !== 0
   ) {
     throw malformed();

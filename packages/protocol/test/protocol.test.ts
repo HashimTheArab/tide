@@ -1639,6 +1639,12 @@ describe("certificate chain", () => {
       { leaf: { extensions: [EXTENSION.digitalSignature, EXTENSION.serverAuthOnly] } },
       "leaf must have Extended Key Usage codeSigning",
     ],
+    // Apple's parser takes one or two Key Usage content octets and refuses a critical extension it cannot parse.
+    [
+      "a leaf whose Key Usage has three content octets",
+      { leaf: { extensions: [EXTENSION.keyUsage("07800000"), EXTENSION.codeSigning] } },
+      "leaf has a malformed extension",
+    ],
   ])("leaf rules: %s is refused", async (_, spec, message) => {
     await refuses(spec, message);
   });
@@ -1770,6 +1776,14 @@ describe("certificate chain", () => {
       "certificate_chain",
       `root ${message}`,
     );
+  });
+
+  test("profile: an extension value of OCTET STRINGs nested 22 deep is walked once per level", async () => {
+    let nested = Uint8Array.of(1, 2, 3);
+    for (let level = 0; level < 22; level++) nested = derTlv(0x04, nested);
+    const ski = derTlv(0x30, derOid("2.5.29.14"), derTlv(0x04, nested));
+    const { served, root } = await testChain({ leaf: { extensions: [...CODE_SIGNING, ski] } });
+    await expect(certificateChain(served, root, CHAIN_NOW)).resolves.toBeDefined();
   });
 
   test("profile: a leaf and an intermediate with a bad serial are refused by role", async () => {
