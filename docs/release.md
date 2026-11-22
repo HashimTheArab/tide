@@ -64,7 +64,8 @@ The workflow's three jobs:
 - **build** checks the tag and that its commit is on `main`, runs the gate, and packs the three tarballs at the tag's
   version (the repository stays at `0.0.0`).
 - **publish** is the only job with an OIDC token and runs no repository code. It publishes protocol, server and cli
-  with provenance, and skips a version npm already holds only when the bytes match.
+  with provenance, skips a version npm already holds only when the bytes match, then records a GitHub attestation of
+  each tarball, which writers check before installing the CLI ([deploy.md](deploy.md#publishing)).
 - **release** creates the GitHub Release and attaches the same tarballs.
 
 If publish or release fails, use **Re-run failed jobs**: they reuse the build's tarballs and skip what already landed
@@ -74,14 +75,16 @@ with the same bytes.
 
 - **npmjs.com:** each package's page for the new version shows a Provenance section. It must name
   `HashimTheArab/tide`, the tag's commit and a `release.yml` run.
-- **npm:** in an empty directory, install the release and check its signatures and attestations:
+- **GitHub attestations:** in an empty directory, fetch each package from npm and check it was signed by
+  `release.yml` in `HashimTheArab/tide` on a GitHub-hosted runner. Each must print a verified result:
 
   ```sh
-  npm install @tide-ota/server@0.1.0 @tide-ota/cli@0.1.0
-  npm audit signatures
+  for p in protocol server cli; do
+    npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
+    gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide \
+      --signer-workflow HashimTheArab/tide/.github/workflows/release.yml --deny-self-hosted-runners
+  done
   ```
-
-  Every package must have a verified registry signature, and the three `@tide-ota` packages verified attestations.
 
 ## Placeholders
 
@@ -103,4 +106,8 @@ package's `repository.url`. Before the next release:
 - Replace each package's trusted publisher: `npm trust list` gives its id for `npm trust revoke`, then run
   `npm trust github` as above with the new `--repo`.
 - Update every reference to the old owner (`git grep HashimTheArab`): `repository`, `homepage` and `bugs` in the
-  root and package `package.json` files, the links in the docs, and `--repo` in the commands above.
+  root and package `package.json` files, the links in the docs, and `--repo` and `--signer-workflow` here and in
+  [deploy.md](deploy.md#publishing).
+
+Attestation certificates keep the name the repository had when it signed, so a version released before the change
+still verifies only with the old `--signer-workflow`.

@@ -120,12 +120,12 @@ describe("trigger and permissions", () => {
     expect(workflow.on).toEqual({ push: { tags: ["v*"] } });
   });
 
-  // The build runs repository code, so it gets neither the OIDC token npm trusts nor write access.
+  // The build runs repository code, so it gets neither the OIDC token npm and attestations trust nor write access.
   test("only publish can mint an id token and only release can write contents", () => {
     expect(workflow.permissions).toEqual({ contents: "read" });
     expect(Object.entries(jobs).map(([name, j]) => [name, j.permissions])).toEqual([
       ["build", undefined],
-      ["publish", { "id-token": "write" }],
+      ["publish", { "id-token": "write", attestations: "write" }],
       ["release", { contents: "write" }],
     ]);
   });
@@ -334,6 +334,17 @@ describe("publish", () => {
       ["11.10.0", 0],
       ["12.0.0", 0],
     ]);
+  });
+
+  // Writers install a CLI only after gh attestation verify finds these tarballs' digests signed by this workflow.
+  test("publish attests the downloaded tarballs, after publishing them", () => {
+    const ids = job("publish").steps.map((s) => s.id);
+    expect(ids.indexOf("attest")).toBeGreaterThan(ids.indexOf("publish"));
+    const attest = step("publish", "attest");
+    expect(attest.uses).toMatch(/^actions\/attest@[0-9a-f]{40}$/);
+    expect(attest.with).toEqual({
+      "subject-path": `${step("publish", "download").with?.path}/*.tgz`,
+    });
   });
 
   // Runs for one dist-tag never interleave a check with another run's publishes.
@@ -665,6 +676,39 @@ save();
       assets: { "tide-ota-server.tgz": uploaded("other bytes") },
     };
     expect(await assets([draft])).toEqual({ code: 1, releases: [draft] });
+  });
+});
+
+describe("checking a release", () => {
+  const repo = /github\.com\/([\w.-]+\/[\w.-]+?)\.git$/.exec(
+    (JSON.parse(read("package.json")) as { repository: { url: string } }).repository.url,
+  )![1]!;
+  const commands = (doc: string, name: string) =>
+    [
+      ...read(doc)
+        .replaceAll(/\s*\\\n\s*/g, " ")
+        .matchAll(new RegExp(`${name} ([^\\n]*)`, "g")),
+    ].map((m) => m[1]!);
+
+  // A payload names any repository its signer likes; only the certificate's identity proves the signer.
+  test("every documented check pins the signer to this workflow on a hosted runner", () => {
+    const verify = `--repo ${repo} --signer-workflow ${repo}/${WORKFLOW_PATH} --deny-self-hosted-runners`;
+    for (const doc of ["docs/deploy.md", "docs/release.md"]) {
+      const checks = commands(doc, "gh attestation verify");
+      expect([doc, checks.length > 0]).toEqual([doc, true]);
+      for (const args of checks)
+        expect([doc, args]).toEqual([doc, expect.stringContaining(verify)]);
+    }
+  });
+
+  // Anything npm fetched beyond the checked tarballs would run unverified with the signing key.
+  test("the writer installs only the tarballs it checked, offline", () => {
+    const installs = commands("docs/deploy.md", "npm install --prefix");
+    expect(installs).toEqual([
+      expect.stringMatching(
+        /--offline .*\.\/tide-ota-cli-\S+\.tgz \.\/tide-ota-protocol-\S+\.tgz$/,
+      ),
+    ]);
   });
 });
 
