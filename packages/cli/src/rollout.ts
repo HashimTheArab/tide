@@ -50,7 +50,7 @@ export async function rollout(
     const identity = await buildIdentity(env, now());
     const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
-    const fallback = await servingBucket(
+    await servingBucket(
       bucket,
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
@@ -59,12 +59,6 @@ export async function rollout(
     for (const key of keys) {
       const previous = await readPointer(bucket, key, identity.keyId);
       const { reply, sides = [], others } = previous;
-      // The server cannot serve a version-1 reply/no-update under a version-3 pointer.
-      if (others !== undefined && fallback !== "identities") {
-        throw new PublishError(
-          `${key} holds replies for several keyids, but reply/no-update holds one reply for every keyid`,
-        );
-      }
       if (previous.etag === undefined) {
         throw new PublishError(`${key} does not exist: there is no rollout`);
       }

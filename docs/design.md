@@ -584,7 +584,7 @@ listing or read fails or a record or the legacy map does not decode; 2 on a usag
 its asset keys join the identity check. Nothing is signed or timestamped, so it needs no key, but it reads the build
 pins (Keys) before the bucket is opened and refuses a bucket whose `reply/no-update` is absent or signed under another
 identity: a build is registered only where its own certificate and `keyid` are already served, so a first publish
-cannot pin another identity over its asset keys. In a version-3 bucket that means the keyid's `reply/no-update` entry. Exit codes as publish; stdout
+cannot pin another identity over its asset keys. In a version-3 bucket that means the keyid's `reply/no-update` entry. A version-1 `reply/no-update` beside a version-3 pointer refuses, as the server answers 503 there. Exit codes as publish; stdout
 `bases/<id> bundles/<64 hex>`.
 
 - **Inputs**, all from one build: its update ID is random per build, so mixing builds registers a base no installed

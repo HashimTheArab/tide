@@ -464,8 +464,11 @@ async function pointerKeys(bucket: Bucket): Promise<string[]> {
   });
 }
 
-/** Refuses when any pointer is a version-3 record. */
-async function refuseIdentities(bucket: Bucket): Promise<void> {
+/** Refuses when any pointer is a version-3 record; `refusal` names it. */
+async function refuseIdentities(
+  bucket: Bucket,
+  refusal: (key: string) => string = severalKeyIds,
+): Promise<void> {
   for (const key of await pointerKeys(bucket)) {
     const object = await stored(bucket, key, MAX_IDENTITIES_BYTES);
     let layout;
@@ -474,19 +477,19 @@ async function refuseIdentities(bucket: Bucket): Promise<void> {
     } catch {
       continue; // A writer replaces an unreadable pointer it targets; it holds no identity to keep.
     }
-    if (layout === "identities") throw new KeyError(severalKeyIds(key));
+    if (layout === "identities") throw new KeyError(refusal(key));
   }
 }
 
 /**
- * For a writer that signs nothing, also refuses a bucket without this keyid's `reply/no-update`; `absent` says why
- * when it is absent. Returns its layout.
+ * For a writer that signs nothing, also refuses a bucket without this keyid's `reply/no-update`, or whose version-1
+ * `reply/no-update` sits beside a version-3 pointer; `absent` says why when it is absent.
  */
 export async function servingBucket(
   bucket: Bucket,
   identity: Identity,
   absent: string,
-): Promise<"legacy" | "identities"> {
+): Promise<void> {
   const { noUpdate, fallback } = await checkBucket(bucket, identity);
   if (fallback === undefined) throw new KeyError(absent);
   if (noUpdate === undefined) {
@@ -494,8 +497,13 @@ export async function servingBucket(
       `${NO_UPDATE_KEY} holds no reply for keyid ${JSON.stringify(identity.keyId)}: tide publish, republish or rollback writes it`,
     );
   }
-  return fallback;
+  // The server answers 503 where a version-3 pointer falls back to a version-1 reply/no-update.
+  if (fallback === "legacy") await refuseIdentities(bucket, mixedLayout);
 }
+
+/** The refusal of a version-3 pointer beside a version-1 `reply/no-update`. */
+const mixedLayout = (key: string) =>
+  `${key} holds replies for several keyids, but ${NO_UPDATE_KEY} holds one reply for every keyid`;
 
 /**
  * Reads `reply/no-update`, refusing it unreadable, under another identity or holding several keyids; undefined when

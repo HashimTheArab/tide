@@ -576,6 +576,19 @@ describe.each(Object.keys(STORES) as (keyof typeof STORES)[])("on %s", (kind) =>
       expect(store.snapshot()).toEqual(before);
     });
 
+    test("a version-1 reply/no-update beside a version-3 pointer is refused: the server cannot serve it", async () => {
+      const store = await twoIdentities({ "reply/no-update": await noUpdateBy(main) });
+      const before = store.snapshot();
+      expect(await register(args(build()), store)).toEqual({
+        code: 2,
+        out: [],
+        err: [
+          `tide: ${IOS} holds replies for several keyids, but reply/no-update holds one reply for every keyid`,
+        ],
+      });
+      expect(store.snapshot()).toEqual(before);
+    });
+
     test("root is refused while a legacy pointer serves main's reply to every keyid", async () => {
       const store = await twoIdentities({ [IOS]: await seededPointer("manifest", T, main) });
       const before = store.snapshot();
