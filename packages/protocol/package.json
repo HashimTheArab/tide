@@ -1,18 +1,18 @@
 {
   "name": "@tide-ota/protocol",
   "version": "0.0.0",
-  "description": "Expo Updates protocol v1 manifests, multipart bodies, signatures and bsdiff patches, on web-standard APIs.",
+  "description": "Expo Updates protocol v1 on web-standard APIs: manifests, multipart replies, code signing and bsdiff patches.",
   "keywords": [
-    "expo",
     "expo-updates",
-    "over-the-air",
-    "ota",
-    "react-native",
+    "expo-updates-protocol",
+    "manifest",
     "code-signing",
     "multipart",
-    "bsdiff"
+    "bsdiff",
+    "bspatch",
+    "web-crypto"
   ],
-  "homepage": "https://github.com/HashimTheArab/tide#readme",
+  "homepage": "https://github.com/HashimTheArab/tide/blob/main/docs/design.md",
   "bugs": {
     "url": "https://github.com/HashimTheArab/tide/issues"
   },
@@ -28,7 +28,7 @@
   ],
   "type": "module",
   "engines": {
-    "node": ">=26"
+    "node": ">=24.11"
   },
   "exports": {
     ".": "./src/index.ts"
@@ -36,7 +36,9 @@
   "publishConfig": {
     "exports": {
       ".": "./dist/index.js"
-    }
+    },
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
@@ -50,5 +52,6 @@
     "fast-check": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  }
+  },
+  "sideEffects": false
 }

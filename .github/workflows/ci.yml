@@ -63,7 +63,12 @@ jobs:
         run: pnpm test:container
 
   # Installs the packed packages into a fresh npm project and uses them; nothing is published.
+  # Also on the oldest Node the packages' engines field accepts.
   package:
+    strategy:
+      matrix:
+        node: ["", "24.11"]
+    name: package (Node ${{ matrix.node || '.nvmrc' }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -71,6 +76,8 @@ jobs:
 
       - name: Setup
         uses: ./.github/actions/setup
+        with:
+          node-version: ${{ matrix.node }}
 
       - name: Packed-install test
         run: pnpm test:pack

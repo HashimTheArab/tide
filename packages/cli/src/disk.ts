@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
 import { diskKey, diskPath, unescapeDiskPath } from "@tide-ota/protocol";
 
@@ -151,7 +151,9 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
   const acquire = (unstage: () => void): DatabaseSync => {
     let db: DatabaseSync | undefined;
     try {
-      db = new DatabaseSync(join(root, META, "mutex.sqlite"), { timeout: busyTimeoutMs });
+      // Loaded on first lock, so S3 users never load SQLite, which warns as experimental on early Node 24.
+      const sqlite = process.getBuiltinModule("node:sqlite");
+      db = new sqlite.DatabaseSync(join(root, META, "mutex.sqlite"), { timeout: busyTimeoutMs });
       db.exec("BEGIN IMMEDIATE");
       return db;
     } catch (e) {
