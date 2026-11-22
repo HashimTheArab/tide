@@ -133,18 +133,66 @@ export async function codeSigningCertificate(
   pem: string,
   now: Date,
 ): Promise<CodeSigningCertificate> {
-  // ASCII, with each delimiter alone on its line: iOS decodes nothing else.
-  const block =
-    /^(?:[\t\n\r ]*\n)?-----BEGIN CERTIFICATE-----\r?\n((?:[A-Za-z0-9+/=]*\r?\n)*)-----END CERTIFICATE-----(?:\r?\n[\t\n\r ]*)?$/.exec(
-      pem,
-    )?.[1];
-  if (block === undefined) {
-    throw new ProtocolError("certificate", "must be exactly one PEM CERTIFICATE block");
-  }
-  const der = decodeBase64(block.replace(/\r?\n/g, ""));
-  if (der === undefined) throw new ProtocolError("certificate", "must be canonical base64");
-  const cert = parseCertificate(der);
   const fail = (message: string) => new ProtocolError("certificate", message);
+  const der = pemCertificateDer(pem, "*", fail);
+  const { cert, key, notBefore, notAfter } = await checkedCertificate(der, fail);
+  if (!equal(der, cert.issuer, bytesOf(der, cert.subject))) {
+    throw fail("must be self-issued");
+  }
+  if (now.getTime() < notBefore) throw fail("is not valid yet");
+  if (now.getTime() > notAfter) throw fail("has expired");
+  const extensions = extensionsOf(der, cert.extensions);
+  const value = (id: string) => {
+    const ext = extensions.get(id);
+    return ext && der.subarray(ext.value.body, ext.value.end);
+  };
+  if (!digitalSignature(value(KEY_USAGE))) {
+    throw fail("must have Key Usage digitalSignature");
+  }
+  if (!extendedKeyUsages(value(EXT_KEY_USAGE)).includes(CODE_SIGNING)) {
+    throw fail("must have Extended Key Usage codeSigning");
+  }
+  if (extensions.has(EXPO_PROJECT_INFORMATION)) {
+    throw fail("must not carry Expo project information");
+  }
+  if (!(await signedBy(der, cert, key))) throw fail("has a self-signature that does not verify");
+  return { key, sha256: await sha256Hex(der) };
+}
+
+/**
+ * Returns the DER of `pem`, exactly one CERTIFICATE block with each delimiter alone on its line, as iOS decodes.
+ * `lines` is `+` to refuse blank lines inside the block, which Android's PEM reader takes for the end of headers.
+ */
+function pemCertificateDer(
+  pem: string,
+  lines: "*" | "+",
+  fail: (message: string) => ProtocolError,
+): Uint8Array<ArrayBuffer> {
+  const one = new RegExp(`^(?:[\\t\\n\\r ]*\\n)?${pemBlock(lines)}(?:\\r?\\n[\\t\\n\\r ]*)?$`);
+  const block = one.exec(pem)?.[1];
+  if (block === undefined) throw fail("must be exactly one PEM CERTIFICATE block");
+  const der = decodeBase64(block.replace(/\r?\n/g, ""));
+  if (der === undefined) throw fail("must be canonical base64");
+  return der;
+}
+
+const pemBlock = (lines: "*" | "+") =>
+  `-----BEGIN CERTIFICATE-----\\r?\\n((?:[A-Za-z0-9+/=]${lines}\\r?\\n)${lines})-----END CERTIFICATE-----`;
+
+/** A certificate that passed the checks both profiles share, with its verify key and validity in epoch ms. */
+interface CheckedCertificate {
+  readonly cert: Certificate;
+  readonly key: CryptoKey;
+  readonly notBefore: number;
+  readonly notAfter: number;
+}
+
+/** Checks X.509 v3, sha256WithRSAEncryption, a well-formed validity and an RSA key of 2048 to 4096 bits. */
+async function checkedCertificate(
+  der: Uint8Array<ArrayBuffer>,
+  fail: (message: string) => ProtocolError,
+): Promise<CheckedCertificate> {
+  const cert = parseCertificate(der);
   if (cert.version === undefined || !equal(der, cert.version, V3)) {
     throw fail("must be X.509 v3");
   }
@@ -160,43 +208,26 @@ export async function codeSigningCertificate(
   ) {
     throw fail("must be signed with sha256WithRSAEncryption");
   }
-  if (!equal(der, cert.issuer, bytesOf(der, cert.subject))) {
-    throw fail("must be self-issued");
-  }
   const validity = sequence(der, cert.validity);
   const [notBefore, notAfter] = validity.map((t) => time(der, t));
   if (notBefore === undefined || notAfter === undefined || validity.length !== 2) {
     throw fail("has a malformed validity");
   }
-  if (now.getTime() < notBefore) throw fail("is not valid yet");
-  if (now.getTime() > notAfter) throw fail("has expired");
-  const extensions = extensionsOf(der, cert.extensions);
-  if (!digitalSignature(extensions.get(KEY_USAGE))) {
-    throw fail("must have Key Usage digitalSignature");
-  }
-  if (!extendedKeyUsages(extensions.get(EXT_KEY_USAGE)).includes(CODE_SIGNING)) {
-    throw fail("must have Extended Key Usage codeSigning");
-  }
-  if (extensions.has(EXPO_PROJECT_INFORMATION)) {
-    throw fail("must not carry Expo project information");
-  }
   const key = await rsaKey(der, cert.spki);
   const { modulusLength: bits } = key.algorithm as { readonly modulusLength?: number };
-  if (bits === undefined || bits < 2048 || bits > 4096)
+  if (bits === undefined || bits < 2048 || bits > 4096) {
     throw fail("must hold an RSA key of 2048 to 4096 bits");
-  const signature = der.subarray(cert.signature.body, cert.signature.end);
-  if (
-    signature[0] !== 0 ||
-    !(await crypto.subtle.verify(
-      RSA,
-      key,
-      signature.slice(1),
-      der.slice(cert.tbs.start, cert.tbs.end),
-    ))
-  ) {
-    throw fail("has a self-signature that does not verify");
   }
-  return { key, sha256: await sha256Hex(der) };
+  return { cert, key, notBefore, notAfter };
+}
+
+/** True when the signature of the certificate `der` verifies under `key`. */
+async function signedBy(der: Uint8Array<ArrayBuffer>, cert: Certificate, key: CryptoKey) {
+  const signature = der.subarray(cert.signature.body, cert.signature.end);
+  return (
+    signature[0] === 0 &&
+    crypto.subtle.verify(RSA, key, signature.slice(1), der.slice(cert.tbs.start, cert.tbs.end))
+  );
 }
 
 /** Largest `certificate_chain` part body Tide reads. */
@@ -205,18 +236,12 @@ export const MAX_CHAIN_BYTES = 32_768;
 export const MAX_CHAIN_CERTIFICATES = 8;
 
 const CHAIN_GRAMMAR = "must be PEM CERTIFICATE blocks separated by single line ends";
-const CHAIN_COUNT = `must serve 1 to ${MAX_CHAIN_CERTIFICATES} certificates`;
-// Each delimiter alone on its line and no blank line inside a block: Android's PEM reader takes a blank CRLF line
-// for the end of headers.
-const PEM_BODY =
-  "-----BEGIN CERTIFICATE-----\\r?\\n((?:[A-Za-z0-9+/=]+\\r?\\n)+)-----END CERTIFICATE-----";
-const ROOT_PEM = new RegExp(`^(?:[\\t\\n\\r ]*\\n)?${PEM_BODY}(?:\\r?\\n[\\t\\n\\r ]*)?$`);
 
 /**
  * Returns the DER of each block of a `certificate_chain` part body, leaf first. Stricter than the client: the body
  * is ASCII and holds nothing but blocks, separated by one line end, with one optional trailing line end.
  */
-export function readCertificateChain(body: Uint8Array): Uint8Array<ArrayBuffer>[] {
+function readCertificateChain(body: Uint8Array): Uint8Array<ArrayBuffer>[] {
   const fail = (message: string) => new ProtocolError("certificate_chain", message);
   if (body.length === 0 || body.length > MAX_CHAIN_BYTES) {
     throw fail(`must be 1 to ${MAX_CHAIN_BYTES} bytes`);
@@ -226,14 +251,16 @@ export function readCertificateChain(body: Uint8Array): Uint8Array<ArrayBuffer>[
     if (byte > 0x7f) throw fail(CHAIN_GRAMMAR);
     text += String.fromCharCode(byte);
   }
-  const block = new RegExp(`${PEM_BODY}(\\r?\\n)?`, "y");
+  const block = new RegExp(`${pemBlock("+")}(\\r?\\n)?`, "y");
   const ders: Uint8Array<ArrayBuffer>[] = [];
   while (block.lastIndex < text.length) {
     const m = block.exec(text);
     if (m === null || (m[2] === undefined && block.lastIndex !== text.length)) {
       throw fail(CHAIN_GRAMMAR);
     }
-    if (ders.length === MAX_CHAIN_CERTIFICATES) throw fail(CHAIN_COUNT);
+    if (ders.length === MAX_CHAIN_CERTIFICATES) {
+      throw fail(`must serve 1 to ${MAX_CHAIN_CERTIFICATES} certificates`);
+    }
     const der = decodeBase64((m[1] ?? "").replace(/\r?\n/g, ""));
     if (der === undefined) throw fail("must be canonical base64");
     ders.push(der);
@@ -242,27 +269,20 @@ export function readCertificateChain(body: Uint8Array): Uint8Array<ArrayBuffer>[
 }
 
 /**
- * Returns the leaf's verify key when `served` (DERs, leaf first) followed by `root` is a chain that both
- * expo-updates clients accept in chain mode at `now`, under Tide's stricter profile. `root` is the PEM the app
- * embeds and must come from trusted configuration; with nothing served it is also the leaf.
+ * Returns the leaf's verify key when the `certificate_chain` part body `served` (undefined: no part) followed by
+ * `root` is a chain both expo-updates clients accept in chain mode at `now`, under Tide's stricter profile. `root`
+ * is the PEM the app embeds and must come from trusted configuration; with nothing served it is also the leaf.
  */
 export async function certificateChain(
-  served: readonly Uint8Array[],
+  served: Uint8Array | undefined,
   root: string,
   now: Date,
 ): Promise<CryptoKey> {
-  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
-    throw new ProtocolError("now", "must be a valid Date");
-  }
+  // A NaN instant would pass every validity comparison.
+  if (Number.isNaN(now.getTime())) throw new ProtocolError("now", "must be a valid Date");
   const fail = (message: string) => new ProtocolError("certificate_chain", message);
-  if (!Array.isArray(served) || !served.every((d) => d instanceof Uint8Array)) {
-    throw fail("must be an array of DER certificates");
-  }
-  if (served.length > MAX_CHAIN_CERTIFICATES) throw fail(CHAIN_COUNT);
-  const ders = served.map((d) => new Uint8Array(d));
-  const block = typeof root === "string" ? ROOT_PEM.exec(root)?.[1] : undefined;
-  const rootDer = block === undefined ? undefined : decodeBase64(block.replace(/\r?\n/g, ""));
-  if (rootDer === undefined) throw fail("root must be exactly one PEM CERTIFICATE block");
+  const ders = served === undefined ? [] : readCertificateChain(served);
+  const rootDer = pemCertificateDer(root, "+", (message) => fail(`root ${message}`));
   const members: Member[] = [];
   for (const [i, der] of ders.entries()) {
     members.push(await chainMember(der, now, i === 0 ? "leaf" : `intermediate ${i}`));
@@ -277,7 +297,7 @@ export async function certificateChain(
     if (!same(child.issuer, issuer.subject)) {
       throw fail(`${child.role} is not issued by the certificate above it`);
     }
-    if (!(await signedBy(child, issuer.key))) {
+    if (!(await signedBy(child.der, child.cert, issuer.key))) {
       throw fail(`${child.role} has a signature that does not verify under its issuer's key`);
     }
     // Apple's trust evaluation links a child's authority key ID to its issuer's subject key ID.
@@ -295,22 +315,20 @@ export async function certificateChain(
     }
   }
   if (!same(top.issuer, top.subject)) throw fail("root must be self-issued");
-  if (!(await signedBy(top, top.key))) throw fail("root has a self-signature that does not verify");
+  if (!(await signedBy(top.der, top.cert, top.key))) {
+    throw fail("root has a self-signature that does not verify");
+  }
 
   if (members.length > 1) {
     const isCa = (m: Member) => m.ca && hasKeyUsage(m.keyUsage, KEY_CERT_SIGN);
     if (!isCa(top)) throw fail("root must be a CA with Key Usage keyCertSign");
-    let project = top.project;
     let maxPathLen = top.pathLen;
     // Android's walk, from the intermediate under the root down to the one above the leaf.
     for (const m of members.slice(1, -1).reverse()) {
       if (!isCa(m)) throw fail(`${m.role} must be a CA with Key Usage keyCertSign`);
-      if (project && !same(project, m.project)) throw fail(`${m.role} ${PROJECT_MISMATCH}`);
-      project = m.project;
       if (maxPathLen <= 0) throw fail(`${m.role} exceeds the path length its issuers allow`);
       maxPathLen = Math.min(maxPathLen - 1, m.pathLen);
     }
-    if (project && !same(project, leaf.project)) throw fail(`leaf ${PROJECT_MISMATCH}`);
   }
   if (!hasKeyUsage(leaf.keyUsage, DIGITAL_SIGNATURE)) {
     throw fail("leaf must have Key Usage digitalSignature");
@@ -318,12 +336,13 @@ export async function certificateChain(
   if (!leaf.extendedKeyUsages.includes(CODE_SIGNING)) {
     throw fail("leaf must have Extended Key Usage codeSigning");
   }
-  // The client then checks it against the reply's EAS project, which Tide's replies never name.
-  if (leaf.project) throw fail("leaf must not carry Expo project information");
+  // The client makes every certificate below one with project information carry it too, then checks the leaf's
+  // against the reply's EAS project, which Tide's replies never name. Checked last, so every client rule runs first.
+  const carrier = members.find((m) => m.project);
+  if (carrier) throw fail(`${carrier.role} must not carry Expo project information`);
   return leaf.key;
 }
 
-const PROJECT_MISMATCH = "must carry the project information of the certificate above it";
 const DIGITAL_SIGNATURE = 0;
 const KEY_CERT_SIGN = 5;
 
@@ -341,7 +360,7 @@ interface Member {
   readonly extendedKeyUsages: readonly string[];
   readonly subjectKeyId: Uint8Array | undefined;
   readonly authorityKeyId: Uint8Array | undefined;
-  readonly project: Uint8Array | undefined; // The raw extension value.
+  readonly project: boolean; // Carries Expo project information.
 }
 
 /** Returns `der` as a chain member that passes Tide's chain profile at `now`; errors name the member's role. */
@@ -362,34 +381,19 @@ async function chainMember(der: Uint8Array<ArrayBuffer>, now: Date, role: string
 
 async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Promise<Member> {
   const fail = (message: string) => new ProtocolError("certificate_chain", `${role} ${message}`);
-  const cert = parseCertificate(der);
-  if (cert.version === undefined || !equal(der, cert.version, V3)) throw fail("must be X.509 v3");
+  const { cert, key, notBefore, notAfter } = await checkedCertificate(der, fail);
   // iOS finds the extensions by position, which a unique ID would shift.
   if (sequence(der, cert.tbs).length !== (cert.extensions === undefined ? 7 : 8)) {
     throw fail("must not carry a unique identifier");
   }
-  if (!positiveSerial(der.subarray(cert.serial.body, cert.serial.end))) {
+  const serial = der.subarray(cert.serial.body, cert.serial.end); // RFC 5280 4.1.2.2
+  if (!minimalUnsigned(serial, 20) || (serial.length === 1 && serial[0] === 0)) {
     throw fail("must have a minimal positive serial number of 1 to 20 octets");
-  }
-  const algorithm = sequence(der, cert.outerAlgorithm);
-  if (
-    !equal(der, cert.innerAlgorithm, bytesOf(der, cert.outerAlgorithm)) ||
-    algorithm[0]?.tag !== OID ||
-    oid(der, algorithm[0]) !== SHA256_WITH_RSA ||
-    algorithm.length > 2 ||
-    (algorithm[1] !== undefined && !equal(der, algorithm[1], NULL))
-  ) {
-    throw fail("must be signed with sha256WithRSAEncryption");
   }
   for (const field of ["issuer", "subject"] as const) {
     if (!validName(der, cert[field])) {
       throw fail(`must have a non-empty ${field} of single-attribute RDNs with string values`);
     }
-  }
-  const validity = sequence(der, cert.validity);
-  const [notBefore, notAfter] = validity.map((t) => time(der, t));
-  if (notBefore === undefined || notAfter === undefined || validity.length !== 2) {
-    throw fail("has a malformed validity");
   }
   // Android's bounds are inclusive and iOS's exclusive, so both accept only a strictly inner instant.
   if (now.getTime() <= notBefore) throw fail("is not valid yet");
@@ -407,27 +411,12 @@ async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Pr
     return ext && der.subarray(ext.value.body, ext.value.end);
   };
   const malformed = () => fail("has a malformed extension");
-  const basic = value(BASIC_CONSTRAINTS);
-  const { ca, pathLen } = basic === undefined ? NOT_CA : basicConstraints(basic, malformed);
   const usage = value(KEY_USAGE);
   const ekus = value(EXT_KEY_USAGE);
   const usages = ekus === undefined ? [] : extendedKeyUsages(ekus);
   if (ekus !== undefined && usages.length === 0) throw malformed();
   const ski = value(SUBJECT_KEY_ID);
   const aki = value(AUTHORITY_KEY_ID);
-  const fields = {
-    keyUsage: usage === undefined ? undefined : keyUsage(usage, malformed),
-    extendedKeyUsages: usages,
-    subjectKeyId: ski === undefined ? undefined : subjectKeyId(ski, malformed),
-    authorityKeyId: aki === undefined ? undefined : authorityKeyId(aki, malformed),
-    project: value(EXPO_PROJECT_INFORMATION),
-  };
-
-  const key = await rsaKey(der, cert.spki);
-  const { modulusLength: bits } = key.algorithm as { readonly modulusLength?: number };
-  if (bits === undefined || bits < 2048 || bits > 4096) {
-    throw fail("must hold an RSA key of 2048 to 4096 bits");
-  }
   return {
     role,
     der,
@@ -435,22 +424,13 @@ async function member(der: Uint8Array<ArrayBuffer>, now: Date, role: string): Pr
     issuer: bytesOf(der, cert.issuer),
     subject: bytesOf(der, cert.subject),
     key,
-    ca,
-    pathLen,
-    ...fields,
+    ...basicConstraints(value(BASIC_CONSTRAINTS), malformed),
+    keyUsage: usage === undefined ? undefined : keyUsage(usage, malformed),
+    extendedKeyUsages: usages,
+    subjectKeyId: ski === undefined ? undefined : subjectKeyId(ski, malformed),
+    authorityKeyId: aki === undefined ? undefined : authorityKeyId(aki, malformed),
+    project: extensions.has(EXPO_PROJECT_INFORMATION),
   };
-}
-
-const NOT_CA = { ca: false, pathLen: -1 } as const;
-
-/** True when `child`'s signature verifies under `key`. */
-async function signedBy(child: Member, key: CryptoKey): Promise<boolean> {
-  const { der, cert } = child;
-  const signature = der.subarray(cert.signature.body, cert.signature.end);
-  return (
-    signature[0] === 0 &&
-    crypto.subtle.verify(RSA, key, signature.slice(1), der.slice(cert.tbs.start, cert.tbs.end))
-  );
 }
 
 /** True when `a` and `b` hold the same bytes. */
@@ -458,14 +438,13 @@ function same(a: Uint8Array, b: Uint8Array | undefined): boolean {
   return b !== undefined && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-/** True for a minimal positive INTEGER body of 1 to 20 octets (RFC 5280 4.1.2.2). */
-function positiveSerial(body: Uint8Array): boolean {
+/** True for a minimal non-negative INTEGER body of 1 to `maxOctets` octets. */
+function minimalUnsigned(body: Uint8Array, maxOctets: number): boolean {
   const [first = 0x80, second = 0] = body;
   return (
-    body.length >= 1 &&
-    body.length <= 20 &&
+    body.length <= maxOctets &&
     (first & 0x80) === 0 &&
-    !(first === 0 && (body.length === 1 || (second & 0x80) === 0))
+    !(first === 0 && body.length > 1 && (second & 0x80) === 0)
   );
 }
 
@@ -497,12 +476,6 @@ function validName(der: Uint8Array, name: Tlv): boolean {
   );
 }
 
-/** One extension of a chain member: its OID TLV and the OCTET STRING holding its value. */
-interface Extension {
-  readonly id: Tlv;
-  readonly value: Tlv;
-}
-
 // Each extension a chain member may carry, and whether it may be critical.
 const CHAIN_EXTENSIONS: Readonly<Record<string, boolean>> = {
   [BASIC_CONSTRAINTS]: true,
@@ -510,7 +483,7 @@ const CHAIN_EXTENSIONS: Readonly<Record<string, boolean>> = {
   [EXT_KEY_USAGE]: true,
   [SUBJECT_KEY_ID]: false,
   [AUTHORITY_KEY_ID]: false,
-  [EXPO_PROJECT_INFORMATION]: false,
+  [EXPO_PROJECT_INFORMATION]: false, // Refused by a later chain rule, after the client's rules.
 };
 
 /** Returns a chain member's extensions by dotted OID, refusing any outside `CHAIN_EXTENSIONS`. */
@@ -519,31 +492,18 @@ function chainExtensions(
   wrapper: Tlv | undefined,
   fail: (message: string) => ProtocolError,
 ): Map<string, Extension> {
-  const out = new Map<string, Extension>();
-  if (wrapper === undefined) return out;
-  const inner = readTlv(der, wrapper.body, wrapper.end);
-  const list = inner.end === wrapper.end ? sequence(der, inner) : [];
-  if (list.length === 0) throw fail("has a malformed extension");
-  for (const extension of list) {
-    const items = sequence(der, extension);
-    const [id, second, third] = items;
-    const value = items.length === 3 ? third : second;
+  const out = extensionsOf(der, wrapper);
+  if (wrapper !== undefined && out.size === 0) throw fail("has a malformed extension");
+  for (const [name, { critical }] of out) {
     // DER omits a FALSE critical flag.
-    const critical = items.length === 3;
-    if (
-      id?.tag !== OID ||
-      value?.tag !== OCTET_STRING ||
-      items.length > 3 ||
-      (critical && (second === undefined || !equal(der, second, TRUE)))
-    ) {
+    if (critical !== undefined && !equal(der, critical, TRUE)) {
       throw fail("has a malformed extension");
     }
-    const name = oid(der, id);
     const mayBeCritical = CHAIN_EXTENSIONS[name];
     if (mayBeCritical === undefined) throw fail("has an extension Tide does not allow");
-    if (critical && !mayBeCritical) throw fail("marks an extension critical that must not be");
-    if (out.has(name)) throw fail("repeats an extension");
-    out.set(name, { id, value });
+    if (critical !== undefined && !mayBeCritical) {
+      throw fail("marks an extension critical that must not be");
+    }
   }
   return out;
 }
@@ -599,11 +559,15 @@ function iosOid(der: Uint8Array, tlv: Tlv): string | undefined {
   return text;
 }
 
-/** Returns a Basic Constraints value: cA only as TRUE, and a minimal pathLen of 0 to 2^31-1 only with cA. */
+/**
+ * Returns a Basic Constraints value (absent: not a CA): cA only as TRUE, and a minimal pathLen of 0 to 2^31-1 only
+ * with cA. pathLen is Infinity when absent.
+ */
 function basicConstraints(
-  value: Uint8Array,
+  value: Uint8Array | undefined,
   malformed: () => ProtocolError,
 ): { readonly ca: boolean; readonly pathLen: number } {
+  if (value === undefined) return { ca: false, pathLen: Infinity };
   const outer = readTlv(value, 0, value.length);
   if (outer.end !== value.length) throw malformed();
   const items = sequence(value, outer);
@@ -614,16 +578,9 @@ function basicConstraints(
   if (items.length > (ca ? 2 : 0) || (length !== undefined && length.tag !== INTEGER)) {
     throw malformed();
   }
-  if (length === undefined) return { ca, pathLen: ca ? Infinity : -1 };
+  if (length === undefined) return { ca, pathLen: Infinity };
   const body = value.subarray(length.body, length.end);
-  const [first = 0x80, second = 0] = body;
-  if (
-    body.length > 4 ||
-    (first & 0x80) !== 0 ||
-    (first === 0 && body.length > 1 && second < 0x80)
-  ) {
-    throw malformed();
-  }
+  if (!minimalUnsigned(body, 4)) throw malformed();
   return { ca, pathLen: body.reduce((n, b) => n * 256 + b, 0) };
 }
 
@@ -793,9 +750,16 @@ async function rsaKey(der: Uint8Array<ArrayBuffer>, spki: Tlv): Promise<CryptoKe
   }
 }
 
-/** Returns each extension's value (the DER inside its OCTET STRING) by dotted OID; a repeated OID is refused. */
-function extensionsOf(der: Uint8Array, wrapper: Tlv | undefined): Map<string, Uint8Array> {
-  const out = new Map<string, Uint8Array>();
+/** One extension: its OID, its critical flag when present, and the OCTET STRING holding its value. */
+interface Extension {
+  readonly id: Tlv;
+  readonly critical: Tlv | undefined;
+  readonly value: Tlv;
+}
+
+/** Returns each extension by dotted OID; a repeated OID is refused. */
+function extensionsOf(der: Uint8Array, wrapper: Tlv | undefined): Map<string, Extension> {
+  const out = new Map<string, Extension>();
   if (wrapper === undefined) return out;
   const malformed = () => new ProtocolError("certificate", "has a malformed extension");
   const inner = readTlv(der, wrapper.body, wrapper.end);
@@ -803,19 +767,20 @@ function extensionsOf(der: Uint8Array, wrapper: Tlv | undefined): Map<string, Ui
   for (const extension of sequence(der, inner)) {
     const items = sequence(der, extension);
     const [id, second, third] = items;
+    const critical = items.length === 3 ? second : undefined;
     const value = items.length === 3 ? third : second;
     if (
       id?.tag !== OID ||
       value?.tag !== OCTET_STRING ||
       items.length > 3 ||
-      (items.length === 3 && second?.tag !== BOOLEAN)
+      (critical !== undefined && critical.tag !== BOOLEAN)
     ) {
       throw malformed();
     }
     const name = oid(der, id);
     // RFC 5280 4.2: a certificate must not include more than one instance of an extension.
     if (out.has(name)) throw new ProtocolError("certificate", "repeats an extension");
-    out.set(name, der.subarray(value.body, value.end));
+    out.set(name, { id, critical, value });
   }
   return out;
 }
@@ -905,8 +870,7 @@ export function time(der: Uint8Array, tlv: Tlv): number | undefined {
 
 /** True when the TLV at `tlv` is exactly `bytes`. */
 function equal(der: Uint8Array, tlv: Tlv, bytes: Uint8Array): boolean {
-  const own = bytesOf(der, tlv);
-  return own.length === bytes.length && own.every((b, i) => b === bytes[i]);
+  return same(bytesOf(der, tlv), bytes);
 }
 
 /** Returns the whole TLV at `tlv`, header included. */

@@ -62,7 +62,6 @@ export {
   cryptoKeySigner,
   expoSignature,
   parseExpoSignature,
-  readCertificateChain,
   selfSignedCertificate,
   verifyChainedSignature,
   verifyExpoSignature,

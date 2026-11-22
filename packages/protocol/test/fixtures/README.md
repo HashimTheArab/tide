@@ -9,8 +9,9 @@ once with `openssl verify -CAfile certificate.pem -purpose codesign certificate.
 
 The chain goldens come from `chainFixtures` in `../fixtures.ts`: `chain-root.pem` (CA, pathLen 1),
 `chain-intermediate.pem` (CA, pathLen 0, linked by key identifiers), `chain-leaf.pem` under it, `chain-short-leaf.pem`
-directly under the root, `chain.multipart` (signed by the leaf with keyid `rotated`) and `chain-short.multipart`
-(signed by the short leaf, no keyid). Their validity window is `CHAIN_VALIDITY` and the tests verify at `CHAIN_NOW`.
+directly under the root, `chain-served.pem` (leaf then intermediate, the served part), `chain.multipart` (signed by
+the leaf with keyid `rotated`) and `chain-short.multipart` (signed by the short leaf, no keyid). Their validity
+window is `CHAIN_VALIDITY` and the tests verify at `CHAIN_NOW`.
 Check them with `openssl verify -attime 1924992000 -CAfile chain-root.pem -untrusted chain-intermediate.pem -purpose
 codesign chain-leaf.pem`.
 

@@ -15,7 +15,7 @@ const NEXT_BOUNDARY = "tide_fixture_next";
 
 interface GoldenPart {
   readonly name: PartName;
-  readonly file: string | readonly string[]; // An array's files are concatenated in order.
+  readonly file: string;
   readonly signed?: true;
 }
 
@@ -73,7 +73,7 @@ export const CHAIN_GOLDEN: Readonly<Record<string, ChainGolden>> = {
     keyId: "rotated",
     parts: [
       { name: "manifest", file: "manifest.json", signed: true },
-      { name: "certificate_chain", file: ["chain-leaf.pem", "chain-intermediate.pem"] },
+      { name: "certificate_chain", file: "chain-served.pem" },
     ],
   },
   "chain-short.multipart": {
@@ -95,7 +95,7 @@ export async function goldenParts(
 ): Promise<Part[]> {
   return Promise.all(
     parts.map(async ({ name, file, signed }, i) => {
-      const body = typeof file === "string" ? read(file) : concat(file.map(read));
+      const body = read(file);
       return signed ? { name, body, signature: await signature(body, i) } : { name, body };
     }),
   );
@@ -231,23 +231,60 @@ const name = (cn: string) =>
     SEQUENCE,
     der(0x31, der(SEQUENCE, hexBytes("0603550403"), der(0x0c, new TextEncoder().encode(cn)))),
   );
+const hexExtension = (oid: string, critical: boolean, value: Uint8Array) =>
+  der(SEQUENCE, hexBytes(oid), ...(critical ? [hexBytes("0101ff")] : []), der(0x04, value));
+const keyUsage = (bits: string) => hexExtension("0603551d0f", true, der(0x03, hexBytes(bits)));
+/** Expo project information holding `text` as a UTF8String. */
+const project = (text: string) =>
+  hexExtension(
+    "061e2a864886f71401be40937a82d32d817e810066811d83e1ea75819f570201",
+    false,
+    der(0x0c, new TextEncoder().encode(text)),
+  );
+
 /** Certificate extensions a test certificate can carry, each one DER `Extension`. */
 export const EXTENSION = {
-  digitalSignature: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020780")), // keyUsage critical
-  keyCertSignOnly: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020204")),
-  digitalSignatureUnusedBits8: der(SEQUENCE, hexBytes("0603551d0f0101ff040403020880")),
+  /** Critical Key Usage with these BIT STRING contents (unused-bit count first), as hex. */
+  keyUsage,
+  digitalSignature: keyUsage("0780"),
+  keyCertSignOnly: keyUsage("0204"),
+  digitalSignatureUnusedBits8: keyUsage("0880"),
   codeSigning: der(SEQUENCE, hexBytes("0603551d250101ff040c300a06082b06010505070303")), // extKeyUsage critical
   serverAuthOnly: der(SEQUENCE, hexBytes("0603551d25040c300a06082b06010505070301")),
   codeSigningAndBoolean: der(
     SEQUENCE,
     hexBytes("0603551d250101ff040f300d06082b060105050703030101ff"),
   ),
-  // Expo's project information (1.2.840.113556.1.8000.2554.43437.254.128.102.157.7894389.20439.2.1).
-  projectInformation: der(
-    SEQUENCE,
-    der(0x06, hexBytes("2a864886f71401be40937a82d32d817e810066811d83e1ea75819f570201")),
-    der(0x04, der(0x0c, new TextEncoder().encode("project,scope"))),
+  project,
+  projectInformation: project("project,scope"),
+  /** Basic Constraints cA, critical, with an optional pathLen of 0 to 127. */
+  ca: (pathLen?: number) =>
+    hexExtension(
+      "0603551d13",
+      true,
+      der(
+        SEQUENCE,
+        hexBytes("0101ff"),
+        ...(pathLen === undefined ? [] : [der(0x02, Uint8Array.of(pathLen))]),
+      ),
+    ),
+  subjectKeyId: (id: Uint8Array) => hexExtension("0603551d0e", false, der(0x04, id)),
+  authorityKeyId: (id: Uint8Array) =>
+    hexExtension("0603551d23", false, der(SEQUENCE, der(0x80, id))),
+  /** Authority Key Identifier in the issuer-and-serial form: a directoryName and serial 1. */
+  authorityIssuerSerial: hexExtension(
+    "0603551d23",
+    false,
+    der(SEQUENCE, der(0xa1, der(0xa4, name("Tide root"))), der(0x82, Uint8Array.of(1))),
   ),
+  /** Noncritical name constraints permitting one DNS subtree. */
+  nameConstraints: hexExtension(
+    "0603551d1e",
+    false,
+    der(SEQUENCE, der(0xa0, der(SEQUENCE, der(0x82, new TextEncoder().encode("example.com"))))),
+  ),
+  /** A critical extension under OID 1.2.3.4. */
+  unknownCritical: hexExtension("06032a0304", true, der(0x05)),
 } as const;
 // Expo's code-signing profile.
 const CODE_SIGNING = [EXTENSION.digitalSignature, EXTENSION.codeSigning];
@@ -328,53 +365,6 @@ export const CHAIN_VALIDITY = {
 /** The instant the chain tests verify at, strictly inside `CHAIN_VALIDITY`. */
 export const CHAIN_NOW = new Date("2031-01-01T00:00:00Z");
 
-const hexExtension = (oid: string, critical: boolean, value: Uint8Array) =>
-  der(SEQUENCE, hexBytes(oid), ...(critical ? [hexBytes("0101ff")] : []), der(0x04, value));
-const keyUsage = (bits: string) => hexExtension("0603551d0f", true, der(0x03, hexBytes(bits)));
-
-/** Chain-profile extensions a test certificate can carry, each one DER `Extension`. */
-export const CHAIN_EXTENSION = {
-  /** Basic Constraints cA, critical, with an optional pathLen of 0 to 127. */
-  ca: (pathLen?: number) =>
-    hexExtension(
-      "0603551d13",
-      true,
-      der(
-        SEQUENCE,
-        hexBytes("0101ff"),
-        ...(pathLen === undefined ? [] : [der(0x02, Uint8Array.of(pathLen))]),
-      ),
-    ),
-  /** Critical Key Usage with these BIT STRING contents (unused-bit count first), as hex. */
-  keyUsage,
-  keyCertSign: keyUsage("0204"),
-  digitalSignatureAndKeyCertSign: keyUsage("0284"),
-  subjectKeyId: (id: Uint8Array) => hexExtension("0603551d0e", false, der(0x04, id)),
-  authorityKeyId: (id: Uint8Array) =>
-    hexExtension("0603551d23", false, der(SEQUENCE, der(0x80, id))),
-  /** Authority Key Identifier in the issuer-and-serial form: a directoryName and serial 1. */
-  authorityIssuerSerial: hexExtension(
-    "0603551d23",
-    false,
-    der(SEQUENCE, der(0xa1, der(0xa4, name("Tide root"))), der(0x82, Uint8Array.of(1))),
-  ),
-  /** Noncritical name constraints permitting one DNS subtree. */
-  nameConstraints: hexExtension(
-    "0603551d1e",
-    false,
-    der(SEQUENCE, der(0xa0, der(SEQUENCE, der(0x82, new TextEncoder().encode("example.com"))))),
-  ),
-  /** A critical extension under OID 1.2.3.4. */
-  unknownCritical: hexExtension("06032a0304", true, der(0x05)),
-  /** Expo project information holding `text` as a UTF8String. */
-  project: (text: string) =>
-    hexExtension(
-      "061e2a864886f71401be40937a82d32d817e810066811d83e1ea75819f570201",
-      false,
-      der(0x0c, new TextEncoder().encode(text)),
-    ),
-} as const;
-
 /** Returns a key identifier for `key`: the first 20 octets of its SPKI's SHA-256. */
 export async function keyId(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
   const spki = await crypto.subtle.exportKey("spki", key);
@@ -423,26 +413,22 @@ export async function chainFixtures(
     "chain-root.pem": await issue(keys.root, keys.root, {
       subject: "Tide root",
       issuer: "Tide root",
-      extensions: [
-        CHAIN_EXTENSION.ca(1),
-        CHAIN_EXTENSION.keyCertSign,
-        CHAIN_EXTENSION.subjectKeyId(rootId),
-      ],
+      extensions: [EXTENSION.ca(1), EXTENSION.keyCertSignOnly, EXTENSION.subjectKeyId(rootId)],
     }),
     "chain-intermediate.pem": await issue(keys.intermediate, keys.root, {
       subject: "Tide intermediate",
       issuer: "Tide root",
       extensions: [
-        CHAIN_EXTENSION.ca(0),
-        CHAIN_EXTENSION.keyCertSign,
-        CHAIN_EXTENSION.subjectKeyId(intermediateId),
-        CHAIN_EXTENSION.authorityKeyId(rootId),
+        EXTENSION.ca(0),
+        EXTENSION.keyCertSignOnly,
+        EXTENSION.subjectKeyId(intermediateId),
+        EXTENSION.authorityKeyId(rootId),
       ],
     }),
     "chain-leaf.pem": await issue(keys.leaf, keys.intermediate, {
       subject: "Tide leaf",
       issuer: "Tide intermediate",
-      extensions: [...CODE_SIGNING, CHAIN_EXTENSION.authorityKeyId(intermediateId)],
+      extensions: [...CODE_SIGNING, EXTENSION.authorityKeyId(intermediateId)],
     }),
     "chain-short-leaf.pem": await issue(keys.shortLeaf, keys.root, {
       subject: "Tide short leaf",
@@ -450,22 +436,16 @@ export async function chainFixtures(
     }),
   };
   const out: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const [file, text] of Object.entries(pems)) out[file] = new TextEncoder().encode(text);
+  // The certificate_chain part's body, leaf first.
+  const served = pems["chain-leaf.pem"] + pems["chain-intermediate.pem"];
+  for (const [file, text] of Object.entries({ ...pems, "chain-served.pem": served })) {
+    out[file] = new TextEncoder().encode(text);
+  }
   const own = (file: string) => out[file] ?? read(file);
   for (const [file, { boundary, parts, signer, keyId }] of Object.entries(CHAIN_GOLDEN)) {
     const key = keys[signer].privateKey;
     const signed = await goldenParts(parts, own, (body) => chainSignature(body, key, keyId));
     out[file] = encodeMultipart(signed, boundary).body;
-  }
-  return out;
-}
-
-function concat(chunks: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
-  let at = 0;
-  for (const c of chunks) {
-    out.set(c, at);
-    at += c.length;
   }
   return out;
 }
