@@ -6,7 +6,7 @@ import { ProtocolError, encodeRollout, replyKey } from "@tide-ota/protocol";
 import type { Env, Identity, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { DraftRecord, PointerWrite, PublishOptions } from "./publish.ts";
-import { buildIdentity, checkCopied, sameBytes, servingBucket } from "./keys.ts";
+import { buildIdentity, checkCopied, checkLive, sameBytes, servingBucket } from "./keys.ts";
 import { readPointer, writePointer } from "./pointer.ts";
 import {
   PublishError,
@@ -54,6 +54,7 @@ export async function rollout(
       identity,
       "reply/no-update is absent: tide publish, republish or rollback writes it",
     );
+    const clocks = identity.chain ? [now(), await bucket.time()] : [];
     const writes: PointerWrite[] = [];
     for (const key of keys) {
       const previous = await readPointer(bucket, key);
@@ -62,6 +63,11 @@ export async function rollout(
       if (reply.kind !== "rollout") throw new PublishError(`${key} holds no rollout`);
       if (reply.percent !== goal) forward(key, reply.percent, goal);
       await checkCopied(key, sides, identity);
+      // A rise serves the new reply to devices the earlier one served; revert restores what they got before.
+      const [fresh] = sides;
+      if (goal > reply.percent && fresh !== undefined) {
+        for (const at of clocks) await checkLive(`${key}'s new reply`, fresh, identity, at);
+      }
       writes.push({
         key,
         previous,

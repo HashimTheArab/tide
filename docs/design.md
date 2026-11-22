@@ -488,6 +488,9 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
 - **Copied bodies are verified.** Every body a write copies (both sides for `tide rollout`, the kept reply for
   `publish --rollout`) must verify under the configured certificate and `keyid`, whatever `reply/no-update` holds.
   Plain publish, republish and rollback copy nothing, so they still replace a pointer that fails; that repairs it.
+- **A rise checks the new reply.** In chain mode, a higher percentage or `complete` refuses (exit 2) when the new
+  reply's chain fails the client's rules by either clock, since it would reach devices the earlier reply served.
+  `revert` restores what devices got before the rollout and checks nothing.
 - **Replaced whole.** A plain publish, republish or rollback over a rollout, active, complete or reverted, writes a
   version-1 reply stamped after both of its sides: a pointer's time is the newest time it holds.
 - **Retry.** Each command converges under the writer job's retry loop (`deploy.md`, Publishing). `tide rollout`
@@ -687,7 +690,8 @@ write. No writer runs project code (CLI).
   first chain-mode write creates `identities/<sha256(keyid)>`, `{"version":1,"keyid":"<keyid>","root":"<DER
   SHA-256 hex>"}`, with put-if-absent, and every writer refuses a binding to another root. A root reissued with the
   same subject and key is therefore another identity: it could carry other constraints than the builds embed.
-  `tide rollout` and `register-build` sign nothing and refuse a chain-mode bucket without the binding.
+  Writers bind before any chained reply, so a bucket holding chained replies without the binding has lost it:
+  every writer refuses it until the binding is restored, rather than bind whichever root its chains link to.
 - **Shared no-update.** `reply/no-update` carries the leaf that signed it, so a signing writer whose configured chain
   differs from the stored body's re-signs it, replacing it with `If-Match` on the ETag it read. A lost race keeps the
   winner when it is this identity's; an unknown outcome is re-read by the next run.

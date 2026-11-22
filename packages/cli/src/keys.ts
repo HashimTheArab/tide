@@ -375,32 +375,32 @@ async function checkBucket(
 ): Promise<{ readonly noUpdate: NoUpdate | undefined; readonly bound: boolean }> {
   const bound = await checkBinding(bucket, identity);
   const noUpdate = await readNoUpdate(bucket, identity);
-  if (noUpdate !== undefined) return { noUpdate, bound };
-  for (const entry of await bucket.list("reply/")) {
-    if (!("key" in entry))
-      throw new KeyError("reply/ is unreadable: an object name outside the key grammar");
-    await checkSigned(
-      entry.key,
-      (await readRecord(bucket, entry.key)) ?? "absent when read",
-      identity,
+  let replies = noUpdate !== undefined;
+  if (!replies) {
+    for (const entry of await bucket.list("reply/")) {
+      if (!("key" in entry))
+        throw new KeyError("reply/ is unreadable: an object name outside the key grammar");
+      const record = (await readRecord(bucket, entry.key)) ?? "absent when read";
+      await checkSigned(entry.key, record, identity);
+      replies = true;
+    }
+  }
+  // Writers bind before any chained reply, and replies chain by subject and key, so re-binding could take another root.
+  if (!bound && replies) {
+    throw new KeyError(
+      `${await identityKey(identity.keyId)} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`,
     );
   }
-  return { noUpdate: undefined, bound };
+  return { noUpdate, bound };
 }
 
-/** For a writer that signs nothing, also refuses an absent `reply/no-update` (`absent` says why) or chain binding. */
+/** For a writer that signs nothing, also refuses an absent `reply/no-update`; `absent` says why. */
 export async function servingBucket(
   bucket: Bucket,
   identity: Identity,
   absent: string,
 ): Promise<void> {
-  const { noUpdate, bound } = await checkBucket(bucket, identity);
-  if (noUpdate === undefined) throw new KeyError(absent);
-  if (!bound) {
-    throw new KeyError(
-      `${await identityKey(identity.keyId)} is absent: tide publish, republish or rollback writes it`,
-    );
-  }
+  if ((await checkBucket(bucket, identity)).noUpdate === undefined) throw new KeyError(absent);
 }
 
 /** Reads `reply/no-update`, refusing it unreadable or under another identity; undefined when absent. */
@@ -482,6 +482,18 @@ export async function checkCopied(
         `${key}: a reply it copies does not verify under this app's certificate and key ID`,
       );
     }
+  }
+}
+
+/** Refuses a chained `side`, named by `label`, whose chain the builds reject at epoch ms `at`; direct sides pass. */
+export async function checkLive(
+  label: string,
+  { signed }: Side,
+  { pem }: Identity,
+  at: number,
+): Promise<void> {
+  if (signed.chain !== undefined) {
+    await keyChecked(label, certificateChain(signed.chain, pem, new Date(at)));
   }
 }
 

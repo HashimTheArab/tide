@@ -441,6 +441,27 @@ describe("leaf rotation under the same root", () => {
     expect(await rolloutTo(store, w.root, "revert", now)).toMatchObject({ code: 0, err: [] });
   });
 
+  test("a rollout whose new reply's leaf has expired refuses to rise or complete, and still reverts", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B(), { now: at(T) })).toMatchObject({ code: 0 });
+    const staged = await publishWith(store, SOON_LEAF(), {
+      now: at(T),
+      extra: ["--rollout", "10"],
+    });
+    expect(staged).toMatchObject({ code: 0, err: [] });
+    const now = at(LATER);
+    const before = s3Snapshot();
+    for (const goal of ["20", "complete"]) {
+      expect(await rolloutTo(store, w.root, goal, now)).toEqual({
+        code: 2,
+        out: [],
+        err: [`tide: ${IOS}'s new reply: certificate_chain leaf has expired`],
+      });
+    }
+    expect(s3Snapshot()).toEqual(before);
+    expect(await rolloutTo(store, w.root, "revert", now)).toMatchObject({ code: 0, err: [] });
+  });
+
   test("a missing reply/no-update is recreated over pointers an expired leaf signed, which keep their bytes", async () => {
     const store = s3Store();
     expect(await publishWith(store, SOON_LEAF(), { now: at(T) })).toMatchObject({ code: 0 });
@@ -489,6 +510,16 @@ describe("another identity's bucket", () => {
     expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     const before = s3Snapshot();
     await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, await BOUND_ELSEWHERE());
+    expect(s3Snapshot()).toEqual(before);
+  });
+
+  test("chained replies without their binding are refused, so the root's twin cannot bind the bucket", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B())).toMatchObject({ code: 0 });
+    s3.objects.delete(await identityKey("main"));
+    const before = s3Snapshot();
+    const message = `${await identityKey("main")} is absent but the bucket holds chained replies: restore it; it binds the root they were published under`;
+    await everyWriterRefuses(store, { root: w.twin, chain: [w.leafB] }, message);
     expect(s3Snapshot()).toEqual(before);
   });
 
