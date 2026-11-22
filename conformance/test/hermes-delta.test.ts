@@ -39,9 +39,11 @@ import { PATHS, renderEmulator, writeEmulatorResults } from "../src/hermes-delta
 import {
   BASES,
   KEEP_RULE,
+  STEADY_BASES,
   TARGETS,
   describe as describeBundle,
   measureTargets,
+  patchesTo,
   renderTable,
   writeResults,
 } from "../src/hermes-delta/measure.ts";
@@ -405,6 +407,19 @@ describe("measureTargets", () => {
     // The embedded launch asset is keyed bundle-<updateId>, not by hash, so the client downloads the full bundle.
     expect(measured["delta-embedded"].from.embedded).toEqual({ noPatch: true });
   });
+
+  test("patchesTo measures from steady bases alone, and a target equal to one is reuse", async () => {
+    const ota = noise(4096, 7);
+    const older = ota.slice();
+    older[10] = (older[10] ?? 0) ^ 0xff;
+
+    const from = await patchesTo({ ota, "older-ota": older }, ota.slice(), 4096, "delta-embedded");
+
+    expect(from).toEqual({
+      ota: { reused: true },
+      "older-ota": { bytes: makeBsdiff(older, ota).length, keep: true },
+    });
+  });
 });
 
 /** One app's results: one-line and feature are `change`; the dependency bump's plain bundle is the OTA base. */
@@ -434,6 +449,7 @@ function sample(bumpFromEmbedded: number | "full" = 200): Results {
     plainOta: number | "reused",
     deltaOta: number,
     deltaEmbedded: number | "full" = 200,
+    steadyOta: number | "reused" = 60,
   ) => ({
     patch: "x.patch",
     files: 1,
@@ -444,12 +460,14 @@ function sample(bumpFromEmbedded: number | "full" = 200): Results {
       "delta-ota": target(deltaOta, 320, 140),
       "delta-embedded": target(120, deltaEmbedded, 160),
     },
+    steady: { ota: from(steadyOta, 400), "older-ota": from(70, 400) },
   });
   return {
-    schema: 2,
+    schema: 3,
     about: "About.",
     keepRule: KEEP_RULE,
     bases: BASES,
+    steadyBases: STEADY_BASES,
     targets: TARGETS,
     app: {
       id: "sdk-55",
@@ -462,9 +480,10 @@ function sample(bumpFromEmbedded: number | "full" = 200): Results {
       embedded: {},
       delta: { hermescArgs: [] },
       bases: { ota: sized, embedded: sized, "older-ota": sized },
+      steadyBases: { ota: sized, "older-ota": sized },
       changes: {
         "one-line": change(100, 50),
-        "dependency-bump": change("reused", 20, bumpFromEmbedded),
+        "dependency-bump": change("reused", 20, bumpFromEmbedded, "reused"),
         feature: change(100, 50),
       },
     },
@@ -489,6 +508,19 @@ test("renderTable prints one row per change and compile base, then totals counti
   expect(lines).toContain("| all changes | ota | 200 → 120 | 40.0% | 900 → 960 | 450 → 420 | | |");
   expect(lines).toContain(
     "| all changes | embedded | 900 → 600 | 33.3% | 200 → 360 | 450 → 480 | | |",
+  );
+});
+
+test("renderTable totals the embedded compile base from OTA updates compiled against it; an unkept patch costs the bundle", () => {
+  const lines = renderTable(sample()).split("\n");
+  expect(lines).toContain(
+    "| one-line (+1 −1) | 400 → 200 | 100 → 60 | 150 → 70 | 650 → 330 | 49.2% |",
+  );
+  expect(lines).toContain(
+    "| dependency-bump (+1 −1) | 400 → 200 | 0 → 0 | 150 → 70 | 550 → 270 | 50.9% |",
+  );
+  expect(lines).toContain(
+    "| all changes | 1,200 → 600 | 200 → 120 | 450 → 210 | 1,850 → 930 | 49.7% |",
   );
 });
 
@@ -580,7 +612,9 @@ describe("the emulator check", () => {
       if (inherit) {
         vi.stubEnv("GIT_DIR", join(repo, ".git"));
         vi.stubEnv("GIT_WORK_TREE", repo);
-        onTestFinished(() => vi.unstubAllEnvs());
+        onTestFinished(() => {
+          vi.unstubAllEnvs();
+        });
       }
       const app = join(repo, "app");
       mkdirSync(app);

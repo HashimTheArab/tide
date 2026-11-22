@@ -10,17 +10,19 @@ updated: 2026-11-22
 - **Build it.** `tide export` gains an opt-in delta compile (P13.3): the launch bundle is compiled with the app's own
   hermesc, Expo's flags and `-base-bytecode=<base .hbc>`, where the base is a bundle file the operator supplies.
   Publish, patch generation and the wire format do not change.
-- **Base:** the newest OTA update's launch bundle is the recommended base. In the study it never grew another base's
-  total; an embedded base grew the OTA update's by about a third on the small apps.
+- **Base:** the release build's embedded bundle for the platform and runtime version, for every update. A delta compile
+  keeps every string of its base, so a fixed base bounds the string table at the embedded bundle's strings plus the
+  update's own; a moving base would chain (Rejected).
 - **Hook:** a hermesc that Expo finds through `REACT_NATIVE_OVERRIDE_HERMES_DIR`, so the delta compile runs on exactly
   the JS and flags Expo compiles.
 
 ## Why
 
-- **Size.** On Bluesky's social-app, the bytes clients download across the measured changes fall by 37.0% with an OTA
-  compile base and by 54.1% with an embedded one, counting every base Tide patches from. The bar was a third.
-- **Correctness.** A delta-compiled bundle is a complete Hermes bytecode file. The base only steers how its strings and
-  functions are laid out, so the bytes line up with the base's. Devices that never ran the base run it like any other bundle (below).
+- **Size.** On Bluesky's social-app, the bytes clients download across the measured changes fall by 70.0% once every
+  update is compiled against the embedded bundle, counting every base Tide patches from; 54.1% for the first such
+  update, whose OTA bases are still plain. The bar was a third.
+- **Correctness.** A delta-compiled bundle is a complete Hermes bytecode file. The base steers how its strings and
+  functions are laid out, and its strings stay in the table, so the bytes line up with the base's. Devices that never ran the base run it like any other bundle (below).
 
 ## Measure
 
@@ -40,15 +42,28 @@ passed `checkPatch`. Bases are weighted equally, since the share of devices on e
 | Bluesky | OTA | 4,736,108 → 438,084 | 10,158,357 → 8,538,024 | 4,870,939 → 3,477,755 | 19,765,404 → 12,453,863 | 37.0% |
 | Bluesky | embedded | 4,736,108 → 3,519,642 | 10,158,357 → 5,071,128 | 4,870,939 → 473,368 | 19,765,404 → 9,064,138 | 54.1% |
 
-Bytes are plain → delta-compiled. sdk-58's feature patch from the embedded bundle to the plain bundle (357,362 B) fails
+Bytes are plain → delta-compiled, one compile away from plain bases. sdk-58's feature patch from the embedded bundle to the plain bundle (357,362 B) fails
 the keep rule, so that term is the bundle's gzip-9 size, 693,349 B.
 
 From the compile base alone, Bluesky's patches shrink by 90.8% (OTA) and 50.1% (embedded). The cost to the other
 bases: on Bluesky every base still gets smaller patches in total, though the one-line change compiled against the OTA
 base grows the patches from the embedded bundle and the older OTA update by about 3% and 8%. On the conformance apps, an OTA compile base never grows
-another base's total; an embedded compile base grows the OTA base's by 34.3% (sdk-55) and 32.3% (sdk-58).
+another base's total; an embedded compile base's first update grows the OTA base's by 34.3% (sdk-55) and 32.3%
+(sdk-58).
 
-Per change, plain → delta bytes (`*`: not kept, so clients download the full bundle):
+Steady state with the embedded compile base: the OTA base and the older OTA update are themselves compiled against the
+embedded bundle, as they are once every update is. Plain → delta, all bases, totals over the three changes:
+
+| App | From embedded | From OTA base | From older OTA | All bases | Saved |
+| --- | --- | --- | --- | --- | --- |
+| sdk-55 | 848,408 → 654,487 | 97,610 → 8,314 | 183,228 → 12,067 | 1,129,246 → 674,868 | 40.2% |
+| sdk-58 | 1,269,174 → 549,422 | 128,215 → 27,365 | 226,181 → 31,859 | 1,623,570 → 608,646 | 62.5% |
+| Bluesky | 10,158,357 → 5,071,128 | 4,736,108 → 376,613 | 4,870,939 → 473,367 | 19,765,404 → 5,921,108 | 70.0% |
+
+So the cost an embedded compile base puts on the OTA base's patches lasts one update: from then on those patches are
+smaller than plain ones on every app.
+
+Per change, plain → delta bytes, one compile away from plain bases (`*`: not kept, so clients download the full bundle):
 
 | App | Change | Compile base | From compile base | From other base | From older OTA |
 | --- | --- | --- | --- | --- | --- |
@@ -71,7 +86,7 @@ Per change, plain → delta bytes (`*`: not kept, so clients download the full b
 | Bluesky | feature | OTA | 2,075,570 → 208,673 | 3,859,147 → 2,873,783 | 2,068,544 → 1,207,711 |
 | Bluesky | feature | embedded | 3,859,147 → 1,734,324 | 2,075,570 → 1,215,751 | 2,068,544 → 210,544 |
 
-Raw results, bundle sizes, gzip-9 sizes and keep outcomes: [sdk-55](../assets/hermes-delta/sdk-55.md),
+Raw results, bundle sizes, gzip-9 sizes, keep outcomes and the steady-state rows per change: [sdk-55](../assets/hermes-delta/sdk-55.md),
 [sdk-58](../assets/hermes-delta/sdk-58.md), [Bluesky](../assets/hermes-delta/bluesky.md) (JSON beside each), from
 `pnpm hermes-delta` (`conformance/src/hermes-delta/`). Bluesky is pinned at `17393322eec4`; all bundles are Android.
 
@@ -101,8 +116,8 @@ the embedded build or on another OTA update? **Answer: yes.**
 
 - **Self-contained.** The app's hermesc (`-b -dump-bytecode`) loads each delta bundle of the emulator run alone, in a
   directory without its base, and reads it to the end. Its header has the same bytecode version, source hash and
-  function count as the plain compile of the same JS; the HBC header has no field that names a base. The delta has
-  a few more strings (1 on sdk-55, 4 on sdk-58) and is 112 and 192 B larger. Its bytecode version (96 on
+  function count as the plain compile of the same JS; the HBC header has no field that names a base. The delta keeps
+  the base's strings its own JS no longer uses: 1 more string on sdk-55, 4 on sdk-58, 112 and 192 B larger. Its bytecode version (96 on
   sdk-55, 99 on sdk-58) is the embedded bundle's, and the runtime's: react-native builds Hermes from the same release
   as `hermes-compiler` (`sdks/hermes-engine/version.properties`).
 - **Verified like any bundle.** The base never reaches the device. Publish applies every patch it stores and checks
@@ -111,7 +126,8 @@ the embedded build or on another OTA update? **Answer: yes.**
   change.
 - **Runs on devices that never ran the base.** `pnpm hermes-delta --emulator` builds each conformance app's release
   APK (code signing and bsdiff on) and runs it on an arm64 emulator against a local Tide over a disk store. It
-  publishes an OTA base that no device runs, then the feature change delta-compiled against it; the patch from the
+  publishes an OTA base that no device runs, then the feature change delta-compiled against it (any base serves: the
+  device never needs it); the patch from the
   base falls from 97,117 to 7,661 B (sdk-55) and from 124,236 to 25,689 B (sdk-58). On both apps the delta update
   launches and reports its marker on a device on another OTA update and on a device on the embedded build, each
   through Tide's patch and through the full bundle after a tampered patch. The conformance checks verify every
@@ -120,6 +136,12 @@ the embedded build or on another OTA update? **Answer: yes.**
 
 ## Rejected
 
+- **The newest OTA update as the compile base:** that update is itself a delta compile, so the compiles chain, and a
+  delta compile keeps every string of its base. With sdk-58's hermesc and Expo's flags, the feature JS plus one unique
+  string per hop, compiled plain, then against hop 1, then against hop 2, ends with all three strings (7,310 strings,
+  1,519,614 B; the plain compile has 7,308, 1,519,570 B); a one-statement program compiled against the 1,519,570 B
+  bundle is 193,159 B with 7,309 strings. The bundle and every patch to it would grow for the life of a runtime version,
+  and one hop from a plain base (37.0% on Bluesky) is all the study measured of it.
 - **Plain bsdiff only:** leaves a third to a half of the large app's download in place.
 - **One delta compile per base:** a manifest names one launch bundle hash, so each base would need its own update and
   the server would pick per device; patches already serve every base from one bundle.
@@ -131,5 +153,6 @@ the embedded build or on another OTA update? **Answer: yes.**
 
 ## Revisit
 
-If a Hermes release changes `-base-bytecode` or the bytecode format, if Expo stops resolving hermesc through
-`REACT_NATIVE_OVERRIDE_HERMES_DIR`, or if operators' own updates save less than a third.
+If a Hermes release changes `-base-bytecode` or the bytecode format, or lets a delta compile drop base strings it no
+longer uses (which would reopen a moving base); if Expo stops resolving hermesc through
+`REACT_NATIVE_OVERRIDE_HERMES_DIR`; or if operators' own updates save less than a third.

@@ -20,7 +20,9 @@ sizes.
 Per app it builds the embedded bundle (as the React Native Gradle plugin does) and an OTA export of the start
 tree, an OTA export after previous.patch, and for each change the plain export and two delta compiles of its JS.
 Each patch is makeBsdiff output that passed checkPatch, measured from the OTA base, the embedded base and the
-older OTA update. Each app's results go to docs/assets/hermes-delta/<app>.json and <app>.md. Trees, installs
+older OTA update; the bundle delta-compiled against the embedded base is also measured from both OTA updates
+compiled against the embedded base, as they are once every update is. Each app's results go to
+docs/assets/hermes-delta/<app>.json and <app>.md. Trees, installs
 and build caches are kept between runs in the gitignored .cache/hermes-delta.
 
 With --emulator it measures nothing. It builds each conformance app's release APK for the running emulator, or
