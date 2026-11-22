@@ -5,7 +5,6 @@ updated: 2026-11-22
 
 # Releasing
 
-How Tide's packages reach npm: the one-time setup, the checks before each release, and the tag that publishes.
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes `@tide-ota/protocol`,
 `@tide-ota/server` and `@tide-ota/cli` together, at one version, through npm trusted publishing: no npm token exists.
 
@@ -59,15 +58,11 @@ git push origin v0.1.0
 
 The workflow's three jobs:
 
-- **build** checks that the tag is `v<semver>` and its commit is on `main`, then runs the secrets scan and the gate.
-  It writes the version into the three packages inside the run only (the repository stays at `0.0.0`), packs them,
-  checks each tarball names that version for itself and its `@tide-ota` dependencies, runs `pnpm test:pack` on those
-  tarballs and uploads them.
-- **publish** runs none of the repository's code and is the only job that can request an OIDC token. It checks every
-  package before publishing any: a version npm already holds is skipped only with the same bytes, and nothing is
-  published where the dist-tag already names a later version. It then publishes protocol, server and cli, in that
-  order, with provenance.
-- **release** creates a GitHub Release with generated notes, attaches the same three tarballs and publishes it.
+- **build** checks the tag and that its commit is on `main`, runs the gate, and packs the three tarballs at the tag's
+  version (the repository stays at `0.0.0`).
+- **publish** is the only job with an OIDC token and runs no repository code. It publishes protocol, server and cli
+  with provenance, and skips a version npm already holds only when the bytes match.
+- **release** creates the GitHub Release and attaches the same tarballs.
 
 If publish or release fails, use **Re-run failed jobs**: they reuse the build's tarballs and skip what already landed
 with the same bytes.
@@ -104,6 +99,5 @@ package's `repository.url`. Before the next release:
 
 - Replace each package's trusted publisher: `npm trust list` gives its id for `npm trust revoke`, then run
   `npm trust github` as above with the new `--repo`.
-- Update `repository`, `homepage` and `bugs` in the root `package.json` and the three packages'.
-- Update every other link to the repository, `--repo` in the commands above included; `git grep HashimTheArab`
-  finds them.
+- Update every reference to the old owner (`git grep HashimTheArab`): `repository`, `homepage` and `bugs` in the
+  root and package `package.json` files, the links in the docs, and `--repo` in the commands above.

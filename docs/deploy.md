@@ -121,10 +121,11 @@ separate jobs of one workflow:
     ephemeral and clean isolated virtual machines"; self-hosted runners "can be persistently compromised by untrusted
     code in a workflow".
   - **Trusted CLI.** It installs `@tide-ota/cli` at an exact version written in the workflow file, kept equal to the
-    app's (never one the export job chose), into a fresh directory under `${{ runner.temp }}`, on Node 24.11 or later
-    from `actions/setup-node`, and checks its registry signatures and provenance before running it. The CLI's only
-    dependency is `@tide-ota/protocol` at the same version, and npm never reuses a version, so that one version pins
-    every byte the job runs. The app is never checked out; it is present only as artifact data.
+    app's (never one the export job chose), into a fresh directory under `${{ runner.temp }}`, on a Node version the
+    package's `engines` allows, from `actions/setup-node`, and checks its registry signatures and provenance before
+    running it. The CLI's only dependency is `@tide-ota/protocol` at the same version, and npm never reuses a version,
+    so that one version pins every byte the job runs. The app is never checked out; it is present only as artifact
+    data.
 
     ```sh
     npm install --prefix "$RUNNER_TEMP/tide" --ignore-scripts --no-fund @tide-ota/cli@0.1.0
@@ -199,17 +200,16 @@ How production is gated depends on the GitHub plan:
 
 ## The container
 
-The Node entry runs from the npm package in any image with Node 24.11 or later:
+The Node entry runs from the npm package in any image with a supported Node:
 
 ```sh
 npm install @tide-ota/server
 node node_modules/@tide-ota/server/dist/node.js
 ```
 
-Tide's repository also has a reference image, `packages/server/Dockerfile`, which CI's `container` job tests and
-the list under the table describes. Build it from a checkout's root with BuildKit, which reads
-`packages/server/Dockerfile.dockerignore`; a builder that reads only the root `.dockerignore` gets an empty context
-and fails:
+Tide's repository also has a reference image, `packages/server/Dockerfile`, tested by CI's `container` job. Build it
+from a checkout's root with BuildKit, which reads `packages/server/Dockerfile.dockerignore`; a builder that reads only
+the root `.dockerignore` gets an empty context and fails:
 
 ```sh
 docker build -f packages/server/Dockerfile -t tide .
