@@ -76,13 +76,15 @@ export async function preparePatches(
       if (object === undefined) throw missing(base, bundleKey);
       const patch = makeBsdiff(object.bytes, t.bundle.bytes);
       await checkPatch(object.bytes, patch, t.bundle, key);
-      // gzip is the encoding every client accepts; a patch must save at least half of that transfer.
       gzipped ??= gzipSync(t.bundle.bytes, { level: 9 }).length;
-      if (patch.length * 2 <= gzipped) patches.set(key, patch);
+      if (keepsPatch(patch.length, gzipped)) patches.set(key, patch);
     }
   }
   return patches;
 }
+
+/** Whether a publish stores a `patch`-byte patch: gzip is what every client accepts, so it must halve that transfer. */
+export const keepsPatch = (patch: number, gzip9: number) => patch * 2 <= gzip9;
 
 /** Refuses `patch` unless protocol `applyBsdiff` turns `base` into bytes whose SHA-256 is `target.hash`. */
 export async function checkPatch(

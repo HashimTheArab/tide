@@ -3,24 +3,30 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, cpus, release, type } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { AppId, ChangeId } from "./apps.ts";
 import type { Hermesc } from "./build.ts";
 import type { AppResult, ChangeResult, Results } from "./measure.ts";
 import { APPS, CHANGES } from "./apps.ts";
 import {
+  EXPORT_ENV,
   checkout,
   compile,
   embed,
+  exportArgs,
   exportBundle,
   exportJs,
   install,
   openTree,
   reproduces,
+  retarget,
   tools,
 } from "./build.ts";
 import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, renderTable } from "./measure.ts";
 import { USAGE, UsageError, parseOptions } from "./options.ts";
+
+const OUT = fileURLToPath(new URL("../../../docs/assets/hermes-delta/", import.meta.url));
 
 const say = (line: string) => process.stderr.write(`hermes-delta: ${line}\n`);
 
@@ -79,7 +85,9 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
     changes[change] = { patch, ...stat, targets };
   }
 
-  const shapes = new Set(exported.map((h) => JSON.stringify(template(h.args, h, "<tmp>"))));
+  const shapes = new Set(
+    exported.map((h) => JSON.stringify(retarget(h, "<tmp>/index.js", "<tmp>/index.hbc"))),
+  );
   if (shapes.size !== 1)
     throw new Error(`expo export ran hermesc with different flags: ${[...shapes].join(" | ")}`);
   const scratch = join(work, "hermesc");
@@ -103,9 +111,9 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
     },
     tools: { ...about.versions, hermesc: about.hermesc },
     export: {
-      command: ["expo", "export", "--output-dir", "<dir>", "--platform", "android"],
-      env: { EXPO_NO_DOTENV: "1", NODE_ENV: "production", BABEL_ENV: "production", ...pin.env },
-      hermescArgs: template(start.hermesc.args, start.hermesc, "<tmp>"),
+      command: ["expo", ...exportArgs("<dir>")],
+      env: { ...EXPORT_ENV, ...pin.env },
+      hermescArgs: retarget(start.hermesc, "<tmp>/index.js", "<tmp>/index.hbc"),
       hermescTempDir:
         "<tmpdir>/expo-bundler-<Math.random()>-<Date.now()>, removed after the compile",
       reproducesExport: true,
@@ -126,7 +134,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
     },
     embedded: {
       bundleCommand: embedded.bundleCommand.map((a) => a.replace(tree.dir, "<app>")),
-      hermescArgs: embedded.hermesc.args,
+      hermescArgs: embedded.hermescArgs,
       flagsFrom: embedded.flagsFrom,
     },
     delta: { hermescArgs: deltaArgs.map((a) => a.replaceAll(scratch, "<work>")) },
@@ -137,13 +145,6 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
     },
     changes: changes as Record<ChangeId, ChangeResult>,
   };
-}
-
-/** Returns `args` with the compile's input and output directory written as `dir`. */
-function template(args: readonly string[], io: Hermesc, dir: string): string[] {
-  return args.map((a) =>
-    a === io.input ? `${dir}/index.js` : a === io.out ? `${dir}/index.hbc` : a,
-  );
 }
 
 /** Returns the results file's apps, or none when it does not exist. */
@@ -166,7 +167,7 @@ async function main(args: readonly string[]): Promise<number> {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
-  const json = join(options.out, "results.json");
+  const json = join(OUT, "results.json");
   const measured = new Map(previousApps(json).map((a) => [a.id, a]));
   try {
     for (const id of options.apps) measured.set(id, await measureApp(id, options.work));
@@ -185,9 +186,9 @@ async function main(args: readonly string[]): Promise<number> {
     targets: TARGETS,
     apps: (Object.keys(APPS) as AppId[]).flatMap((id) => measured.get(id) ?? []),
   };
-  mkdirSync(options.out, { recursive: true });
+  mkdirSync(OUT, { recursive: true });
   writeFileSync(json, `${JSON.stringify(results, null, 2)}\n`);
-  writeFileSync(join(options.out, "results.md"), renderTable(results));
+  writeFileSync(join(OUT, "results.md"), renderTable(results));
   say(`wrote ${json} and results.md`);
   return 0;
 }

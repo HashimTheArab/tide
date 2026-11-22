@@ -37,7 +37,6 @@ const GRADLE = {
 
 /** One app's working tree under the study's work dir, with the log its commands append to. */
 export interface Tree {
-  readonly app: AppId;
   readonly pin: AppPin;
   readonly dir: string;
   readonly work: string; // The app's own directory under the study's work dir.
@@ -56,7 +55,6 @@ export async function openTree(app: AppId, work: string): Promise<Tree> {
   const pin = APPS[app];
   const appWork = join(work, app);
   const tree = {
-    app,
     pin,
     dir: join(appWork, "tree"),
     work: appWork,
@@ -145,7 +143,10 @@ function buildEnv(tree: Tree, extra: Record<string, string>): Record<string, str
 }
 
 /** The variables `tide export` sets for `expo export`. */
-const EXPORT_ENV = { EXPO_NO_DOTENV: "1", NODE_ENV: "production", BABEL_ENV: "production" };
+export const EXPORT_ENV = { EXPO_NO_DOTENV: "1", NODE_ENV: "production", BABEL_ENV: "production" };
+
+/** Returns the `expo export` arguments for an Android export into `out`. */
+export const exportArgs = (out: string) => ["export", "--output-dir", out, "--platform", "android"];
 
 /**
  * Runs `expo export --platform android` as `tide export` does and returns the exported bundle with the one hermesc
@@ -158,7 +159,7 @@ export async function exportBundle(tree: Tree, name: string) {
   mkdirSync(capture, { recursive: true });
   const hermesc = hermescPath(tree);
   const override = captureOverride(tree.work);
-  await run(tree, expoBin(tree), ["export", "--output-dir", out, "--platform", "android"], {
+  await run(tree, expoBin(tree), exportArgs(out), {
     ...EXPORT_ENV,
     REACT_NATIVE_OVERRIDE_HERMES_DIR: override,
     HERMES_DELTA_CAPTURE: capture,
@@ -180,12 +181,7 @@ export async function exportBundle(tree: Tree, name: string) {
 export async function exportJs(tree: Tree, name: string): Promise<Uint8Array<ArrayBuffer>> {
   const out = join(tree.work, "exports", name);
   rmSync(out, { recursive: true, force: true });
-  await run(
-    tree,
-    expoBin(tree),
-    ["export", "--output-dir", out, "--platform", "android", "--no-bytecode"],
-    EXPORT_ENV,
-  );
+  await run(tree, expoBin(tree), [...exportArgs(out), "--no-bytecode"], EXPORT_ENV);
   return bytes(join(out, exportedBundle(out)));
 }
 
@@ -320,7 +316,7 @@ export async function embed(tree: Tree) {
   return {
     hbc: bytes(join(tree.dir, out)),
     bundleCommand: ["node", ...bundleCommand],
-    hermesc: { args, input: GRADLE.bundle, out },
+    hermescArgs: args,
     flagsFrom: flags.from,
   };
 }

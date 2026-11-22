@@ -10,6 +10,7 @@ import { applyBsdiff } from "@tide-ota/protocol";
 
 import type { Results } from "../src/hermes-delta/measure.ts";
 import { makeBsdiff } from "../../packages/cli/src/bsdiff.ts";
+import { keepsPatch } from "../../packages/cli/src/publish-patch.ts";
 import { APPS, CHANGES } from "../src/hermes-delta/apps.ts";
 import { hermescIo, kotlinArgs, numstat, retarget } from "../src/hermes-delta/build.ts";
 import {
@@ -17,7 +18,6 @@ import {
   KEEP_RULE,
   TARGETS,
   describe as describeBundle,
-  keeps,
   measureTargets,
   renderTable,
 } from "../src/hermes-delta/measure.ts";
@@ -61,18 +61,19 @@ describe("pnpm hermes-delta options", () => {
     );
   });
 
-  test("defaults to every app, the gitignored cache and docs/assets/hermes-delta", () => {
+  test("defaults to every app and the gitignored cache", () => {
     expect(parseOptions([], "/elsewhere")).toEqual({
       apps: ["sdk-55", "sdk-58", "bluesky"],
       work: join(REPO, ".cache", "hermes-delta"),
-      out: join(REPO, "docs", "assets", "hermes-delta"),
     });
   });
 
-  test("named apps keep table order, and paths resolve against the caller's directory", () => {
-    expect(
-      parseOptions(["--app", "bluesky", "--app", "sdk-55", "--work", "w", "--out", "o"], "/x"),
-    ).toEqual({ apps: ["sdk-55", "bluesky"], work: "/x/w", out: "/x/o" });
+  test("named apps keep table order, and --work resolves against the caller's directory", () => {
+    expect(parseOptions(["--app", "bluesky", "--app", "sdk-55", "--work", "w"], "/x")).toEqual({
+      apps: ["sdk-55", "bluesky"],
+      work: "/x/w",
+    });
+    expect(() => parseOptions(["--out", "o"], "/x")).toThrow(UsageError);
     expect(() => parseOptions(["positional"], "/x")).toThrow(UsageError);
   });
 });
@@ -190,18 +191,13 @@ describe("measureTargets", () => {
         expect(applyBsdiff(bases[base], patch, target.length)).toEqual(target);
         expect(measured[kind].from[base]).toEqual({
           bytes: patch.length,
-          keep: keeps(patch.length, measured[kind].gzip9),
+          keep: keepsPatch(patch.length, measured[kind].gzip9),
         });
       }
     }
     // Noise does not compress, so a patch between unrelated bundles is about as big as the bundle: not kept.
     expect(measured.plain.from.ota.keep).toBe(true);
     expect(measured.plain.from.embedded.keep).toBe(false);
-  });
-
-  test("keeps is Tide's rule: a patch at most half the gzipped bundle", () => {
-    expect(keeps(50, 100)).toBe(true);
-    expect(keeps(51, 100)).toBe(false);
   });
 });
 
@@ -211,9 +207,9 @@ test("renderTable prints one row per change and compile base, then totals from t
     ...sized,
     gzip9,
     from: {
-      ota: { bytes: ota, keep: keeps(ota, gzip9) },
-      embedded: { bytes: embedded, keep: keeps(embedded, gzip9) },
-      "older-ota": { bytes: older, keep: keeps(older, gzip9) },
+      ota: { bytes: ota, keep: keepsPatch(ota, gzip9) },
+      embedded: { bytes: embedded, keep: keepsPatch(embedded, gzip9) },
+      "older-ota": { bytes: older, keep: keepsPatch(older, gzip9) },
     },
   });
   const change = {

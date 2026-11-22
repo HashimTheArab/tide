@@ -6,7 +6,7 @@ import { sha256Base64Url } from "@tide-ota/protocol";
 
 import type { AppId, ChangeId } from "./apps.ts";
 import { makeBsdiff } from "../../../packages/cli/src/bsdiff.ts";
-import { checkPatch } from "../../../packages/cli/src/publish-patch.ts";
+import { checkPatch, keepsPatch } from "../../../packages/cli/src/publish-patch.ts";
 import { CHANGES } from "./apps.ts";
 
 /** The bundles a device can be running when the measured update is published. */
@@ -27,10 +27,7 @@ export type TargetKind = keyof typeof TARGETS;
 
 export const KEEP_RULE =
   "Tide stores a patch only when its bytes times two are at most the gzip-9 size of the new bundle " +
-  "(packages/cli/src/publish-patch.ts preparePatches)";
-
-/** Whether Tide keeps a patch of `patch` bytes for a new bundle of `gzip9` gzipped bytes; as preparePatches. */
-export const keeps = (patch: number, gzip9: number) => patch * 2 <= gzip9;
+  "(packages/cli/src/publish-patch.ts keepsPatch)";
 
 export interface Bundle {
   readonly bytes: number;
@@ -71,7 +68,7 @@ export async function measureTargets(
     for (const base of Object.keys(BASES) as BaseKind[]) {
       const patch = makeBsdiff(bases[base], bytes);
       await checkPatch(bases[base], patch, { bytes, hash }, `${base} to ${kind}`);
-      from[base] = { bytes: patch.length, keep: keeps(patch.length, bundle.gzip9) };
+      from[base] = { bytes: patch.length, keep: keepsPatch(patch.length, bundle.gzip9) };
     }
     out[kind] = { ...bundle, from: from as Record<BaseKind, PatchSize> };
   }
@@ -139,18 +136,14 @@ export function renderTable(results: Results): string {
         "Target gzip-9 plain / delta | Kept plain / delta (compile, other, older) |",
       "| --- | --- | --- | --- | --- | --- | --- | --- |",
     );
-    const totals = { ota: [0, 0, 0, 0, 0, 0], embedded: [0, 0, 0, 0, 0, 0] };
+    const total = (target: TargetKind, b: BaseKind) =>
+      Object.values(app.changes).reduce((sum, c) => sum + c.targets[target].from[b].bytes, 0);
     for (const change of Object.keys(CHANGES) as ChangeId[]) {
       const c = app.changes[change];
       for (const base of ["ota", "embedded"] as const) {
         const plain = c.targets.plain;
         const delta = c.targets[`delta-${base}`];
         const pairs = [base, OTHER[base], "older-ota"] as const;
-        const t = totals[base];
-        pairs.forEach((b, i) => {
-          t[2 * i] = (t[2 * i] ?? 0) + plain.from[b].bytes;
-          t[2 * i + 1] = (t[2 * i + 1] ?? 0) + delta.from[b].bytes;
-        });
         const cell = (b: BaseKind) => `${n(plain.from[b].bytes)} → ${n(delta.from[b].bytes)}`;
         const kept = (t: MeasuredTarget) => pairs.map((b) => yn(t.from[b])).join(" ");
         lines.push(
@@ -161,9 +154,10 @@ export function renderTable(results: Results): string {
       }
     }
     for (const base of ["ota", "embedded"] as const) {
-      const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0] = totals[base];
+      const cell = (b: BaseKind) => `${n(total("plain", b))} → ${n(total(`delta-${base}`, b))}`;
       lines.push(
-        `| all changes | ${base} | ${n(a)} → ${n(b)} | ${saved(a, b)} | ${n(c)} → ${n(d)} | ${n(e)} → ${n(f)} | | |`,
+        `| all changes | ${base} | ${cell(base)} | ${saved(total("plain", base), total(`delta-${base}`, base))} | ` +
+          `${cell(OTHER[base])} | ${cell("older-ota")} | | |`,
       );
     }
     lines.push("");
