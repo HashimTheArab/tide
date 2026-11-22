@@ -52,17 +52,22 @@ export {
   textOf,
 } from "./s3.ts";
 export { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
-export type { CodeSigningCertificate, SelfSignedFields, Signer } from "./signature.ts";
+export type { CertificateFields, CodeSigningCertificate, IssuerPath, Signer } from "./signature.ts";
 export {
   MAX_CHAIN_BYTES,
   MAX_CHAIN_CERTIFICATES,
+  MAX_COMMON_NAME,
+  MAX_ISSUER_BYTES,
+  MAX_SPKI_BYTES,
+  certificateAuthorityChain,
   certificateChain,
   certificatePublicKey,
   codeSigningCertificate,
   cryptoKeySigner,
   expoSignature,
+  issuerPath,
   parseExpoSignature,
-  selfSignedCertificate,
+  signedCertificate,
   verifyChainedSignature,
   verifyExpoSignature,
 } from "./signature.ts";

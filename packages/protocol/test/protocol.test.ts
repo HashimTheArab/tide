@@ -17,7 +17,10 @@ import {
   MAX_BASE_BYTES,
   MAX_CHAIN_BYTES,
   MAX_CHAIN_CERTIFICATES,
+  MAX_COMMON_NAME,
   MAX_FILTERS_BYTES,
+  MAX_ISSUER_BYTES,
+  MAX_SPKI_BYTES,
   MAX_REPLY_BYTES,
   LEGACY_MAP_KEY,
   NO_UPDATE_KEY,
@@ -29,6 +32,7 @@ import {
   buildManifest,
   buildNoUpdateAvailable,
   buildRollBackToEmbedded,
+  certificateAuthorityChain,
   certificateChain,
   certificatePublicKey,
   codeSigningCertificate,
@@ -47,6 +51,7 @@ import {
   encodeSfvDictionary,
   encodeStoredReply,
   expoSignature,
+  issuerPath,
   parseMultipart,
   parseS3Xml,
   patchKey,
@@ -72,7 +77,7 @@ import {
   derTlv,
   oid as readOid,
   readTlv,
-  selfSignedCertificate,
+  signedCertificate,
   time as readTime,
 } from "../src/signature.ts";
 import {
@@ -2239,46 +2244,361 @@ describe(`DER encoder (seed ${seed})`, () => {
   });
 });
 
-describe("selfSignedCertificate", () => {
-  const issue = async (notAfter: Date) => {
+/** The TLVs inside the constructed TLV `parent` of `der`. */
+const childrenOf = (der: Uint8Array, parent: { body: number; end: number }) => {
+  const out = [];
+  for (let at = parent.body; at < parent.end;) {
+    const t = readTlv(der, at, parent.end);
+    out.push(t);
+    at = t.end;
+  }
+  return out;
+};
+/** A certificate's TBS fields, and each extension's whole DER as hex. */
+const tbsOf = (pemText: string) => {
+  const der = derOf(pemText);
+  const [tbs] = childrenOf(der, readTlv(der, 0, der.length));
+  const fields = childrenOf(der, tbs!);
+  const bytes = (i: number) => der.subarray(fields[i]!.start, fields[i]!.end);
+  const [list] = childrenOf(der, fields[7]!);
+  return {
+    issuer: bytes(3),
+    subject: bytes(5),
+    spki: bytes(6),
+    notAfterTag: childrenOf(der, fields[4]!)[1]!.tag,
+    extensions: childrenOf(der, list!).map((e) => hex(der.subarray(e.start, e.end))),
+  };
+};
+// Extension DER: critical Key Usage digitalSignature, then Extended Key Usage codeSigning (P10's profile).
+const CODE_SIGNING_EXTENSIONS = [
+  "300e0603551d0f0101ff040403020780",
+  "30130603551d25040c300a06082b06010505070303",
+];
+const CA_KEY_USAGE = "300e0603551d0f0101ff040403020204"; // Critical, keyCertSign only.
+
+describe("signedCertificate", () => {
+  const issue = async (fields: {
+    notAfter?: Date;
+    issuer?: Uint8Array;
+    ca?: { pathLen?: number };
+  }) => {
     const keys = await mainKeys();
     const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey));
     const notBefore = new Date(Math.floor(Date.now() / 1000) * 1000);
     const sign = async (tbs: Uint8Array<ArrayBuffer>) =>
       new Uint8Array(await crypto.subtle.sign(RSA_SHA256, keys.privateKey, tbs));
-    return selfSignedCertificate({ spki, commonName: "Tide test", notBefore, notAfter }, sign);
-  };
-  /** The TLVs inside the constructed TLV `parent` of `der`. */
-  const children = (der: Uint8Array, parent: { body: number; end: number }) => {
-    const out = [];
-    for (let at = parent.body; at < parent.end;) {
-      const t = readTlv(der, at, parent.end);
-      out.push(t);
-      at = t.end;
-    }
-    return out;
-  };
-  const notAfterTag = (pemText: string) => {
-    const der = derOf(pemText);
-    const [tbs] = children(der, readTlv(der, 0, der.length));
-    const validity = children(der, tbs!)[4]!;
-    return children(der, validity)[1]!.tag;
+    return signedCertificate(
+      {
+        spki,
+        commonName: "Tide test",
+        notBefore,
+        notAfter: fields.notAfter ?? new Date("2049-12-31T23:59:59Z"),
+        issuer: fields.issuer,
+        ca: fields.ca,
+      },
+      sign,
+    );
   };
 
   test.each<[string, Date, number]>([
     ["a 2049 notAfter as UTCTime", new Date("2049-12-31T23:59:59Z"), 0x17],
     ["a 2050 notAfter as GeneralizedTime", new Date("2050-01-01T00:00:00Z"), 0x18],
   ])("its output passes codeSigningCertificate, with %s", async (_, notAfter, tag) => {
-    const pemText = await issue(notAfter);
+    const pemText = await issue({ notAfter });
     const { key } = await codeSigningCertificate(pemText, new Date());
     const keys = await mainKeys();
     const sig = await crypto.subtle.sign(RSA_SHA256, keys.privateKey, ascii("probe"));
     expect(await crypto.subtle.verify(RSA_SHA256, key, sig, ascii("probe"))).toBe(true);
-    expect(notAfterTag(pemText)).toBe(tag);
+    expect(tbsOf(pemText).notAfterTag).toBe(tag);
+    expect(tbsOf(pemText).extensions).toEqual(CODE_SIGNING_EXTENSIONS);
     const lines = pemText.split("\n");
     expect(lines.at(-1)).toBe("");
     expect(lines.slice(1, -3).every((l) => l.length === 64)).toBe(true);
     expect(lines.at(-3)!.length).toBeLessThanOrEqual(64);
+  });
+
+  test.each<[string, { pathLen?: number }, string]>([
+    ["no pathLen", {}, "300f0603551d130101ff040530030101ff"],
+    ["pathLen 0", { pathLen: 0 }, "30120603551d130101ff04083006 0101ff020100"],
+    ["pathLen 7", { pathLen: 7 }, "30120603551d130101ff04083006 0101ff020107"],
+  ])(
+    "a CA with %s has critical Basic Constraints and Key Usage keyCertSign, and no EKU",
+    async (_, ca, basic) => {
+      const pemText = await issue({ ca });
+      expect(tbsOf(pemText).extensions).toEqual([basic.replace(" ", ""), CA_KEY_USAGE]);
+      await expect(
+        certificateAuthorityChain(undefined, pemText, new Date(), true),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  test("with an issuer, the TBS issuer is the given Name byte for byte and the subject is the common name", async () => {
+    const issuer = rdnName([attribute(0x13, ascii("Some CA"))], [attribute(0x0c, ascii("Unit"))]);
+    const fields = tbsOf(await issue({ issuer }));
+    expect(hex(fields.issuer)).toBe(hex(issuer));
+    expect(hex(fields.subject)).toBe(hex(tbsOf(await issue({})).subject));
+    expect(fields.extensions).toEqual(CODE_SIGNING_EXTENSIONS);
+  });
+
+  test.each([-1, 128, 1.5])("a pathLen of %s is refused", async (pathLen) => {
+    await rejects(
+      () => issue({ ca: { pathLen } }),
+      "certificate",
+      "pathLen must be a whole number",
+    );
+  });
+});
+
+/** Issues a CA under `issuer` (itself when the same pair) with `subject` and `options`, valid at CHAIN_NOW. */
+const caCertificate = (
+  subject: Pair,
+  issuer: Pair,
+  names: [string, string],
+  options: CertificateOptions = {},
+) => issue(subject, issuer, { subject: names[0], issuer: names[1], extensions: CA, ...options });
+/** A root, two intermediates under it, then the issuer path (lowest first) and its parts. */
+async function threeLevels(options: { readonly middle?: CertificateOptions } = {}) {
+  const [root, intermediate, leaf] = [await rootKeys(), await intermediateKeys(), await leafKeys()];
+  const top = await caCertificate(root, root, ["Root", "Root"]);
+  const middle = await caCertificate(intermediate, root, ["Middle", "Root"], options.middle);
+  const low = await caCertificate(leaf, intermediate, ["Low", "Middle"]);
+  return { top, middle, low, keys: leaf };
+}
+
+describe("issuerPath", () => {
+  test("a one-block path is its root: subject, key, notAfter, no served part", () => {
+    const rootText = text(fixture("chain-root.pem"));
+    const path = issuerPath(ascii(rootText));
+    expect(path.served).toBeUndefined();
+    expect(path.root).toBe(rootText);
+    expect(hex(path.subject)).toBe(hex(tbsOf(rootText).subject));
+    expect(hex(path.spki)).toBe(hex(tbsOf(rootText).spki));
+    expect(path.notAfter).toBe(CHAIN_VALIDITY.notAfter.getTime());
+  });
+
+  test("a three-block path gives the first certificate's names, the earliest notAfter and canonical PEMs", async () => {
+    const earliest = new Date("2040-06-01T00:00:00Z");
+    const { top, middle, low, keys } = await threeLevels({ middle: { notAfter: earliest } });
+    // CRLF line ends and no final line end are read, and re-encoded canonically.
+    const path = issuerPath(ascii((low + middle + top).replaceAll("\n", "\r\n").slice(0, -2)));
+    expect(text(path.served!)).toBe(low + middle);
+    expect(path.root).toBe(top);
+    expect(path.notAfter).toBe(earliest.getTime());
+    expect(hex(path.subject)).toBe(hex(tbsOf(low).subject));
+    expect(hex(path.spki)).toBe(
+      hex(new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey))),
+    );
+    await expect(
+      certificateAuthorityChain(path.served, path.root, CHAIN_NOW, true),
+    ).resolves.toBeUndefined();
+  });
+
+  test("a root larger than a served part is read; one byte over MAX_ISSUER_BYTES is not", async () => {
+    const keys = await rootKeys();
+    const big = "R".repeat(14_000);
+    const rootText = await caCertificate(keys, keys, [big, big]);
+    expect(rootText.length).toBeGreaterThan(MAX_CHAIN_BYTES);
+    expect(issuerPath(ascii(rootText)).root).toBe(rootText);
+    await rejects(
+      () => issuerPath(new Uint8Array(MAX_ISSUER_BYTES + 1).fill(0x41)),
+      "issuer",
+      `must be 1 to ${MAX_ISSUER_BYTES} bytes`,
+    );
+  });
+
+  test("certificates below the root over MAX_CHAIN_BYTES are refused", async () => {
+    const [root, intermediate] = [await rootKeys(), await intermediateKeys()];
+    const top = await caCertificate(root, root, ["Root", "Root"]);
+    const low = await caCertificate(intermediate, root, ["I".repeat(25_000), "Root"]);
+    expect(low.length).toBeGreaterThan(MAX_CHAIN_BYTES);
+    await rejects(() => issuerPath(ascii(low + top)), "issuer", "below the root");
+  });
+
+  test.each<[string, () => Uint8Array, string]>([
+    ["text that is not PEM", () => ascii("hello\n"), "must be PEM CERTIFICATE blocks"],
+    ["an empty path", () => new Uint8Array(), "must be 1 to 65536 bytes"],
+    [
+      "9 blocks",
+      () => ascii(text(fixture("chain-root.pem")).repeat(9)),
+      `must serve 1 to ${MAX_CHAIN_CERTIFICATES} certificates`,
+    ],
+    [
+      "bad base64",
+      () => ascii("-----BEGIN CERTIFICATE-----\nAB==\n-----END CERTIFICATE-----\n"),
+      "must be canonical base64",
+    ],
+    [
+      "DER that does not parse",
+      () => ascii(pem(Uint8Array.of(0x30, 0x03, 0x02, 0x01, 0x01))),
+      "holds a certificate that is not well-formed X.509 DER",
+    ],
+  ])("refuses %s", (_, bytes, message) => rejects(() => issuerPath(bytes()), "issuer", message));
+});
+
+/** A served part (undefined: none) and a root PEM. */
+type CaInput = readonly [Uint8Array | undefined, string];
+
+describe("certificateAuthorityChain", () => {
+  const chainRoot = () => text(fixture("chain-root.pem"));
+
+  test.each<[string, () => CaInput | Promise<CaInput>]>([
+    [
+      "a CA root alone",
+      async () => {
+        const keys = await rootKeys();
+        return [undefined, await caCertificate(keys, keys, ["Root", "Root"])];
+      },
+    ],
+    ["chain-root.pem alone", () => [undefined, chainRoot()]],
+    [
+      "chain-intermediate.pem over chain-root.pem",
+      () => [fixture("chain-intermediate.pem"), chainRoot()],
+    ],
+  ])("%s passes, with and without the leaf reserve", async (_, make) => {
+    const [served, root] = await make();
+    for (const reserve of [true, false]) {
+      await expect(
+        certificateAuthorityChain(served, root, CHAIN_NOW, reserve),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  test.each<[string, () => CaInput | Promise<CaInput>, string]>([
+    [
+      "certificate.pem (not a CA) alone",
+      () => [undefined, text(fixture("certificate.pem"))],
+      "root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "a CA without keyCertSign",
+      async () => {
+        const keys = await rootKeys();
+        const extensions = [EXTENSION.ca(), EXTENSION.digitalSignature];
+        return [undefined, await caCertificate(keys, keys, ["Root", "Root"], { extensions })];
+      },
+      "root must be a CA with Key Usage keyCertSign",
+    ],
+    [
+      "an intermediate under a root of pathLen 0",
+      async () => {
+        const [root, intermediate] = [await rootKeys(), await intermediateKeys()];
+        const top = await caCertificate(root, root, ["Root", "Root"], {
+          extensions: [EXTENSION.ca(0), EXTENSION.keyCertSignOnly],
+        });
+        return [servedBody(await caCertificate(intermediate, root, ["Low", "Root"])), top];
+      },
+      "intermediate 1 exceeds the path length its issuers allow",
+    ],
+    [
+      "an intermediate under one of pathLen 0",
+      async () => {
+        const { top, middle, low } = await threeLevels({
+          middle: { extensions: [EXTENSION.ca(0), EXTENSION.keyCertSignOnly] },
+        });
+        return [servedBody(low, middle), top];
+      },
+      "intermediate 1 exceeds the path length its issuers allow",
+    ],
+    [
+      "an expired root",
+      async () => {
+        const keys = await rootKeys();
+        return [
+          undefined,
+          await caCertificate(keys, keys, ["Root", "Root"], { notAfter: CHAIN_NOW }),
+        ];
+      },
+      "root has expired",
+    ],
+    [
+      "project information",
+      async () => {
+        const { top, middle } = await threeLevels({
+          middle: { extensions: [...CA, EXTENSION.projectInformation] },
+        });
+        return [servedBody(middle), top];
+      },
+      "intermediate 1 must not carry Expo project information",
+    ],
+  ])("refuses %s", async (_, make, message) => {
+    const [served, root] = await make();
+    await rejects(
+      () => certificateAuthorityChain(served, root, CHAIN_NOW, false),
+      "certificate_chain",
+      message,
+    );
+  });
+
+  test("8 served certificates leave no room for a leaf", async () => {
+    const pairs = [await rootKeys(), await intermediateKeys(), await leafKeys(), await otherKeys()];
+    const keyOf = (i: number) => pairs[i % pairs.length]!;
+    const nameOf = (i: number) => (i === 0 ? "Root" : `CA ${i}`);
+    const top = await caCertificate(keyOf(0), keyOf(0), ["Root", "Root"]);
+    const below: string[] = [];
+    for (let i = 1; i <= 8; i++)
+      below.unshift(await caCertificate(keyOf(i), keyOf(i - 1), [nameOf(i), nameOf(i - 1)]));
+    await expect(
+      certificateAuthorityChain(servedBody(...below.slice(1)), top, CHAIN_NOW, false),
+    ).resolves.toBeUndefined();
+    await rejects(
+      () => certificateAuthorityChain(servedBody(...below), top, CHAIN_NOW, false),
+      "certificate_chain",
+      `must leave room for a leaf: at most ${MAX_CHAIN_CERTIFICATES - 1} served`,
+    );
+  });
+
+  test("the largest leaf Tide issues under a 4096-bit CA fits the leaf reserve exactly", async () => {
+    const big4096 = await crypto.subtle.generateKey({ ...RSA_SHA256, modulusLength: 4096 }, true, [
+      "sign",
+      "verify",
+    ]);
+    const [root, upper] = [await rootKeys(), await intermediateKeys()];
+    const longName = "N".repeat(MAX_COMMON_NAME);
+    const top = await caCertificate(root, root, ["Root", "Root"]);
+    // The leaf is issued for real: a 4096-bit key with exponent 65537, the longest name, GeneralizedTime dates.
+    const spki = new Uint8Array(await crypto.subtle.exportKey("spki", big4096.publicKey));
+    expect(spki.length).toBe(MAX_SPKI_BYTES);
+    const layers = async (n: number) => {
+      // The bulk sits in the upper CA's name, which the lower one repeats as its issuer, so the leaf stays small.
+      const bulk = "B".repeat(n);
+      const upperPem = await caCertificate(upper, root, [bulk, "Root"]);
+      const lowerPem = await caCertificate(big4096, upper, [longName, bulk]);
+      return lowerPem + upperPem;
+    };
+    const lower = tbsOf(await layers(1)).subject;
+    const leaf = await signedCertificate(
+      {
+        spki,
+        commonName: longName.replaceAll("N", "L"),
+        notBefore: new Date("2050-01-01T00:00:00Z"),
+        notAfter: new Date("9999-12-31T23:59:59Z"),
+        issuer: lower,
+      },
+      async (tbs) => new Uint8Array(await crypto.subtle.sign(RSA_SHA256, big4096.privateKey, tbs)),
+    );
+    const target = MAX_CHAIN_BYTES - leaf.length;
+    // Grow the bulk to just under the target, then make up the difference with CRLF line ends.
+    let n = 1;
+    let served = await layers(n);
+    while (target - served.length > 200) {
+      n += Math.floor((target - served.length) / 3);
+      served = await layers(n);
+    }
+    while (served.length > target) served = await layers(--n);
+    const padded = (extra: number) => {
+      let left = extra;
+      return ascii(served.replace(/\n/g, () => (left-- > 0 ? "\r\n" : "\n")));
+    };
+    const exact = padded(target - served.length);
+    expect(exact.length + leaf.length).toBe(MAX_CHAIN_BYTES);
+    await expect(certificateAuthorityChain(exact, top, CHAIN_NOW, true)).resolves.toBeUndefined();
+    const over = padded(target - served.length + 1);
+    await rejects(
+      () => certificateAuthorityChain(over, top, CHAIN_NOW, true),
+      "certificate_chain",
+      `must leave room within ${MAX_CHAIN_BYTES} bytes for any leaf Tide issues`,
+    );
+    await expect(certificateAuthorityChain(over, top, CHAIN_NOW, false)).resolves.toBeUndefined();
   });
 });
 

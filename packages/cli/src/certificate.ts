@@ -1,7 +1,7 @@
 import { X509Certificate } from "node:crypto";
 import { parseArgs } from "node:util";
 
-import { selfSignedCertificate } from "@tide-ota/protocol";
+import { signedCertificate } from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import type { PublishOptions } from "./publish.ts";
@@ -33,7 +33,7 @@ export async function certificate(
     const notBefore = new Date(Math.floor(at / 1000) * 1000);
     const notAfter = new Date(notBefore);
     notAfter.setUTCFullYear(notAfter.getUTCFullYear() + years); // 29 February rolls to 1 March.
-    const pem = await selfSignedCertificate({ spki, commonName, notBefore, notAfter }, source.sign);
+    const pem = await signedCertificate({ spki, commonName, notBefore, notAfter }, source.sign);
     const { key, sha256 } = await validCertificate(pem, "the generated certificate", at);
     const embedded = new X509Certificate(pem).publicKey.export({ type: "spki", format: "der" });
     if (!embedded.equals(spki)) {
