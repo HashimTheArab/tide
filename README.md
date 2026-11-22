@@ -144,7 +144,7 @@ npx tide publish --from <dir> --channel main        # signs and uploads; runs no
 ```
 
 The signing key can come from a file, an environment variable, or AWS KMS — through KMS the private key never
-leaves AWS. Run one publish at a time (a single CI concurrency group), and know that Tide never deletes anything
+leaves AWS, and `tide certificate` makes the app's certificate with that same key. Run one publish at a time (a single CI concurrency group), and know that Tide never deletes anything
 from the bucket: published URLs must keep working for every device that holds them.
 [docs/deploy.md](docs/deploy.md#publishing) shows a complete CI setup, and [docs/design.md](docs/design.md#keys)
 covers how keys and certificates are checked.

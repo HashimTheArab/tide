@@ -1,4 +1,4 @@
-import { createPrivateKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import type { KeyObject } from "node:crypto";
 
@@ -7,7 +7,6 @@ import {
   NO_UPDATE_KEY,
   ProtocolError,
   codeSigningCertificate,
-  cryptoKeySigner,
   expoSignature,
   verifyExpoSignature,
 } from "@tide-ota/protocol";
@@ -15,7 +14,7 @@ import {
 import type { Bucket } from "./bucket.ts";
 import type { ProjectExport } from "./publish-export.ts";
 import type { Side, Verdict } from "./status.ts";
-import { KMS_VARIABLES, kmsSigner } from "./keys-kms.ts";
+import { KMS_VARIABLES, kmsSource } from "./keys-kms.ts";
 import { readRecord } from "./status.ts";
 import { bucketFromEnv } from "./storage.ts";
 
@@ -55,11 +54,17 @@ export interface Writer {
   checkCertificate(at: number): Promise<void>;
 }
 
+/** The one configured signing key. Writers use only `sign`, so a KMS writer needs only `kms:Sign`. */
+export interface KeySource {
+  readonly sign: Signer["sign"];
+  readonly publicKey: () => Promise<Uint8Array<ArrayBuffer>>; // SubjectPublicKeyInfo DER.
+}
+
 export type Env = Readonly<Record<string, string | undefined>>;
 
 const FILE_LIMIT = 64 * 1024;
-const PROBE = new TextEncoder().encode("tide signing probe");
-const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
+export const PROBE = new TextEncoder().encode("tide signing probe");
+export const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
 const KEY_FILE = "TIDE_SIGNING_KEY_FILE";
 const KEY_PEM = "TIDE_SIGNING_KEY";
 export const BUILD_KEYID = "TIDE_BUILD_KEYID";
@@ -84,10 +89,8 @@ export async function openWriter(
   const at = now();
   const identity = await buildIdentity(env, at);
   if (app !== undefined) await checkApp(app, identity, at);
-  const signer = verifying(
-    keySource(env, identity.keyId, options.kmsTimeoutMs ?? 30_000),
-    identity,
-  );
+  const source = signingKey(env, options.kmsTimeoutMs ?? 30_000);
+  const signer = verifying({ keyId: identity.keyId, sign: source.sign }, identity);
   await signer.sign(PROBE);
   const bucket = bucketFromEnv(env);
   return {
@@ -169,8 +172,8 @@ export function signingMetadata(metadata: unknown, field: string): SigningMetada
   return { keyid, alg };
 }
 
-/** Returns the signer for the one configured key source. */
-function keySource(env: Env, keyId: string, kmsTimeoutMs: number): Signer {
+/** Returns the one configured key source; every refusal names variables, never a value. */
+export function signingKey(env: Env, kmsTimeoutMs: number): KeySource {
   const file = read(env, KEY_FILE);
   const pem = read(env, KEY_PEM);
   const kms = Object.values(KMS_VARIABLES).filter((name) => read(env, name) !== undefined);
@@ -187,14 +190,14 @@ function keySource(env: Env, keyId: string, kmsTimeoutMs: number): Signer {
     if (bytes === undefined) {
       throw new KeyError(`${KEY_FILE} unreadable: not a regular file of at most 64 KiB`);
     }
-    return pemSigner(bytes, KEY_FILE, keyId);
+    return pemSource(bytes, KEY_FILE);
   }
-  if (pem !== undefined) return pemSigner(pem, KEY_PEM, keyId);
-  return kmsSigner(env, keyId, kmsTimeoutMs);
+  if (pem !== undefined) return pemSource(pem, KEY_PEM);
+  return kmsSource(env, kmsTimeoutMs);
 }
 
-/** Returns a signer over an unencrypted PKCS#8 or PKCS#1 RSA private key of 2048 to 4096 bits. */
-function pemSigner(pem: string | Buffer, source: string, keyId: string): Signer {
+/** Returns the key source over an unencrypted PKCS#8 or PKCS#1 RSA private key of 2048 to 4096 bits. */
+function pemSource(pem: string | Buffer, source: string): KeySource {
   // Read from the PEM itself: OpenSSL reports a missing passphrase as a cancelled prompt.
   if (/-----BEGIN ENCRYPTED |^Proc-Type: *4,ENCRYPTED/m.test(pem.toString())) {
     throw new KeyError(`${source} holds an encrypted key: Tide needs it unencrypted`);
@@ -216,7 +219,12 @@ function pemSigner(pem: string | Buffer, source: string, keyId: string): Signer 
   if (bits < 2048 || bits > 4096) {
     throw new KeyError(`${source} must hold an RSA key of 2048 to 4096 bits`);
   }
-  return cryptoKeySigner(key.toCryptoKey(RSA, false, ["sign"]), keyId);
+  const signing = key.toCryptoKey(RSA, false, ["sign"]);
+  const spki = new Uint8Array(createPublicKey(key).export({ type: "spki", format: "der" }));
+  return {
+    sign: async (bytes) => new Uint8Array(await crypto.subtle.sign(RSA, signing, bytes)),
+    publicKey: () => Promise.resolve(spki),
+  };
 }
 
 /** Wraps `inner` so no signature resolves unless it verifies under the builds' certificate and key ID. */

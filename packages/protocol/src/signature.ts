@@ -206,7 +206,7 @@ const TBS_TAGS = [INTEGER, SEQUENCE, SEQUENCE, SEQUENCE, SEQUENCE, SEQUENCE];
 // issuerUniqueID, subjectUniqueID, extensions: each optional, in this order.
 const TBS_TAIL = [0x81, 0x82, EXTENSIONS];
 
-interface Tlv {
+export interface Tlv {
   readonly tag: number;
   readonly start: number;
   readonly body: number;
@@ -342,7 +342,7 @@ function extendedKeyUsages(value: Uint8Array | undefined): string[] {
 }
 
 /** Returns the dotted form of the OBJECT IDENTIFIER at `tlv`. */
-function oid(der: Uint8Array, tlv: Tlv): string {
+export function oid(der: Uint8Array, tlv: Tlv): string {
   const arcs: number[] = [];
   let arc = 0;
   for (let at = tlv.body; at < tlv.end; at++) {
@@ -365,7 +365,7 @@ function oid(der: Uint8Array, tlv: Tlv): string {
 }
 
 /** Returns a UTCTime or GeneralizedTime in `Z` form as epoch milliseconds, or undefined. */
-function time(der: Uint8Array, tlv: Tlv): number | undefined {
+export function time(der: Uint8Array, tlv: Tlv): number | undefined {
   const text = String.fromCharCode(...der.subarray(tlv.body, tlv.end));
   const m =
     tlv.tag === 0x17
@@ -421,7 +421,7 @@ function hasTags(items: readonly Tlv[], tags: readonly number[]): boolean {
 }
 
 /** Reads one DER TLV inside `limit`: a low tag number and a minimal definite length of at most 4 octets. */
-function readTlv(der: Uint8Array, start: number, limit: number): Tlv {
+export function readTlv(der: Uint8Array, start: number, limit: number): Tlv {
   const byte = (at: number) => {
     if (at >= limit) throw new ProtocolError("certificate", "has truncated DER");
     return der[at] ?? 0;
@@ -443,4 +443,107 @@ function readTlv(der: Uint8Array, start: number, limit: number): Tlv {
   }
   if (body + length > limit) throw new ProtocolError("certificate", "has truncated DER");
   return { tag, start, body, end: body + length };
+}
+
+/** What a self-signed direct-signing certificate names; each date is whole seconds from 1950 through 9999. */
+export interface SelfSignedFields {
+  readonly spki: Uint8Array; // SubjectPublicKeyInfo DER, embedded as given.
+  readonly commonName: string; // The subject's and issuer's only attribute.
+  readonly notBefore: Date;
+  readonly notAfter: Date;
+}
+
+const SET = 0x31;
+const UTF8_STRING = 0x0c;
+const COMMON_NAME = "2.5.4.3";
+const TRUE = new Uint8Array([BOOLEAN, 1, 0xff]);
+const DIGITAL_SIGNATURE_ONLY = new Uint8Array([BIT_STRING, 2, 7, 0x80]);
+
+/**
+ * Returns the PEM of a v3 certificate whose TBSCertificate `sign` signs with RSASSA-PKCS1-v1_5 SHA-256; its only
+ * extensions are critical Key Usage digitalSignature and Extended Key Usage codeSigning.
+ */
+export async function selfSignedCertificate(
+  { spki, commonName, notBefore, notAfter }: SelfSignedFields,
+  sign: Signer["sign"],
+): Promise<string> {
+  const algorithm = derTlv(SEQUENCE, derOid(SHA256_WITH_RSA), NULL);
+  const cn = new TextEncoder().encode(commonName);
+  const name = derTlv(
+    SEQUENCE,
+    derTlv(SET, derTlv(SEQUENCE, derOid(COMMON_NAME), derTlv(UTF8_STRING, cn))),
+  );
+  const random = crypto.getRandomValues(new Uint8Array(16));
+  random[0] = 0x40 | ((random[0] ?? 0) & 0x3f); // Positive, and 16 octets once minimal.
+  const tbs = derTlv(
+    SEQUENCE,
+    V3,
+    derTlv(INTEGER, random),
+    algorithm,
+    name, // Issuer, the same bytes as the subject.
+    derTlv(SEQUENCE, derTime(notBefore), derTime(notAfter)),
+    name,
+    spki,
+    derTlv(
+      EXTENSIONS,
+      derTlv(
+        SEQUENCE,
+        derTlv(SEQUENCE, derOid(KEY_USAGE), TRUE, derTlv(OCTET_STRING, DIGITAL_SIGNATURE_ONLY)),
+        derTlv(
+          SEQUENCE,
+          derOid(EXT_KEY_USAGE),
+          derTlv(OCTET_STRING, derTlv(SEQUENCE, derOid(CODE_SIGNING))),
+        ),
+      ),
+    ),
+  );
+  const signature = await sign(tbs);
+  const der = derTlv(SEQUENCE, tbs, algorithm, derTlv(BIT_STRING, new Uint8Array([0]), signature));
+  const lines = base64(der).match(/.{1,64}/g) ?? [];
+  return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
+}
+
+/** Returns one DER TLV with a minimal definite length, as `readTlv` reads; `tag` must have a low tag number. */
+export function derTlv(tag: number, ...contents: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const length = contents.reduce((n, c) => n + c.length, 0);
+  const octets: number[] = [];
+  for (let n = length; n > 0; n = Math.floor(n / 256)) octets.unshift(n % 256);
+  const head = [tag, ...(length < 0x80 ? [length] : [0x80 | octets.length, ...octets])];
+  const out = new Uint8Array(head.length + length);
+  out.set(head);
+  let at = head.length;
+  for (const c of contents) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
+
+/** Returns the dotted OID `dotted`, which the caller keeps valid, as a DER OBJECT IDENTIFIER. */
+export function derOid(dotted: string): Uint8Array<ArrayBuffer> {
+  const [top = 0, second = 0, ...rest] = dotted.split(".").map(Number);
+  const bytes: number[] = [];
+  for (const arc of [top * 40 + second, ...rest]) {
+    const group = [arc % 128];
+    for (let n = Math.floor(arc / 128); n > 0; n = Math.floor(n / 128)) {
+      group.unshift(0x80 | (n % 128));
+    }
+    bytes.push(...group);
+  }
+  return derTlv(OID, new Uint8Array(bytes));
+}
+
+/** Returns `date` in `Z` form as RFC 5280 requires: UTCTime through 2049, GeneralizedTime from 2050. */
+export function derTime(date: Date): Uint8Array<ArrayBuffer> {
+  const year = date.getUTCFullYear();
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.getTime() % 1000 !== 0 ||
+    year < 1950 ||
+    year > 9999
+  ) {
+    throw new ProtocolError("certificate", "time must be whole seconds from 1950 through 9999");
+  }
+  const digits = new TextEncoder().encode(date.toISOString().replace(/[-:T]|\.\d+/g, ""));
+  return year < 2050 ? derTlv(0x17, digits.subarray(2)) : derTlv(0x18, digits);
 }

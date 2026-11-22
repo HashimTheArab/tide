@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 
-import type { Signer } from "@tide-ota/protocol";
 import {
   ProtocolError,
   awsFetch,
@@ -9,8 +8,8 @@ import {
   sigV4Credentials,
 } from "@tide-ota/protocol";
 
-import type { Env } from "./keys.ts";
-import { KeyError, read } from "./keys.ts";
+import type { Env, KeySource } from "./keys.ts";
+import { KeyError, RSA, isObject, read } from "./keys.ts";
 
 /** The KMS signer's variables; the TIDE_ prefix keeps ambient AWS credentials out. */
 export const KMS_VARIABLES = {
@@ -25,6 +24,11 @@ type KmsField = keyof typeof KMS_VARIABLES;
 const REQUIRED = ["keyId", "region", "accessKeyId", "secretAccessKey"] as const;
 
 const ALGORITHM = "RSASSA_PKCS1_V1_5_SHA_256";
+const KEY_SPECS: ReadonlyMap<unknown, number> = new Map([
+  ["RSA_2048", 2048],
+  ["RSA_3072", 3072],
+  ["RSA_4096", 4096],
+]);
 const BODY_LIMIT = 16 * 1024;
 /** Error codes a message may name; KMS defines more, and any other is reported as unrecognised. */
 const ERROR_CODES: ReadonlySet<string> = new Set([
@@ -104,91 +108,133 @@ function kmsEndpoint(raw: string | undefined, region: string): URL {
   return url;
 }
 
+type Target = ReturnType<typeof kmsTarget>;
+type Operation = "Sign" | "GetPublicKey";
+
 /**
- * Returns a signer over the KMS key the environment configures, signing the SHA-256 of each part with `Sign`
- * (`DIGEST`). Every failure rejects with a fixed-text `KeyError`, never an unsigned result.
+ * Returns the KMS key the environment configures: `sign` signs the SHA-256 of each part with `Sign` (`DIGEST`), and
+ * `publicKey` reads it with `GetPublicKey`. Every failure rejects with a fixed-text `KeyError`, never a result.
  */
-export function kmsSigner(env: Env, keyId: string, timeoutMs: number): Signer {
+export function kmsSource(env: Env, timeoutMs: number): KeySource {
   const target = kmsTarget(env);
   return {
-    keyId,
-    async sign(bytes) {
+    sign: async (bytes) => {
       // Hashed before any await, as the Signer contract lets the caller reuse `bytes` once this settles.
       const digest = createHash("sha256").update(bytes).digest("base64");
-      const body = new TextEncoder().encode(
-        JSON.stringify({
-          KeyId: target.keyId,
-          Message: digest,
-          MessageType: "DIGEST",
-          SigningAlgorithm: ALGORITHM,
-        }),
-      );
-      const signal = AbortSignal.timeout(timeoutMs);
-      let res: Response;
-      let text: string | undefined;
-      try {
-        res = await awsFetch(
-          {
-            method: "POST",
-            url: target.endpoint,
-            headers: {
-              "content-type": "application/x-amz-json-1.1",
-              "x-amz-target": "TrentService.Sign",
-              ...(target.sessionToken === undefined
-                ? {}
-                : { "x-amz-security-token": target.sessionToken }),
-            },
-            body,
-          },
-          target.credentials,
-          signal,
-        );
-        text = await readS3Text(res, BODY_LIMIT);
-      } catch {
-        throw new KeyError(
-          signal.aborted
-            ? `KMS Sign timed out after ${timeoutMs} ms`
-            : "KMS Sign failed: network error",
-        );
-      }
-      if (res.status !== 200) throw new KeyError(failure(res, text));
+      const text = await call(target, "Sign", timeoutMs, {
+        Message: digest,
+        MessageType: "DIGEST",
+        SigningAlgorithm: ALGORITHM,
+      });
       const signature = replySignature(text);
       if (signature === undefined) {
         throw new KeyError("KMS Sign returned 200 with an invalid reply");
       }
       return signature;
     },
+    publicKey: async () => await replyPublicKey(await call(target, "GetPublicKey", timeoutMs)),
   };
+}
+
+/** Sends one KMS request for `target`'s key and returns a 200's body, undefined when absent, oversize or not UTF-8. */
+async function call(
+  target: Target,
+  operation: Operation,
+  timeoutMs: number,
+  fields: Readonly<Record<string, string>> = {},
+): Promise<string | undefined> {
+  const body = new TextEncoder().encode(JSON.stringify({ KeyId: target.keyId, ...fields }));
+  const signal = AbortSignal.timeout(timeoutMs);
+  let res: Response;
+  let text: string | undefined;
+  try {
+    res = await awsFetch(
+      {
+        method: "POST",
+        url: target.endpoint,
+        headers: {
+          "content-type": "application/x-amz-json-1.1",
+          "x-amz-target": `TrentService.${operation}`,
+          ...(target.sessionToken === undefined
+            ? {}
+            : { "x-amz-security-token": target.sessionToken }),
+        },
+        body,
+      },
+      target.credentials,
+      signal,
+    );
+    text = await readS3Text(res, BODY_LIMIT);
+  } catch {
+    throw new KeyError(
+      signal.aborted
+        ? `KMS ${operation} timed out after ${timeoutMs} ms`
+        : `KMS ${operation} failed: network error`,
+    );
+  }
+  if (res.status !== 200) throw new KeyError(failure(operation, res, text));
+  return text;
+}
+
+/** Returns a reply's JSON object, or undefined. */
+function replyObject(text: string | undefined): Readonly<Record<string, unknown>> | undefined {
+  try {
+    const json: unknown = JSON.parse(text ?? "");
+    return isObject(json) ? json : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Returns the signature in a 200's JSON body, or undefined when any field is missing or malformed. */
 function replySignature(text: string | undefined): Uint8Array<ArrayBuffer> | undefined {
-  let json: unknown;
-  try {
-    json = JSON.parse(text ?? "");
-  } catch {
+  const reply = replyObject(text);
+  if (reply?.SigningAlgorithm !== ALGORITHM || typeof reply.Signature !== "string")
     return undefined;
-  }
-  if (typeof json !== "object" || json === null || Array.isArray(json)) return undefined;
-  const reply = json as Record<string, unknown>;
-  if (reply.SigningAlgorithm !== ALGORITHM || typeof reply.Signature !== "string") return undefined;
   return decodeBase64(reply.Signature);
 }
 
+/** Returns the SubjectPublicKeyInfo of a `GetPublicKey` reply for an RSA signing key that Tide can use. */
+async function replyPublicKey(text: string | undefined): Promise<Uint8Array<ArrayBuffer>> {
+  const reply = replyObject(text);
+  if (reply === undefined)
+    throw new KeyError("KMS GetPublicKey returned 200 with an invalid reply");
+  if (reply.KeyUsage !== "SIGN_VERIFY") {
+    throw new KeyError("KMS key must have key usage SIGN_VERIFY");
+  }
+  const bits = KEY_SPECS.get(reply.KeySpec);
+  if (bits === undefined)
+    throw new KeyError("KMS key must have key spec RSA_2048, RSA_3072 or RSA_4096");
+  const algorithms = reply.SigningAlgorithms;
+  if (!Array.isArray(algorithms) || !algorithms.includes(ALGORITHM)) {
+    throw new KeyError(`KMS key must allow the signing algorithm ${ALGORITHM}`);
+  }
+  const spki = typeof reply.PublicKey === "string" ? decodeBase64(reply.PublicKey) : undefined;
+  if (spki === undefined || !(await isRsaSpki(spki, bits))) {
+    throw new KeyError("KMS GetPublicKey returned 200 with an invalid public key");
+  }
+  return spki;
+}
+
+/** True when `spki` is exactly the DER of an RSA public key of `bits`, as WebCrypto re-exports it. */
+async function isRsaSpki(spki: Uint8Array<ArrayBuffer>, bits: number): Promise<boolean> {
+  try {
+    const key = await crypto.subtle.importKey("spki", spki, RSA, true, ["verify"]);
+    const { modulusLength } = key.algorithm as { readonly modulusLength?: number };
+    const again = new Uint8Array(await crypto.subtle.exportKey("spki", key));
+    return modulusLength === bits && Buffer.from(again).equals(spki);
+  } catch {
+    return false;
+  }
+}
+
 /** Returns the fixed message for a non-200, naming the error code only when it is allowlisted. */
-function failure(res: Response, text: string | undefined): string {
-  const what = `KMS Sign failed: ${res.status}`;
+function failure(operation: Operation, res: Response, text: string | undefined): string {
+  const what = `KMS ${operation} failed: ${res.status}`;
   let raw = res.headers.get("x-amzn-errortype") ?? undefined;
   if (raw === undefined || raw === "") {
-    try {
-      const json: unknown = JSON.parse(text ?? "");
-      if (typeof json === "object" && json !== null) {
-        const { __type: type, code } = json as Record<string, unknown>;
-        raw = typeof type === "string" ? type : typeof code === "string" ? code : undefined;
-      }
-    } catch {
-      // Not a KMS error document.
-    }
+    const doc = replyObject(text);
+    raw = [doc?.__type, doc?.code].find((v): v is string => typeof v === "string");
   }
   // AWS JSON 1.1 sends `Code:<uri>` in the header and `<namespace>#Code` in the body.
   const code = raw?.split(":")[0]?.split("#").at(-1);

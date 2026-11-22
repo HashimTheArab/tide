@@ -52,12 +52,13 @@ export {
   textOf,
 } from "./s3.ts";
 export { encodeSfvDictionary, parseSfvDictionary } from "./sfv.ts";
-export type { CodeSigningCertificate, Signer } from "./signature.ts";
+export type { CodeSigningCertificate, SelfSignedFields, Signer } from "./signature.ts";
 export {
   certificatePublicKey,
   codeSigningCertificate,
   cryptoKeySigner,
   expoSignature,
   parseExpoSignature,
+  selfSignedCertificate,
   verifyExpoSignature,
 } from "./signature.ts";
