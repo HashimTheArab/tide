@@ -57,6 +57,16 @@ import {
 import { EMPTY_SHA256 } from "../src/s3.ts";
 import { parseSfvDictionary } from "../src/sfv.ts";
 import {
+  derInteger,
+  derOid,
+  derTime,
+  derTlv,
+  oid as readOid,
+  readTlv,
+  selfSignedCertificate,
+  time as readTime,
+} from "../src/signature.ts";
+import {
   ALGORITHM,
   BOUNDARY,
   EXPO_GOLDEN,
@@ -1378,6 +1388,153 @@ describe(`properties (seed ${seed})`, () => {
       }),
       { seed },
     );
+  });
+});
+
+describe(`DER encoder (seed ${seed})`, () => {
+  test("a TLV of any length reads back with its tag and contents", () => {
+    const tag = fc.integer({ min: 0, max: 0xff }).filter((t) => (t & 0x1f) !== 0x1f);
+    const length = fc.oneof(
+      fc.integer({ min: 0, max: 70_000 }),
+      fc.constantFrom(0, 1, 127, 128, 255, 256, 65_535, 65_536),
+    );
+    fc.assert(
+      fc.property(tag, length, fc.nat(), (t, n, cut) => {
+        const body = Uint8Array.from({ length: n }, (_, i) => (i * 31 + n) & 0xff);
+        const at = n === 0 ? 0 : cut % (n + 1);
+        const der = derTlv(t, body.subarray(0, at), body.subarray(at));
+        // readTlv refuses a length that is not minimal and definite.
+        const tlv = readTlv(der, 0, der.length);
+        expect(tlv).toEqual({ tag: t, start: 0, body: der.length - n, end: der.length });
+        expect(der.subarray(tlv.body)).toEqual(body);
+      }),
+      { seed },
+    );
+  });
+
+  test("an integer reads back as minimal two's complement", () => {
+    const value = fc.oneof(
+      fc.bigInt({ min: -(2n ** 168n), max: 2n ** 168n }),
+      fc.constantFrom(0n, -1n, 127n, 128n, -128n, -129n, 255n, 256n),
+    );
+    fc.assert(
+      fc.property(value, (n) => {
+        const der = derInteger(n);
+        const tlv = readTlv(der, 0, der.length);
+        expect([tlv.tag, tlv.end]).toEqual([0x02, der.length]);
+        const body = der.subarray(tlv.body);
+        let decoded = body.reduce((v, b) => v * 256n + BigInt(b), 0n);
+        if ((body[0] ?? 0) & 0x80) decoded -= 1n << BigInt(8 * body.length);
+        expect(decoded).toBe(n);
+        const [first = 0, second = 0] = body;
+        const padded = (first === 0 && second < 0x80) || (first === 0xff && second >= 0x80);
+        expect(body.length === 1 || !padded).toBe(true);
+      }),
+      { seed },
+    );
+  });
+
+  test("an OID reads back in dotted form", () => {
+    const arcs = fc
+      .integer({ min: 0, max: 2 })
+      .chain((top) =>
+        fc.tuple(
+          fc.constant(top),
+          top < 2 ? fc.integer({ min: 0, max: 39 }) : fc.integer({ min: 0, max: 2 ** 40 }),
+          fc.array(fc.integer({ min: 0, max: 2 ** 46 }), { maxLength: 8 }),
+        ),
+      );
+    fc.assert(
+      fc.property(arcs, ([top, second, rest]) => {
+        const dotted = [top, second, ...rest].join(".");
+        const der = derOid(dotted);
+        const tlv = readTlv(der, 0, der.length);
+        expect([tlv.tag, tlv.end]).toEqual([0x06, der.length]);
+        expect(readOid(der, tlv)).toBe(dotted);
+      }),
+      { seed },
+    );
+  });
+
+  test("a time reads back, UTCTime through 2049 and GeneralizedTime from 2050", () => {
+    const seconds = fc.oneof(
+      fc.integer({
+        min: Date.UTC(1950, 0, 1) / 1000,
+        max: Date.UTC(9999, 11, 31, 23, 59, 59) / 1000,
+      }),
+      fc.constantFrom(Date.UTC(2049, 11, 31, 23, 59, 59) / 1000, Date.UTC(2050, 0, 1) / 1000),
+    );
+    fc.assert(
+      fc.property(seconds, (s) => {
+        const date = new Date(s * 1000);
+        const der = derTime(date);
+        const tlv = readTlv(der, 0, der.length);
+        expect([tlv.tag, tlv.end]).toEqual([
+          date.getUTCFullYear() < 2050 ? 0x17 : 0x18,
+          der.length,
+        ]);
+        expect(readTime(der, tlv)).toBe(date.getTime());
+      }),
+      { seed },
+    );
+  });
+
+  test.each<[string, () => unknown]>([
+    ["a high tag number", () => derTlv(0x1f)],
+    ["a tag over one octet", () => derTlv(0x100)],
+    ["an OID with one arc", () => derOid("1")],
+    ["an OID with a first arc over 2", () => derOid("3.1")],
+    ["an OID with a second arc over 39 under 1", () => derOid("1.40")],
+    ["an OID with a leading zero", () => derOid("1.02")],
+    ["a time with milliseconds", () => derTime(new Date(Date.UTC(2030, 0, 1, 0, 0, 0, 1)))],
+    ["a time before 1950", () => derTime(new Date(Date.UTC(1949, 11, 31, 23, 59, 59)))],
+    ["a time after 9999", () => derTime(new Date(Date.UTC(10000, 0, 1)))],
+    ["an invalid date", () => derTime(new Date(Number.NaN))],
+  ])("the encoder refuses %s", async (_, encode) => {
+    await rejects(encode, "certificate");
+  });
+});
+
+describe("selfSignedCertificate", () => {
+  const issue = async (notAfter: Date) => {
+    const keys = await mainKeys();
+    const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey));
+    const notBefore = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const sign = async (tbs: Uint8Array<ArrayBuffer>) =>
+      new Uint8Array(await crypto.subtle.sign(RSA_SHA256, keys.privateKey, tbs));
+    return selfSignedCertificate({ spki, commonName: "Tide test", notBefore, notAfter }, sign);
+  };
+  /** The TLVs inside the constructed TLV `parent` of `der`. */
+  const children = (der: Uint8Array, parent: { body: number; end: number }) => {
+    const out = [];
+    for (let at = parent.body; at < parent.end;) {
+      const t = readTlv(der, at, parent.end);
+      out.push(t);
+      at = t.end;
+    }
+    return out;
+  };
+  const notAfterTag = (pemText: string) => {
+    const der = derOf(pemText);
+    const [tbs] = children(der, readTlv(der, 0, der.length));
+    const validity = children(der, tbs!)[4]!;
+    return children(der, validity)[1]!.tag;
+  };
+
+  test.each<[string, Date, number]>([
+    ["a 2049 notAfter as UTCTime", new Date("2049-12-31T23:59:59Z"), 0x17],
+    ["a 2050 notAfter as GeneralizedTime", new Date("2050-01-01T00:00:00Z"), 0x18],
+  ])("its output passes codeSigningCertificate, with %s", async (_, notAfter, tag) => {
+    const pemText = await issue(notAfter);
+    const { key } = await codeSigningCertificate(pemText, new Date());
+    const keys = await mainKeys();
+    const sig = await crypto.subtle.sign(RSA_SHA256, keys.privateKey, ascii("probe"));
+    expect(await crypto.subtle.verify(RSA_SHA256, key, sig, ascii("probe"))).toBe(true);
+    expect(notAfterTag(pemText)).toBe(tag);
+    const lines = pemText.split("\n");
+    expect(lines.at(-1)).toBe("");
+    expect(lines.slice(1, -3).every((l) => l.length === 64)).toBe(true);
+    expect(lines.at(-3)!.length).toBeLessThanOrEqual(64);
   });
 });
 
