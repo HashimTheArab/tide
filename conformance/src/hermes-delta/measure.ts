@@ -37,8 +37,14 @@ export interface Bundle {
   readonly gzip9: number;
 }
 
-/** A stored patch, or reuse: the base is the target, so Tide stores no patch and the device downloads nothing. */
-type PatchSize = { readonly bytes: number; readonly keep: boolean } | { readonly reused: true };
+/**
+ * A stored patch; reuse, when an OTA base is the target and the device already holds it; or no patch, when the
+ * embedded base is the target: the client keys that asset `bundle-<updateId>`, not by hash, so it downloads the bundle.
+ */
+type PatchSize =
+  | { readonly bytes: number; readonly keep: boolean }
+  | { readonly reused: true }
+  | { readonly noPatch: true };
 
 export type MeasuredTarget = Bundle & { readonly from: Readonly<Record<BaseKind, PatchSize>> };
 
@@ -67,7 +73,7 @@ export async function measureTargets(
     const from: Partial<Record<BaseKind, PatchSize>> = {};
     for (const base of Object.keys(BASES) as BaseKind[]) {
       if (Buffer.from(bases[base]).equals(bytes)) {
-        from[base] = { reused: true };
+        from[base] = base === "embedded" ? { noPatch: true } : { reused: true };
         continue;
       }
       const patch = makeBsdiff(bases[base], bytes);
@@ -126,11 +132,15 @@ const OTHER = { ota: "embedded", embedded: "ota" } as const;
 const n = (x: number) => x.toLocaleString("en-US");
 const saved = (plain: number, delta: number) =>
   plain === 0 ? (delta === 0 ? "0%" : "n/a") : `${(((plain - delta) / plain) * 100).toFixed(1)}%`;
-const download = (p: PatchSize) => ("reused" in p ? 0 : p.bytes);
-const size = (p: PatchSize) => ("reused" in p ? "reused" : n(p.bytes));
-const yn = (p: PatchSize) => ("reused" in p ? "reused" : p.keep ? "yes" : "no");
+const download = (t: MeasuredTarget, b: BaseKind) => {
+  const p = t.from[b];
+  return "reused" in p ? 0 : "noPatch" in p ? t.gzip9 : p.bytes;
+};
+const size = (p: PatchSize) => ("reused" in p ? "reused" : "noPatch" in p ? "full" : n(p.bytes));
+const yn = (p: PatchSize) =>
+  "reused" in p ? "reused" : "noPatch" in p ? "full" : p.keep ? "yes" : "no";
 
-/** Returns an app's results as Markdown: one row per change and compile base, then totals with reuse as 0 bytes. */
+/** Returns an app's results as Markdown: one row per change and compile base, then totals of the bytes downloaded. */
 export function renderTable(results: Results): string {
   const { app } = results;
   const lines = [
@@ -140,7 +150,8 @@ export function renderTable(results: Results): string {
     "",
     `Patch bytes are Tide's makeBsdiff output, each checked with checkPatch. ${results.keepRule}.`,
     "Each cell gives the patch to the plain bundle, then to the bundle delta-compiled against the compile base;",
-    "reused means the base is that bundle, so Tide stores no patch and the device downloads nothing.",
+    "reused means the base is that bundle, so Tide stores no patch and the device downloads nothing; full means",
+    "the embedded base is that bundle, but the client cannot reuse it, so it downloads the bundle (its gzip-9 size).",
     "",
     `Source: ${Object.values(app.source).join(" ")}. Bases: embedded ${n(app.bases.embedded.bytes)} B, ` +
       `OTA ${n(app.bases.ota.bytes)} B, older OTA ${n(app.bases["older-ota"].bytes)} B.`,
@@ -150,7 +161,7 @@ export function renderTable(results: Results): string {
     "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
   const total = (target: TargetKind, b: BaseKind) =>
-    Object.values(app.changes).reduce((sum, c) => sum + download(c.targets[target].from[b]), 0);
+    Object.values(app.changes).reduce((sum, c) => sum + download(c.targets[target], b), 0);
   for (const change of Object.keys(CHANGES) as ChangeId[]) {
     const c = app.changes[change];
     for (const base of ["ota", "embedded"] as const) {
@@ -161,7 +172,7 @@ export function renderTable(results: Results): string {
       const kept = (t: MeasuredTarget) => pairs.map((b) => yn(t.from[b])).join(" ");
       lines.push(
         `| ${change} (+${c.added} −${c.removed}) | ${base} | ${cell(base)} | ` +
-          `${saved(download(plain.from[base]), download(delta.from[base]))} | ${cell(OTHER[base])} | ` +
+          `${saved(download(plain, base), download(delta, base))} | ${cell(OTHER[base])} | ` +
           `${cell("older-ota")} | ${n(plain.gzip9)} / ${n(delta.gzip9)} | ${kept(plain)} / ${kept(delta)} |`,
       );
     }

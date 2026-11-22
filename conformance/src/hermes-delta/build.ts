@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -14,12 +15,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { devNull, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { AppId, AppPin } from "./apps.ts";
 import { tail } from "../stack.ts";
-import { UsageError } from "./options.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const PATCHES = fileURLToPath(new URL("../../hermes-delta/patches/", import.meta.url));
@@ -39,7 +40,7 @@ const GRADLE = {
 export interface Tree {
   readonly pin: AppPin;
   readonly dir: string;
-  readonly work: string; // The app's own directory under the study's work dir.
+  readonly work: string; // The app's own cache directory.
   readonly log: string;
   readonly tmp: string; // Builds' TMPDIR, so Metro's caches live and die with the tree.
 }
@@ -49,24 +50,6 @@ export interface Hermesc {
   readonly args: readonly string[];
   readonly input: string;
   readonly out: string;
-}
-
-const WORK_MARK = ".hermes-delta-work";
-
-/**
- * Marks `work` as the study's own directory, creating it when missing; refuses one that holds files without the mark,
- * since runs delete and rebuild what is under it.
- */
-export function claimWork(work: string): void {
-  const mark = join(work, WORK_MARK);
-  if (existsSync(mark)) return;
-  if (existsSync(work) && readdirSync(work).length > 0) {
-    throw new UsageError(
-      `${work} holds files hermes-delta did not create; pass a new or empty --work`,
-    );
-  }
-  mkdirSync(work, { recursive: true });
-  writeFileSync(mark, "");
 }
 
 /** Returns the hash of everything the start commit is made from, so a changed pin rebuilds a cached tree. */
@@ -183,37 +166,43 @@ export const exportArgs = (out: string) => ["export", "--output-dir", out, "--pl
  * Runs `expo export --platform android` as `tide export` does and returns the exported bundle with the one hermesc
  * command Expo ran and a copy of the JS it compiled, captured through Expo's REACT_NATIVE_OVERRIDE_HERMES_DIR lookup.
  */
-export async function exportBundle(tree: Tree, name: string) {
-  const out = join(tree.work, "exports", name);
-  const capture = join(tree.work, "capture");
-  for (const dir of [out, capture]) rmSync(dir, { recursive: true, force: true });
-  mkdirSync(capture, { recursive: true });
-  const hermesc = hermescPath(tree);
-  const override = captureOverride(tree.work);
-  await run(tree, expoBin(tree), exportArgs(out), {
-    ...EXPORT_ENV,
-    REACT_NATIVE_OVERRIDE_HERMES_DIR: override,
-    HERMES_DELTA_CAPTURE: capture,
-    HERMES_DELTA_HERMESC: hermesc,
-  });
-  const runs = readdirSync(capture);
-  if (runs.length !== 1) throw new Error(`expo export ran hermesc ${runs.length} times, not once`);
-  const args = readFileSync(join(capture, "0", "args"), "utf8")
-    .split("\n")
-    .slice(0, -1);
-  return {
-    hbc: bytes(join(out, exportedBundle(out))),
-    js: bytes(join(capture, "0", "input.js")),
-    hermesc: { args, ...hermescIo(args) },
-  };
+export async function exportBundle(tree: Tree) {
+  const out = mkdtempSync(join(tmpdir(), "hermes-delta-export-"));
+  const capture = mkdtempSync(join(tmpdir(), "hermes-delta-capture-"));
+  try {
+    const hermesc = hermescPath(tree);
+    const override = captureOverride(tree.work);
+    await run(tree, expoBin(tree), exportArgs(out), {
+      ...EXPORT_ENV,
+      REACT_NATIVE_OVERRIDE_HERMES_DIR: override,
+      HERMES_DELTA_CAPTURE: capture,
+      HERMES_DELTA_HERMESC: hermesc,
+    });
+    const runs = readdirSync(capture);
+    if (runs.length !== 1)
+      throw new Error(`expo export ran hermesc ${runs.length} times, not once`);
+    const args = readFileSync(join(capture, "0", "args"), "utf8")
+      .split("\n")
+      .slice(0, -1);
+    return {
+      hbc: bytes(join(out, exportedBundle(out))),
+      js: bytes(join(capture, "0", "input.js")),
+      hermesc: { args, ...hermescIo(args) },
+    };
+  } finally {
+    for (const dir of [out, capture]) rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Returns the JS bundle `expo export --no-bytecode` writes, with `tide export`'s variables. */
-export async function exportJs(tree: Tree, name: string): Promise<Uint8Array<ArrayBuffer>> {
-  const out = join(tree.work, "exports", name);
-  rmSync(out, { recursive: true, force: true });
-  await run(tree, expoBin(tree), [...exportArgs(out), "--no-bytecode"], EXPORT_ENV);
-  return bytes(join(out, exportedBundle(out)));
+export async function exportJs(tree: Tree): Promise<Uint8Array<ArrayBuffer>> {
+  const out = mkdtempSync(join(tmpdir(), "hermes-delta-export-"));
+  try {
+    await run(tree, expoBin(tree), [...exportArgs(out), "--no-bytecode"], EXPORT_ENV);
+    return bytes(join(out, exportedBundle(out)));
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 }
 
 /** Returns metadata.json's Android bundle path. */
@@ -289,8 +278,8 @@ export async function reproduces(
 }
 
 /**
- * Compiles `js` with Expo's hermesc command in a scratch dir under the work dir, against `base` when given, and returns
- * the bytecode. hermesc embeds the input name, so it runs in that dir on fixed relative names: same bytes anywhere.
+ * Compiles `js` with Expo's hermesc command in a new scratch dir, against `base` when given, and returns the bytecode.
+ * hermesc embeds the input name, so it runs in that dir on fixed relative names: same bytes anywhere.
  */
 export async function compile(
   tree: Tree,
@@ -298,19 +287,21 @@ export async function compile(
   js: Uint8Array,
   base?: Uint8Array,
 ): Promise<{ hbc: Uint8Array<ArrayBuffer>; args: string[] }> {
-  const dir = join(dirname(tree.work), "hermesc");
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir);
-  writeFileSync(join(dir, "index.js"), js);
-  if (base !== undefined) writeFileSync(join(dir, "base.hbc"), base);
-  const args = retarget(
-    command,
-    "index.js",
-    "index.hbc",
-    base === undefined ? undefined : "base.hbc",
-  );
-  await run(tree, hermescPath(tree), args, {}, dir);
-  return { hbc: bytes(join(dir, "index.hbc")), args };
+  const dir = mkdtempSync(join(tmpdir(), "hermes-delta-hermesc-"));
+  try {
+    writeFileSync(join(dir, "index.js"), js);
+    if (base !== undefined) writeFileSync(join(dir, "base.hbc"), base);
+    const args = retarget(
+      command,
+      "index.js",
+      "index.hbc",
+      base === undefined ? undefined : "base.hbc",
+    );
+    await run(tree, hermescPath(tree), args, {}, dir);
+    return { hbc: bytes(join(dir, "index.hbc")), args };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -519,8 +510,12 @@ function write(path: string, data: string | Uint8Array): void {
   writeFileSync(path, data);
 }
 
+/** Runs git in the tree without the user's or system's config, whose signing, hooks or line endings would change it. */
 function git(tree: Pick<Tree, "dir">, args: readonly string[]): string {
-  return execFileSync("git", ["-C", tree.dir, ...args], { encoding: "utf8" });
+  return execFileSync("git", ["-C", tree.dir, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+  });
 }
 
 /** Runs `command` in `cwd` with the build environment plus `env`, appending its output to the tree's log. */

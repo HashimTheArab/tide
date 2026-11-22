@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // `pnpm hermes-delta`: measures Tide's patch sizes for Hermes bundles compiled with and without -base-bytecode.
 import { arch, cpus, release, type } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { AppId, ChangeId } from "./apps.ts";
@@ -10,7 +11,6 @@ import { APPS, CHANGES } from "./apps.ts";
 import {
   EXPORT_ENV,
   checkout,
-  claimWork,
   compile,
   embed,
   exportArgs,
@@ -26,6 +26,8 @@ import { BASES, KEEP_RULE, TARGETS, describe, measureTargets, writeResults } fro
 import { USAGE, UsageError, parseOptions } from "./options.ts";
 
 const OUT = fileURLToPath(new URL("../../../docs/assets/hermes-delta/", import.meta.url));
+// Gitignored and owned by this script, which deletes and rebuilds what is under it.
+const WORK = join(fileURLToPath(new URL("../../../", import.meta.url)), ".cache", "hermes-delta");
 
 const say = (line: string) => process.stderr.write(`hermes-delta: ${line}\n`);
 
@@ -42,7 +44,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   // Every export must run hermesc alike, and the study must compile exactly as it does.
   const exported: Hermesc[] = [];
   const exportState = async (name: string) => {
-    const e = await exportBundle(tree, name);
+    const e = await exportBundle(tree);
     if (!(await reproduces(tree, e.hermesc, e.js, e.hbc))) {
       throw new Error(
         `recompiling the ${name} export's JS with its hermesc command gave other bytes`,
@@ -56,7 +58,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
   const about = tools(tree);
   const embedded = await embed(tree);
   const start = await exportState("start");
-  const plainJs = await exportJs(tree, "start-js");
+  const plainJs = await exportJs(tree);
   const noBytecode = Buffer.from(plainJs).equals(start.js);
   const older = await compile(tree, start.hermesc, start.js);
 
@@ -149,8 +151,7 @@ async function measureApp(id: AppId, work: string): Promise<AppResult> {
 async function main(args: readonly string[]): Promise<number> {
   let options;
   try {
-    options = parseOptions(args, process.cwd());
-    if (options !== "help") claimWork(options.work);
+    options = parseOptions(args);
   } catch (e) {
     if (!(e instanceof UsageError)) throw e;
     say(`${e.message}; see pnpm hermes-delta --help`);
@@ -162,7 +163,7 @@ async function main(args: readonly string[]): Promise<number> {
   }
   try {
     for (const id of options.apps) {
-      const app = await measureApp(id, options.work);
+      const app = await measureApp(id, WORK);
       const json = writeResults(OUT, {
         schema: 2,
         about:
