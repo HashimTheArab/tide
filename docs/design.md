@@ -385,7 +385,7 @@ stored field are never printed.
 same user, so no environment allowlist would protect a writer that ran Expo.
 
 `tide export --out <dir> [--platform ios|android]... [--runtime-version <v>] [--project-root <dir>]
-[--pass-env <name>]...` writes the export directory `publish --from` reads. `--out` and `--project-root` resolve
+[--pass-env <name>]... [--base-bytecode <platform>=<file>]` writes the export directory `publish --from` reads. `--out` and `--project-root` resolve
 against the caller's directory; `--out` must not exist. Platforms default to both. Exit 0, or 2 on any refusal or
 tool failure; stdout has one `<platform> <runtimeVersion>` line per platform.
 
@@ -421,6 +421,27 @@ shell and an allowlisted environment: `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAG
 `EXPO_PUBLIC_*` (Expo inlines them into the bundle), each `--pass-env` name (never a `TIDE_`, `AWS_` or `ACTIONS_`
 one), `EXPO_NO_DOTENV=1`, `NODE_ENV=production` and `BABEL_ENV` as given or, when unset or empty, `production`: the
 mode `expo export` forces, so config, runtime and bundle agree.
+
+**Delta compiles** ([0002](decisions/0002-hermes-delta-compiles.md)). `--base-bytecode <platform>=<file>` has Expo
+compile the launch bundle against `<file>`, the release build's embedded bundle, so patches from every base shrink.
+Expo gives hermesc no platform, so a based export selects that one platform, and each platform is exported on its
+own. Publish, patches and the wire format do not change. Without it the export runs no hermesc of its own and its
+bytes are unchanged.
+
+1. Before any child: the file (against the caller's directory) is a regular file opening with the HBC magic
+   `c6 1f bc 03 c1 03 19 1f` and a u32 little-endian bytecode version at offset 8. `--pass-env
+   REACT_NATIVE_OVERRIDE_HERMES_DIR` is refused: a based export compiles with the hermesc 0002 names.
+2. Before any Expo tool and before `<dir>` exists: the app's hermesc, found as `@expo/metro-config`'s
+   `exportHermes.js` finds it: `react-native/package.json` resolved from the real project directory,
+   `hermes-compiler/package.json` from react-native's, then the first of
+   `<react-native>/ReactAndroid/hermes-engine/build/hermes/bin/hermesc`, `<hermes-compiler>/hermesc/<host>/hermesc` and
+   `<react-native>/sdks/hermesc/<host>/hermesc` (`osx-bin` or `linux64-bin`; no Windows). Its `-version` must print
+   `HBC bytecode version: <n>` equal to the base's.
+3. `expo export` gets `REACT_NATIVE_OVERRIDE_HERMES_DIR` naming a `sh` wrapper that runs that hermesc with Expo's
+   arguments plus `-base-bytecode=<copy of the checked bytes>`, so Expo writes, names and lists the delta bundle
+   itself. Every chunk Expo compiles is compiled against the base. hermesc gets the environment Expo's tools get.
+4. After the export is read: the wrapper must have run, and the launch bundle must be HBC of the base's version. A
+   refusal here leaves no `tide-export.json`.
 
 `tide publish --from <dir> --channel <name> [--rollout <percent>]` publishes one update per platform the export names
 (`--rollout`: Staged rollouts). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has

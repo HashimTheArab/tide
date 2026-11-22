@@ -43,7 +43,8 @@ simulator and a native build per version. `pnpm conformance --help` lists the op
   stable. `conformance/apps/sdk-<n>` pins each.
 - **Scenarios:** the embedded build gets no update; a first update downloads the full bundle because no patch exists;
   a patch from the running OTA update; a tampered patch falls back to the full bundle; a rollback returns to the
-  embedded update; a patch from the embedded bundle.
+  embedded update; a patch from the embedded bundle; an update delta-compiled against the embedded bundle
+  (`--base-bytecode`), patched from an OTA update and from the embedded bundle.
 - **Android** runs nightly and on demand in `.github/workflows/conformance.yml`: one job per version on a hosted Linux
   runner, with an AVD created in the run and a KVM-accelerated emulator. **iOS** runs on a Mac before each release
   ([release checklist](release.md)).

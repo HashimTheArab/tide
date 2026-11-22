@@ -21,6 +21,7 @@ import type { Stack } from "../src/stack.ts";
 import { SCENARIOS } from "../src/options.ts";
 import {
   checkCorruptPatch,
+  checkDeltaCompiled,
   checkEmbedded,
   checkFull,
   checkPatch,
@@ -486,6 +487,40 @@ describe.each(["android", "ios"] as const)("the patch-embedded scenario on %s", 
   });
 });
 
+describe("the patch-delta check", () => {
+  const MARKER = "build-55-1a2b3c4d";
+  const build = {
+    artifact: "",
+    marker: MARKER,
+    embeddedUpdateId: EMBEDDED_ID,
+    manifest: "",
+    bundle: "",
+    assetsDir: "",
+  };
+
+  test("passes when only the delta update's bundle keeps the build marker", async () => {
+    await withStack(async (stack) => {
+      const plain = await publish(stack, "u4", bundle());
+      const delta = await publish(stack, "u5", variant(bundle(), MARKER));
+      expect(() => checkDeltaCompiled({ ...served(stack), build }, plain, delta)).not.toThrow();
+    });
+  });
+
+  test("fails on a delta update compiled alone, and on a plain update that holds the marker", async () => {
+    await withStack(async (stack) => {
+      const plain = await publish(stack, "u4", bundle());
+      const alone = await publish(stack, "u5", bundle());
+      expect(() => checkDeltaCompiled({ ...served(stack), build }, plain, alone)).toThrow(
+        `update ${alone.updateId} was not compiled against the embedded bundle`,
+      );
+      const marked = await publish(stack, "u6", variant(bundle(), MARKER));
+      expect(() => checkDeltaCompiled({ ...served(stack), build }, marked, marked)).toThrow(
+        `plain update ${marked.updateId} holds the build marker`,
+      );
+    });
+  });
+});
+
 describe("selection", () => {
   test.each([
     [["corrupt-patch"], ["full", "patch-ota", "corrupt-patch"]],
@@ -494,6 +529,7 @@ describe("selection", () => {
       ["patch-embedded", "embedded"],
       ["embedded", "patch-embedded"],
     ],
+    [["patch-delta"], ["patch-embedded", "patch-delta"]],
     [ALL, ALL],
   ] as const)("%j runs %j", (selected: readonly Scenario[], planned) => {
     expect(plan(selected)).toEqual(planned);
@@ -517,6 +553,7 @@ describe("selection", () => {
       ["full", "after-embedded"],
       ["patch-ota", "after-full"],
       ["patch-embedded", undefined],
+      ["patch-delta", "after-patch-embedded"],
     ]);
     expect(outcomes).toEqual([
       ["embedded", { pass: true, saw: "ran embedded" }],
@@ -525,6 +562,7 @@ describe("selection", () => {
       ["corrupt-patch", { pass: false, why: "not run: patch-ota failed" }],
       ["rollback", { pass: false, why: "not run: patch-ota failed" }],
       ["patch-embedded", { pass: true, saw: "ran patch-embedded" }],
+      ["patch-delta", { pass: true, saw: "ran patch-delta" }],
     ]);
   });
 });
