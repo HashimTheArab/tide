@@ -1,18 +1,23 @@
 {
   "name": "@tide-ota/cli",
   "version": "0.0.0",
-  "description": "Tide CLI: export, sign and publish Expo updates, register builds for bundle diffing, roll back and inspect storage.",
+  "description": "Publish signed Expo OTA updates to your own R2 or S3 bucket, with bundle diffing, rollbacks and AWS KMS signing.",
   "keywords": [
     "expo",
     "expo-updates",
-    "over-the-air",
-    "ota",
+    "eas-update",
     "react-native",
-    "cli",
+    "react-native-ota",
+    "ota",
+    "ota-updates",
+    "self-hosted",
+    "publish",
     "code-signing",
+    "rollback",
+    "aws-kms",
     "bsdiff"
   ],
-  "homepage": "https://github.com/HashimTheArab/tide#readme",
+  "homepage": "https://github.com/HashimTheArab/tide#publishing",
   "bugs": {
     "url": "https://github.com/HashimTheArab/tide/issues"
   },
@@ -28,7 +33,7 @@
   ],
   "type": "module",
   "engines": {
-    "node": ">=26"
+    "node": ">=24.11"
   },
   "bin": {
     "tide": "./src/main.ts"
@@ -36,7 +41,9 @@
   "publishConfig": {
     "bin": {
       "tide": "./dist/main.js"
-    }
+    },
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
