@@ -1,8 +1,10 @@
 // `--json` through the bin. A document is asserted as exact stdout bytes, which pin every field, their order and the
 // one trailing newline; each expectation is ASCII, so its `JSON.stringify` is the document.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 
 import type { Rollout } from "@tide-ota/protocol";
 import {
@@ -10,19 +12,22 @@ import {
   contentKey,
   decodePointer,
   decodeStoredReply,
+  diskPath,
   encodeRollout,
   sha256Base64Url,
 } from "@tide-ota/protocol";
 
 import type { Objects, Store } from "./publish-fixture.ts";
-import { decodeRecord, recordKey } from "../src/publish-record.ts";
+import { decodeRecord, encodeRecord, recordKey } from "../src/publish-record.ts";
 import { rollback } from "../src/publish-rollback.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import { fixture, rejection, run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
+  ASSET_URL,
   IOS,
   MAIN,
+  SERVER_URL,
   STORES,
   T,
   artifact,
@@ -498,6 +503,105 @@ test("an uncaught error after the first pointer prints it as incomplete, and sti
     err: [],
   });
   expect(s3.puts).not.toContain(ANDROID);
+});
+
+describe("a crash of the bin while writing", () => {
+  /** A republish of `count` stored updates that crashes before its last pointer write, and the keys it stores first. */
+  async function crashing(count: number) {
+    const store = STORES.disk();
+    const root = store.env.TIDE_DISK_DIR;
+    const bucket = bucketFromEnv(store.env);
+    const launch = await content("bundles", "launch");
+    await bucket.put(launch.key, launch.bytes);
+    const updates = Array.from({ length: count }, (_, i) => ({
+      updateId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      channel: `${i}`.padStart(64, "c"),
+      runtimeVersion: "r".repeat(64),
+    }));
+    for (const u of updates) {
+      const record = encodeRecord({
+        ...u,
+        platform: "ios",
+        createdAt: CREATED_AT,
+        serverUrl: SERVER_URL,
+        assetUrl: ASSET_URL,
+        launchAsset: { hash: await sha256Base64Url(launch.bytes) },
+        assets: [],
+        extra: {},
+      });
+      await bucket.put(recordKey(u.updateId), record);
+    }
+    const acknowledged = updates
+      .slice(0, -1)
+      .map((u) => `reply/${u.channel}/${u.runtimeVersion}/ios`);
+    // The clock is read before each pointer write.
+    const preload = join(tempRoot(), "preload.mjs");
+    writeFileSync(
+      preload,
+      `import { existsSync } from "node:fs";
+const now = Date.now;
+Date.now = () => {
+  if (existsSync(${JSON.stringify(join(root, diskPath(acknowledged.at(-1)!)))})) throw new Error("clock");
+  return now();
+};
+`,
+    );
+    return {
+      acknowledged,
+      argv: ["--import", preload, MAIN, "republish", "--json", ...updates.map((u) => u.updateId)],
+      environment: writerEnv(store),
+    };
+  }
+
+  test("a document longer than a pipe holds is written whole before the error", async () => {
+    const { acknowledged, argv, environment } = await crashing(400);
+    const codeFile = join(tempRoot(), "code");
+    // A real pipe, not the socket Node gives a child, and a slow reader, so the document cannot drain by itself.
+    const proc = spawn(
+      "/bin/sh",
+      [
+        ...["-c", '{ "$@"; echo $? > "$CODE"; } | { dd bs=1 count=20000 2>/dev/null; cat; }', "sh"],
+        ...[process.execPath, ...argv],
+      ],
+      { env: { ...environment, CODE: codeFile }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    onTestFinished(() => {
+      proc.kill("SIGKILL");
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
+    proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+    await once(proc, "close");
+    expect(readFileSync(codeFile, "utf8")).toBe("1\n");
+    expect(stderr).toContain("Error: clock\n    at Date.now");
+    expect(stdout.length).toBeGreaterThan(65_536 + 20_000);
+    const { complete, pointers } = JSON.parse(stdout) as {
+      complete: boolean;
+      pointers: { key: string }[];
+    };
+    expect(complete).toBe(false);
+    expect(pointers.map((p) => p.key)).toEqual(acknowledged);
+    expect(stdout).toBe(written(false, pointers));
+  });
+
+  test("a closed stdout does not replace the error", async () => {
+    const { argv, environment } = await crashing(2);
+    const proc = spawn(process.execPath, argv, {
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    onTestFinished(() => {
+      proc.kill("SIGKILL");
+    });
+    proc.stdout.destroy();
+    let stderr = "";
+    proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+    const [code] = (await once(proc, "close")) as [number | null];
+    expect(code).toBe(1);
+    expect(stderr).toContain("Error: clock\n    at Date.now");
+    expect(stderr).not.toContain("EPIPE");
+  });
 });
 
 // Literal text, not the constants, so a refusal's text cannot change with them.

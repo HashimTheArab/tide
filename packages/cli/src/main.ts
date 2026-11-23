@@ -72,4 +72,10 @@ async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   }
 }
 
-process.exitCode = await main(process.argv.slice(2), process.env);
+try {
+  process.exitCode = await main(process.argv.slice(2), process.env);
+} catch (e) {
+  // A crash exits at once, dropping stdout still queued for a pipe; a closed pipe must not replace the crash's error.
+  await new Promise((resolve) => process.stdout.once("error", resolve).write("", resolve));
+  throw e;
+}
