@@ -701,7 +701,7 @@ describe("checking a release", () => {
         expect([doc, args]).toEqual([
           doc,
           `"tide-ota-$p-${version}.tgz" --repo ${repo} --deny-self-hosted-runners ` +
-            `--cert-identity https://github.com/${repo}/${WORKFLOW_PATH}@refs/tags/v${version}`,
+            `--cert-identity "https://github.com/${repo}/${WORKFLOW_PATH}@refs/tags/v${version}"`,
         ]);
       }
     }
@@ -713,7 +713,7 @@ describe("checking a release", () => {
     expect(installs.length).toBeGreaterThan(0);
     for (const install of installs)
       expect(install).toMatch(
-        /--offline .*\.\/tide-ota-cli-\S+\.tgz \.\/tide-ota-protocol-\S+\.tgz$/,
+        /--offline .*"\.\/tide-ota-cli-\S+\.tgz" "\.\/tide-ota-protocol-\S+\.tgz"$/,
       );
   });
 
@@ -742,7 +742,7 @@ describe("checking a release", () => {
     const FAKE_NPM = `#!/bin/sh
 echo "npm $*" >> "$HOME/calls"
 if [ "$1" = pack ]; then
-  p=\${4#@tide-ota/}; touch "tide-ota-\${p%@*}-0.1.0.tgz"
+  p=\${4#@tide-ota/}; touch "tide-ota-\${p%@*}-\${p#*@}.tgz"
 fi
 `;
     const FAKE_GH = `#!/bin/sh

@@ -71,14 +71,15 @@ Once per environment, in this order.
      ```sh
      (
        set -e
+       TIDE_VERSION="<version>" # An exact version from the GitHub releases.
        mkdir ~/tide-pkgs ~/tide-cli && cd ~/tide-pkgs
        for p in cli protocol; do
-         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-         gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-           --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@$TIDE_VERSION"
+         gh attestation verify "tide-ota-$p-$TIDE_VERSION.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+           --cert-identity "https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v$TIDE_VERSION"
        done
        npm install --prefix ~/tide-cli --offline --ignore-scripts --no-fund \
-         ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+         "./tide-ota-cli-$TIDE_VERSION.tgz" "./tide-ota-protocol-$TIDE_VERSION.tgz"
      )
      ```
 
@@ -204,14 +205,15 @@ separate jobs of one workflow:
     out; it is present only as artifact data. Give the step `GH_TOKEN: ${{ github.token }}`:
 
     ```sh
+    TIDE_VERSION="<version>" # An exact version from the GitHub releases.
     mkdir "$RUNNER_TEMP/tide-pkgs" && cd "$RUNNER_TEMP/tide-pkgs"
     for p in cli protocol; do
-      npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-      gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-        --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+      npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@$TIDE_VERSION"
+      gh attestation verify "tide-ota-$p-$TIDE_VERSION.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+        --cert-identity "https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v$TIDE_VERSION"
     done
     npm install --prefix "$RUNNER_TEMP/tide" --offline --ignore-scripts --no-fund \
-      ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+      "./tide-ota-cli-$TIDE_VERSION.tgz" "./tide-ota-protocol-$TIDE_VERSION.tgz"
     echo "$RUNNER_TEMP/tide/node_modules/.bin" >> "$GITHUB_PATH"
     ```
 

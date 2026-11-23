@@ -70,8 +70,8 @@ Push a `v<semver>` tag on that commit. A prerelease such as `v0.2.0-rc.1` publis
 makes a GitHub prerelease; anything else publishes as `latest`.
 
 ```sh
-git tag v0.1.0 <commit>
-git push origin v0.1.0
+git tag "v<version>" "<commit>"
+git push origin "v<version>"
 ```
 
 The workflow's three jobs:
@@ -95,10 +95,11 @@ with the same bytes.
   result:
 
   ```sh
+  TIDE_VERSION="<version>" # The release.
   for p in protocol server cli; do
-    npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-    gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-      --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+    npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@$TIDE_VERSION"
+    gh attestation verify "tide-ota-$p-$TIDE_VERSION.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+      --cert-identity "https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v$TIDE_VERSION"
   done
   ```
 
