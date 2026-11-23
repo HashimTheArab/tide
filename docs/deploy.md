@@ -135,7 +135,7 @@ Once per environment, in this order.
      `expo.modules.updates.CODE_SIGNING_INCLUDE_MANIFEST_RESPONSE_CERTIFICATE_CHAIN` set to `true`, and the iOS
      `Expo.plist` key `EXUpdatesCodeSigningIncludeManifestResponseCertificateChain` set to `true`. Expo's config
      plugins (SDK 58) do not set either from app config, so a prebuild project needs its own config plugin to write
-     them. Without the opt-in, the app verifies replies with the root's key and refuses every leaf signature.
+     them, as [the conformance app's](../conformance/apps/shared/certificate-chain.js) does. Without the opt-in, the app verifies replies with the root's key and refuses every leaf signature.
    - **A leaked leaf key.** Issuing a new leaf lets the writer switch keys, but it does not revoke the old one: apps
      trusting the root still accept replies signed by the leaked key, served with its old chain, until that leaf
      or a certificate above it expires. Keep leaf lifetimes short. A leaked intermediate key can issue leaves until

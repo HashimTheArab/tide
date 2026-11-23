@@ -1,7 +1,7 @@
 name: Conformance
 
 # Stock expo-updates release apps on an Android emulator against a local Tide (docs/testing.md, Conformance).
-# Nightly and on demand only; the run makes its own signing identity, so it needs no secrets.
+# Nightly and on demand only; the run makes its own signing identities, so it needs no secrets.
 on:
   schedule:
     - cron: "23 4 * * *"
@@ -82,7 +82,7 @@ jobs:
           # Puts KVM use in the run log, which the harness only shows when the emulator fails.
           "$ANDROID_HOME/emulator/emulator" -accel-check
 
-      # Boots the AVD read-only, builds the release app and runs every scenario.
+      # Boots the AVD read-only, builds the direct and chained release apps and runs every scenario.
       - name: Conformance
         timeout-minutes: 110
         env:
