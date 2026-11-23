@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
-  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -41,13 +40,13 @@ import {
   ANDROID_BUNDLE,
   FIXTURE_EXPORT,
   MAIN,
+  fakeExpo,
   fixtureExport,
   hexOf,
   sha256Hex,
   signingMetadata,
 } from "./harness.ts";
 
-const FAKE_EXPO = fileURLToPath(new URL("../../packages/cli/test/fake-expo.ts", import.meta.url));
 const HOLD = fileURLToPath(new URL("hold-stack.ts", import.meta.url));
 const HUNG_EXPORT = fileURLToPath(new URL("hung-export.ts", import.meta.url));
 const LEAVE_WORKER = fileURLToPath(new URL("leave-worker.ts", import.meta.url));
@@ -58,16 +57,7 @@ const LEAVE_WORKER = fileURLToPath(new URL("leave-worker.ts", import.meta.url));
  */
 function project(stack: Stack, exporter?: string): string {
   const root = join(stack.dir, "project");
-  const bin = join(root, "node_modules", ".bin");
-  mkdirSync(bin, { recursive: true });
-  for (const tool of ["expo", "expo-updates"]) {
-    const instead = exporter === undefined ? "" : `[ "$1" = export ] && exec ${exporter} "$@"\n`;
-    writeFileSync(
-      join(bin, tool),
-      `#!/bin/sh\n${tool === "expo" ? instead : ""}exec '${process.execPath}' '${FAKE_EXPO}' ${tool} "$@"\n`,
-    );
-    chmodSync(join(bin, tool), 0o755);
-  }
+  fakeExpo(root, exporter);
   mkdirSync(join(root, "keys"));
   cpSync(stack.identity.certificateFile, join(root, "keys", "certificate.pem"));
   const config = {

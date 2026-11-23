@@ -1,6 +1,6 @@
 ---
 status: decided
-updated: 2026-11-22
+updated: 2026-11-23
 ---
 
 # Testing standard
@@ -36,15 +36,22 @@ holds.
 ## Conformance
 
 `pnpm conformance --platform android|ios` runs stock `expo-updates` release apps against a local Tide (the Node entry
-over a disk store) with a signing identity generated per run. The gate does not run it: it needs an emulator or
-simulator and a native build per version. `pnpm conformance --help` lists the options.
+over a disk store) with signing identities generated per run. The gate does not run it: it needs an emulator or
+simulator and two native builds per version. `pnpm conformance --help` lists the options.
 
+- **Builds:** each version has a direct build, which embeds its signing certificate, and a chained build, which embeds a
+  CA root and opts in to certificate chains. They have their own keyid, certificate and runtimeVersion, and share one
+  bucket, server and channel. The chained build's writers sign with a leaf that `tide certificate` issues under an
+  intermediate. Every `/manifest` request must expect its build's keyid, and every reply verify under its certificate.
 - **Versions:** the oldest expo-updates line with bsdiff support (opt-in, which the app enables) and the latest
   stable. `conformance/apps/sdk-<n>` pins each.
 - **Scenarios:** the embedded build gets no update; a first update downloads the full bundle because no patch exists;
   a patch from the running OTA update; a tampered patch falls back to the full bundle; a rollback returns to the
   embedded update; a patch from the embedded bundle; an update delta-compiled against the embedded bundle
   (`--base-bytecode`), patched from an OTA update and from the embedded bundle.
+- **Identity and chain scenarios:** `identities`: the chained build joins the bucket (`tide publish --add-identity`)
+  and each build runs only its own updates; `chain-patch`: a patch on the chained build; `chain-rollback`: its rollback;
+  `leaf-rotation`: it takes an update signed by a new leaf key under the same root.
 - **Android** runs nightly and on demand in `.github/workflows/conformance.yml`: one job per version on a hosted Linux
   runner, with an AVD created in the run and a KVM-accelerated emulator. **iOS** runs on a Mac before each release
   ([release checklist](release.md)).

@@ -22,8 +22,8 @@ import { SCENARIOS } from "../src/options.ts";
 import {
   checkCorruptPatch,
   checkDeltaCompiled,
-  checkEmbedded,
   checkFull,
+  checkNoUpdate,
   checkPatch,
   checkRollback,
   plan,
@@ -34,11 +34,18 @@ import { tideCli } from "../src/tide-cli.ts";
 import { ANDROID, MAIN, fixtureExport, hexOf, sha256Hex } from "./harness.ts";
 
 const EMBEDDED_ID = "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f";
-const UNSIGNED = `got ${NO_UPDATE_KEY}, which is not signed for the run`;
+const UNSIGNED = `got ${NO_UPDATE_KEY}, which is not signed for keyid conformance`;
 
 const served = (stack: Stack, platform: Platform = "android"): Served => ({
   stack,
-  app: { version: "55", platform, dir: stack.dir, appId: "dev.tide.conformance", ...MAIN },
+  app: {
+    version: "55",
+    platform,
+    identity: stack.identity,
+    dir: stack.dir,
+    appId: "dev.tide.conformance",
+    ...MAIN,
+  },
 });
 
 /** A 64 KiB random bundle, which gzip cannot shrink, so a patch between two variants passes the size rule. */
@@ -181,7 +188,7 @@ describe("the embedded scenario", () => {
     await withStack(async (stack) => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
-      await checkEmbedded(served(stack), e, await launches(stack, e));
+      await checkNoUpdate(served(stack), e, await launches(stack, e));
     });
   });
 
@@ -190,7 +197,7 @@ describe("the embedded scenario", () => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       rewriteNoUpdate(stack, (_, boundary) => new Uint8Array(Buffer.from(`--${boundary}--\r\n`)));
-      await expect(checkEmbedded(served(stack), e, await launches(stack, e))).rejects.toThrow(
+      await expect(checkNoUpdate(served(stack), e, await launches(stack, e))).rejects.toThrow(
         UNSIGNED,
       );
     });
@@ -201,19 +208,21 @@ describe("the embedded scenario", () => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       breakSignature(stack);
-      await expect(checkEmbedded(served(stack), e, await launches(stack, e))).rejects.toThrow(
+      await expect(checkNoUpdate(served(stack), e, await launches(stack, e))).rejects.toThrow(
         UNSIGNED,
       );
     });
   });
 
-  test("fails when the client did not expect the run's signature", async () => {
+  test("fails when the client expected another keyid's signature", async () => {
     await withStack(async (stack) => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       await expect(
-        checkEmbedded(served(stack), e, await launches(stack, e, "other")),
-      ).rejects.toThrow("a /manifest request did not expect the run's signature");
+        checkNoUpdate(served(stack), e, await launches(stack, e, "other")),
+      ).rejects.toThrow(
+        `a /manifest request expected sig, keyid="other", alg="rsa-v1_5-sha256", not keyid conformance`,
+      );
     });
   });
 });
@@ -530,6 +539,8 @@ describe("selection", () => {
       ["embedded", "patch-embedded"],
     ],
     [["patch-delta"], ["patch-embedded", "patch-delta"]],
+    [["chain-patch"], ["identities", "chain-patch"]],
+    [["leaf-rotation"], ["identities", "chain-patch", "chain-rollback", "leaf-rotation"]],
     [ALL, ALL],
   ] as const)("%j runs %j", (selected: readonly Scenario[], planned) => {
     expect(plan(selected)).toEqual(planned);
@@ -554,6 +565,10 @@ describe("selection", () => {
       ["patch-ota", "after-full"],
       ["patch-embedded", undefined],
       ["patch-delta", "after-patch-embedded"],
+      ["identities", "after-patch-delta"],
+      ["chain-patch", "after-identities"],
+      ["chain-rollback", "after-chain-patch"],
+      ["leaf-rotation", "after-chain-rollback"],
     ]);
     expect(outcomes).toEqual([
       ["embedded", { pass: true, saw: "ran embedded" }],
@@ -563,6 +578,10 @@ describe("selection", () => {
       ["rollback", { pass: false, why: "not run: patch-ota failed" }],
       ["patch-embedded", { pass: true, saw: "ran patch-embedded" }],
       ["patch-delta", { pass: true, saw: "ran patch-delta" }],
+      ["identities", { pass: true, saw: "ran identities" }],
+      ["chain-patch", { pass: true, saw: "ran chain-patch" }],
+      ["chain-rollback", { pass: true, saw: "ran chain-rollback" }],
+      ["leaf-rotation", { pass: true, saw: "ran leaf-rotation" }],
     ]);
   });
 });

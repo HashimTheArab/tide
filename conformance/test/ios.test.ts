@@ -197,7 +197,9 @@ describe("the iOS device driver", () => {
         );
         await device.install(app, APP);
       }),
-    ).rejects.toThrow("the stack did not close cleanly");
+    ).rejects.toThrow(
+      /^the stack did not close cleanly: .*simctl uninstall A1 NoUninstall failed.*Failed to uninstall/s,
+    );
     expect(fake.calls().filter(([c]) => c === "uninstall")).toEqual([
       ["uninstall", "A1", "NoUninstall"],
       ["uninstall", "A1", APP],

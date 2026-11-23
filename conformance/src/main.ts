@@ -1,21 +1,13 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
-
-import type { App, Build } from "./app.ts";
-import type { Device } from "./device.ts";
 import type { ExpoVersion, Run, Scenario } from "./options.ts";
-import type { Outcome, Target } from "./scenarios.ts";
+import type { Builds, Opened, Outcome } from "./scenarios.ts";
 import type { Stack } from "./stack.ts";
 import { androidDevice } from "./android.ts";
-import { buildAndroid, buildIos, exportUpdate, materialise } from "./app.ts";
+import { buildAndroid, buildIos } from "./app.ts";
 import { iosDevice } from "./ios.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
-import { STEPS, message, plan, runScenarios } from "./scenarios.ts";
+import { STEPS, message, plan, prepare, runScenarios } from "./scenarios.ts";
 import { withStack } from "./stack.ts";
-import { tideCli } from "./tide-cli.ts";
-
-// The seed's own runtime keeps it out of every tested runtime's patch bases.
-const SEED_RUNTIME = "conformance-seed";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
 const say = (line: string) => process.stderr.write(`conformance: ${line}\n`);
@@ -50,12 +42,8 @@ async function main(args: readonly string[]): Promise<number> {
 
 /** How a run reaches one platform's device and builds its app. */
 interface Driver {
-  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, a line naming it, and its app builder. */
-  open(stack: Stack): Promise<{
-    device: Device;
-    about: string;
-    build: (app: App, marker: string) => Promise<Build>;
-  }>;
+  /** Returns the run's device and app builder, and a line naming the device. */
+  open(stack: Stack): Promise<Opened & { about: string }>;
 }
 
 const android = (run: Run, sdk: string): Driver => ({
@@ -106,40 +94,24 @@ async function conform(run: Run, driver: Driver): Promise<number> {
     }
   };
   await withStack(async (stack) => {
-    const cli = tideCli(stack);
     let opened;
     try {
       opened = await driver.open(stack);
     } catch (e) {
       return notRun(run.versions, e);
     }
-    const { device, about, build } = opened;
-    say(`using ${about}`);
-    let seeded = false;
-    for (const [i, version] of run.versions.entries()) {
-      let target: Target;
+    say(`using ${opened.about}`);
+    for (const version of run.versions) {
+      let builds: Builds;
       try {
-        const app = materialise(stack, version, run.platform);
-        say(`building the expo-updates ${version} release ${run.platform} app`);
-        const marker = `embedded-${version}-${randomUUID().slice(0, 8)}`;
-        target = { stack, device, cli, app, build: await build(app, marker) };
+        builds = await prepare(stack, opened, version, run.platform, say);
       } catch (e) {
         notRun([version], e);
         continue;
       }
-      if (!seeded) {
-        // The bucket serves no-update and the identity only once something is published.
-        try {
-          const from = await exportUpdate(stack, cli, target.app, "seed", SEED_RUNTIME);
-          await cli.publish(from, "seed");
-          seeded = true;
-        } catch (e) {
-          return notRun(run.versions.slice(i), e);
-        }
-      }
       await runScenarios(
         names,
-        (name, running) => STEPS[name].run(target, running),
+        (name, running) => STEPS[name].run(builds, running),
         (name, outcome) => report(version, name, outcome),
       );
     }
