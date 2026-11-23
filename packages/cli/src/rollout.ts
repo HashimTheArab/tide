@@ -16,7 +16,7 @@ import {
   readReleaseRecord,
   recordKey,
 } from "./publish-record.ts";
-import { execute, parsed } from "./publish.ts";
+import { execute, parsed, writeStep } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const ROLLOUT_USAGE =
@@ -46,7 +46,7 @@ export async function rollout(
 ): Promise<0 | 1 | 2> {
   const { now = Date.now, out } = options;
   return await execute(options, async () => {
-    const { goal, keys } = parse(args);
+    const { goal, keys, json } = parse(args);
     const identity = await buildIdentity(env, now());
     const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
@@ -71,7 +71,7 @@ export async function rollout(
         previous,
         // Encoded here, so a record over the size limit refuses before any write.
         reply: reply.percent === goal ? undefined : rolloutRecord(key, { ...reply, percent: goal }),
-        line: `${key} ${reply.new.updateId} ${goal}`,
+        report: { updateId: reply.new.updateId, percent: goal },
         ...(rise && { rise }),
       });
     }
@@ -82,17 +82,18 @@ export async function rollout(
       }
     };
     for (const { rise, key } of writes) if (rise !== undefined) await checkRise(rise, key);
-    return async () => {
+    return writeStep(json, out, async (done) => {
       let attempted = false;
-      for (const { key, previous, reply, line, rise } of writes) {
+      for (const target of writes) {
+        const { key, previous, reply, rise } = target;
         if (reply !== undefined) {
           if (attempted && rise !== undefined) await checkRise(rise, key);
           attempted = true;
           await writePointer(bucket, key, reply, previous);
         }
-        out(line);
+        done(target);
       }
-    };
+    });
   });
 }
 
@@ -155,7 +156,7 @@ export async function earlierOf(
 }
 
 /**
- * Returns the line of a target an earlier run of this same publish already staged: its pointer holds an unfinished
+ * Returns the report of a target an earlier run of this same publish already staged: its pointer holds an unfinished
  * rollout whose new update's release record is `draft`'s. At `percent` it is skipped once both sides verify; at another
  * it refuses. A complete rollout is no partial run: its new reply becomes the earlier one.
  */
@@ -180,7 +181,7 @@ export async function stagedRollout(
     );
   }
   await checkCopied(key, sides, writer.identity);
-  return { key, previous, reply: undefined, line: `${key} ${updateId} ${createdAt}` };
+  return { key, previous, reply: undefined, report: { updateId, time: createdAt } };
 }
 
 function parse(args: readonly string[]) {
@@ -191,12 +192,13 @@ function parse(args: readonly string[]) {
         channel: { type: "string" },
         "runtime-version": { type: "string" },
         platform: { type: "string", multiple: true },
+        json: { type: "boolean" },
       },
       strict: true,
       allowPositionals: true,
     }),
   );
-  const { channel, platform } = values;
+  const { channel, platform, json = false } = values;
   const runtime = values["runtime-version"];
   const [value] = positionals;
   if (positionals.length !== 1 || value === undefined) {
@@ -208,5 +210,5 @@ function parse(args: readonly string[]) {
   const goal =
     value === "complete" ? 100 : value === "revert" ? 0 : percentOf(value, "the rollout");
   const keys = platformsOf(platform).map((p) => replyKey(channel, runtime, p));
-  return { goal, keys };
+  return { goal, keys, json };
 }

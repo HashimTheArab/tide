@@ -22,6 +22,7 @@ import {
   readTargets,
   recordedKeys,
   storedContent,
+  writeStep,
 } from "./publish.ts";
 
 export const ROLLBACK_USAGE = `usage: tide rollback --embedded --channel <name> --runtime-version <version> [--platform ios|android]...
@@ -51,12 +52,13 @@ export async function rollback(
           channel: { type: "string" },
           "runtime-version": { type: "string" },
           platform: { type: "string", multiple: true },
+          json: { type: "boolean" },
         },
         strict: true,
         allowPositionals: false,
       }),
     );
-    const { embedded, to, channel, platform } = values;
+    const { embedded, to, channel, platform, json = false } = values;
     const runtime = values["runtime-version"];
     if (embedded === true && to !== undefined) {
       throw new PublishError(`give --embedded or --to, not both; ${ROLLBACK_USAGE}`);
@@ -67,14 +69,14 @@ export async function rollback(
           "--to rolls each update back on its own pointer: it takes no --channel, --runtime-version or --platform",
         );
       }
-      return republishing(updateIds(to));
+      return { json, prepare: republishing(updateIds(to)) };
     }
     if (embedded !== true) throw new PublishError(`give --embedded or --to; ${ROLLBACK_USAGE}`);
     if (channel === undefined || runtime === undefined) {
       throw new PublishError(`--embedded needs --channel and --runtime-version; ${ROLLBACK_USAGE}`);
     }
     const keys = platformsOf(platform).map((p) => replyKey(channel, runtime, p));
-    return rollingBack(keys);
+    return { json, prepare: rollingBack(keys) };
   });
 }
 
@@ -94,6 +96,7 @@ export async function republish(
         options: {
           channel: { type: "string" },
           "runtime-version": { type: "string" },
+          json: { type: "boolean" },
         },
         strict: true,
         allowPositionals: true,
@@ -102,23 +105,27 @@ export async function republish(
     if (positionals.length === 0) {
       throw new PublishError(`give at least one update ID; ${REPUBLISH_USAGE}`);
     }
-    const { channel } = values;
+    const { channel, json = false } = values;
     const runtime = values["runtime-version"];
     // Refuses a bad channel or runtime before the writer opens.
     if (channel !== undefined) replyKey(channel, "1", "ios");
     if (runtime !== undefined) replyKey("main", runtime, "ios");
-    return republishing(updateIds(positionals), channel, runtime);
+    return { json, prepare: republishing(updateIds(positionals), channel, runtime) };
   });
 }
 
 /** Parses, opens the writer for the shipped builds' identity, prepares, then commits. */
-async function run(env: Env, options: PublishOptions, parse: () => Prepare): Promise<0 | 1 | 2> {
-  const { now = Date.now } = options;
+async function run(
+  env: Env,
+  options: PublishOptions,
+  parse: () => { readonly json: boolean; readonly prepare: Prepare },
+): Promise<0 | 1 | 2> {
+  const { out, now = Date.now } = options;
   return await execute(options, async () => {
-    const prepare = parse();
+    const { json, prepare } = parse();
     const writer = await openWriter(env, { now });
     const ready = await prepare(writer, now);
-    return () => commit(ready, options.out);
+    return writeStep(json, out, (done) => commit(ready, done));
   });
 }
 
@@ -154,7 +161,7 @@ function rollingBack(keys: readonly string[]): Prepare {
         key,
         previous,
         reply: encodeStoredReply({ kind: "rollBackToEmbedded", ...multipart }),
-        line: `${key} - ${commitTime.toISOString()}`,
+        report: { updateId: null, time: commitTime.toISOString() },
       });
     }
     return await plan(writer, checkCertificate, [], pointers);

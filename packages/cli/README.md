@@ -56,5 +56,10 @@ first, as in [Signing identity](https://github.com/HashimTheArab/tide/blob/main/
 | `tide storage`                  | Lists files nothing uses any more; deletes nothing          |
 | `tide probe`                    | Checks a live server the way an installed app would         |
 
+`tide publish --json` prints one JSON document for scripts to read, and so do `tide rollout --json`,
+`tide rollback --json`, `tide republish --json`, `tide status --json`, `tide storage --json` and `tide probe --json`
+([fields](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#json-output)). During a rollout,
+`tide probe --rollout-side new --rollout-update <updateId>` checks the update being sent out.
+
 The server is [`@tide-ota/server`](https://www.npmjs.com/package/@tide-ota/server). CI setup, keys and every flag:
 [publishing](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#publishing) and [the CLI reference](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#cli).
