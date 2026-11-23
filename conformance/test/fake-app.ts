@@ -1,19 +1,11 @@
 // The apps the fake devices install and launch. An artifact is an app ID alone, whose launches log the device's app.log,
-// or a FakeBuild: App.js over what a stock expo-updates client does with a reply, code signing and patches included.
+// or a FakeBuild: App.js over what a stock expo-updates client does with a reply, patches included. It verifies no
+// signature; the harness does.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import {
-  applyBsdiff,
-  certificateChain,
-  certificatePublicKey,
-  contentKey,
-  encodeSfvDictionary,
-  parseMultipart,
-  verifyChainedSignature,
-  verifyExpoSignature,
-} from "@tide-ota/protocol";
+import { applyBsdiff, contentKey, encodeSfvDictionary, parseMultipart } from "@tide-ota/protocol";
 
 import type { Platform } from "../src/options.ts";
 
@@ -25,12 +17,9 @@ export interface FakeBuild {
     readonly updates: {
       readonly url: string;
       readonly requestHeaders: Readonly<Record<string, string>>;
-      readonly codeSigningCertificate: string;
-      readonly codeSigningMetadata: { readonly keyid: string; readonly alg: string };
+      readonly codeSigningMetadata: { keyid: string; readonly alg: string };
     };
   };
-  readonly certificate: string; // The embedded PEM.
-  readonly includeChain: boolean; // The native opt-in the config plugin writes.
   readonly embedded: FakeUpdate;
 }
 
@@ -114,15 +103,7 @@ async function fetchUpdate(
   if (boundary === undefined) throw new Error(`/manifest answered ${res.status}`);
   const parts = parseMultipart(new Uint8Array(await res.arrayBuffer()), boundary);
   const part = parts.find((p) => p.name === "manifest" || p.name === "directive");
-  if (part?.signature === undefined) throw new Error("No expo-signature header specified");
-  const chain = parts.find((p) => p.name === "certificate_chain")?.body;
-  if (app.includeChain) {
-    const leaf = await certificateChain(chain, app.certificate, new Date());
-    await verifyChainedSignature(part.body, part.signature, leaf);
-  } else {
-    const key = await certificatePublicKey(app.certificate);
-    await verifyExpoSignature(part.body, part.signature, key, codeSigningMetadata.keyid);
-  }
+  if (part === undefined) throw new Error("the reply has no manifest or directive");
   const value = JSON.parse(new TextDecoder().decode(part.body)) as {
     type?: string;
     id: string;

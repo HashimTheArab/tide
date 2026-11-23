@@ -71,9 +71,9 @@ describe("the conformance app", () => {
         expect(app).toEqual({
           ...direct,
           identity,
-          dir: `${direct.dir}-chained`,
-          appId: `${direct.appId}.chained`,
-          runtimeVersion: `${direct.runtimeVersion}-chained`,
+          dir: `${direct.dir}chained`,
+          appId: `${direct.appId}chained`,
+          runtimeVersion: `${direct.runtimeVersion}chained`,
         });
         const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
           expo: { plugins: string[]; updates: Record<string, unknown> };

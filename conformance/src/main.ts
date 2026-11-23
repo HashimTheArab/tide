@@ -1,21 +1,12 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
-
-import type { App, Build } from "./app.ts";
-import type { Device } from "./device.ts";
-import type { ExpoVersion, Platform, Run, Scenario } from "./options.ts";
-import type { Builds, Chained, Outcome, Target } from "./scenarios.ts";
-import type { Identity, Stack } from "./stack.ts";
+import type { Run, Scenario } from "./options.ts";
+import type { Builds, Driver, Outcome } from "./scenarios.ts";
 import { androidDevice } from "./android.ts";
-import { buildAndroid, buildIos, exportUpdate, materialise } from "./app.ts";
+import { buildAndroid, buildIos } from "./app.ts";
 import { iosDevice } from "./ios.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
-import { STEPS, message, plan, runScenarios } from "./scenarios.ts";
+import { STEPS, message, plan, prepare, runScenarios } from "./scenarios.ts";
 import { withStack } from "./stack.ts";
-import { chainAuthority, tideCli } from "./tide-cli.ts";
-
-// The seed's own runtime keeps it out of every tested runtime's patch bases.
-const SEED_RUNTIME = "conformance-seed";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
 const say = (line: string) => process.stderr.write(`conformance: ${line}\n`);
@@ -46,16 +37,6 @@ async function main(args: readonly string[]): Promise<number> {
     say(message(e));
     return 1;
   }
-}
-
-/** How a run reaches one platform's device and builds its app. */
-interface Driver {
-  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, a line naming it, and its app builder. */
-  open(stack: Stack): Promise<{
-    device: Device;
-    about: string;
-    build: (app: App, marker: string) => Promise<Build>;
-  }>;
 }
 
 const android = (run: Run, sdk: string): Driver => ({
@@ -103,7 +84,7 @@ async function conform(run: Run, driver: Driver): Promise<number> {
     await withStack(async (stack) => {
       let builds: Builds;
       try {
-        builds = await prepare(stack, version, run.platform, driver);
+        builds = await prepare(stack, version, run.platform, driver, say);
       } catch (e) {
         for (const name of names) report(name, { pass: false, why: `not run: ${message(e)}` });
         return;
@@ -112,33 +93,6 @@ async function conform(run: Run, driver: Driver): Promise<number> {
     });
   }
   return failed.length > 0 ? 1 : 0;
-}
-
-/** Opens the device, builds the direct app and publishes the seed, without which the bucket serves no reply. */
-async function prepare(
-  stack: Stack,
-  version: ExpoVersion,
-  platform: Platform,
-  driver: Driver,
-): Promise<Builds> {
-  const { device, about, build } = await driver.open(stack);
-  say(`using ${about}`);
-  const target = async (identity: Identity, name: string): Promise<Target> => {
-    const app = materialise(stack, version, platform, identity);
-    say(`building the expo-updates ${version} ${name} release ${platform} app`);
-    const marker = `${name}-${version}-${randomUUID().slice(0, 8)}`;
-    const cli = tideCli(stack, identity);
-    return { stack, device, cli, app, build: await build(app, marker) };
-  };
-  const direct = await target(stack.identity, "embedded");
-  const from = await exportUpdate(stack, direct.cli, direct.app, "seed", SEED_RUNTIME);
-  await direct.cli.publish(from, "seed");
-  const buildChained = async (): Promise<Chained> => {
-    const rotate = await chainAuthority(stack);
-    return { ...(await target(await rotate(), "chained")), rotate };
-  };
-  let chained: Promise<Chained> | undefined;
-  return { ...direct, chained: () => (chained ??= buildChained()) };
 }
 
 process.exitCode = await main(process.argv.slice(2));

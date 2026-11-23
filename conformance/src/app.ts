@@ -50,7 +50,8 @@ export function materialise(
   identity: Identity = stack.identity,
 ): App {
   const chained = identity.chainFile !== undefined;
-  const dir = join(stack.dir, `app-${version}${chained ? "-chained" : ""}`);
+  const name = chained ? `${version}chained` : version;
+  const dir = join(stack.dir, `app-${name}`);
   cpSync(join(APPS, "shared"), dir, { recursive: true, errorOnExist: true, force: false });
   for (const file of ["package.json", "package-lock.json"]) {
     copyFileSync(join(APPS, `sdk-${version}`, file), join(dir, file));
@@ -62,9 +63,9 @@ export function materialise(
     platform,
     identity,
     dir,
-    appId: `dev.tide.conformance.sdk${version}${chained ? ".chained" : ""}`,
+    appId: `dev.tide.conformance.sdk${name}`,
     channel: `expo-${version}`,
-    runtimeVersion: `1.0.0-sdk${version}${chained ? "-chained" : ""}`,
+    runtimeVersion: `1.0.0-sdk${name}`,
   };
   const config = {
     expo: {

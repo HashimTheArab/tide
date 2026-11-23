@@ -24,14 +24,16 @@ import {
 
 import type { App, Build } from "./app.ts";
 import type { Device, Report } from "./device.ts";
-import type { Scenario } from "./options.ts";
+import type { ExpoVersion, Platform, Scenario } from "./options.ts";
 import type { Identity, Recorded, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
-import { exportUpdate } from "./app.ts";
+import { exportUpdate, materialise } from "./app.ts";
 import { SCENARIOS } from "./options.ts";
 import { tamperPatch } from "./stack.ts";
-import { tideCli } from "./tide-cli.ts";
+import { chainAuthority, tideCli } from "./tide-cli.ts";
 
+// The seed's own runtime keeps it out of every tested runtime's patch bases.
+const SEED_RUNTIME = "conformance-seed";
 // A launch that reloads once settles in four reports; more means the app is looping.
 const MAX_REPORTS = 8;
 const BUNDLE_PATH = /^\/bundles\/([0-9a-f]{64})$/;
@@ -47,7 +49,7 @@ export interface Target {
 }
 
 /** The chained build: it embeds a root, and its writers sign with leaves under it. */
-export interface Chained extends Target {
+interface Chained extends Target {
   /** Issues another leaf under the root; returns the identity that signs with its new key. */
   rotate(): Promise<Identity>;
 }
@@ -56,6 +58,16 @@ export interface Chained extends Target {
 export interface Builds extends Target {
   /** Returns the chained build, built on the first call. */
   chained(): Promise<Chained>;
+}
+
+/** How a run reaches one platform's device and builds its app. */
+export interface Driver {
+  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, a line naming it, and its app builder. */
+  open(stack: Stack): Promise<{
+    device: Device;
+    about: string;
+    build: (app: App, marker: string) => Promise<Build>;
+  }>;
 }
 
 /** What the checks read: the store, and the identity, channel, runtime and platform the app has. */
@@ -99,7 +111,7 @@ export const STEPS: Record<Scenario, Step> = {
     from: "fresh",
     async run(t) {
       const e = await install(t);
-      await checkEmbedded(t, e, [await launch(t), await launch(t)]);
+      await checkNoUpdate(t, e, [await launch(t), await launch(t)]);
       return {
         running: e,
         saw: `both launches ran embedded update ${e.updateId} and accepted the signed ${NO_UPDATE_KEY}`,
@@ -181,14 +193,12 @@ export const STEPS: Record<Scenario, Step> = {
       await register(t);
       const a1 = await publish(t, "a1");
       await checkPatch(t, e, a1, await launch(t));
-      const before = readFileSync(storePath(t, NO_UPDATE_KEY));
       const b1 = await publish(c, "b1", { addIdentity: true });
-      checkAdded(t, c, before);
-      await checkNoUpdate(t, a1, await launch(t));
+      await checkNoUpdate(t, a1, [await launch(t)]);
       await checkFull(c, await install(c), b1, [await launch(c), await launch(c)]);
       const a2 = await publish(t, "a2");
       await checkPatch(t, a1, a2, await launch(t));
-      await checkNoUpdate(c, b1, await launch(c));
+      await checkNoUpdate(c, b1, [await launch(c)]);
       return {
         running: b1,
         saw: `keyid ${t.app.identity.keyId} ran ${a1.updateId} and ${a2.updateId} across keyid ${c.app.identity.keyId} joining, whose build ran only ${b1.updateId}`,
@@ -215,12 +225,11 @@ export const STEPS: Record<Scenario, Step> = {
     from: "ota",
     async run(t, from) {
       const c = await t.chained();
-      const next = await c.rotate();
-      const r = { ...c, cli: tideCli(c.stack, next) };
+      const identity = await c.rotate();
+      const r = { ...c, app: { ...c.app, identity }, cli: tideCli(c.stack, identity) };
       await register(r); // So the update patches from the embedded bundle the rollback left running.
       const to = await publish(r, "b3");
-      checkRotated(c, next);
-      await checkPatch(c, ran(from), to, await launch(c));
+      await checkPatch(r, ran(from), to, await launch(r));
       return {
         running: to,
         saw: `the same build ran ${to.updateId}, signed by a new leaf, from a patch on update ${ran(from).updateId}`,
@@ -278,14 +287,14 @@ export async function runScenarios(
   }
 }
 
-/** Two launches of a fresh install each run the embedded update and accept the signed no-update reply. */
-export async function checkEmbedded(s: Served, e: Update, traces: readonly Trace[]): Promise<void> {
-  await compare(s, traces, [stays(e), stays(e)], new Map());
-}
-
-/** The client running `u` gets the signed no-update reply, whatever other identities published. */
-export async function checkNoUpdate(s: Served, u: Update, trace: Trace): Promise<void> {
-  await compare(s, [trace], [stays(u)], new Map());
+/** Each launch runs `u` and accepts the signed no-update reply. */
+export async function checkNoUpdate(s: Served, u: Update, traces: readonly Trace[]): Promise<void> {
+  await compare(
+    s,
+    traces,
+    traces.map(() => stays(u)),
+    new Map(),
+  );
 }
 
 /**
@@ -396,43 +405,32 @@ export async function checkRollback(
   );
 }
 
-/**
- * Throws unless the publish of `added` converted the version-1 `reply/no-update` in `before` to one entry per keyid,
- * the direct identity's reply kept byte for byte.
- */
-export function checkAdded(direct: Served, added: Served, before: Uint8Array): void {
-  const was = decodeNoUpdate(before);
-  if (was.kind === "identities") {
-    throw new Error(`${NO_UPDATE_KEY} already held one entry per keyid before the publish`);
-  }
-  const now = decodeNoUpdate(readFileSync(storePath(direct, NO_UPDATE_KEY)));
-  if (now.kind !== "identities") throw new Error(`${NO_UPDATE_KEY} was not converted`);
-  const keyIds = [direct, added].map((s) => s.app.identity.keyId);
-  if (!isDeepStrictEqual([...now.entries.keys()], keyIds.toSorted())) {
-    throw new Error(
-      `${NO_UPDATE_KEY} holds ${[...now.entries.keys()].join(", ")}, not ${keyIds.join(", ")}`,
-    );
-  }
-  if (!isDeepStrictEqual(now.entries.get(direct.app.identity.keyId), was)) {
-    throw new Error(`${NO_UPDATE_KEY} changed the reply of keyid ${direct.app.identity.keyId}`);
-  }
-}
-
-/** Throws unless every reply stored for the build serves exactly `next`'s chain, not the one it first published under. */
-export function checkRotated(s: Served, next: Identity): void {
-  const chainOf = ({ chainFile = "" }: Identity) => readFileSync(chainFile);
-  const chain = chainOf(next);
-  if (chain.equals(chainOf(s.app.identity))) {
-    throw new Error("the new leaf's chain is the one already served");
-  }
-  for (const key of [NO_UPDATE_KEY, pointerKey(s)]) {
-    const { body, boundary } = storedReply(s, key) ?? {};
-    const parts = body && boundary ? parseMultipart(body, boundary) : [];
-    const served = parts.find((p) => p.name === "certificate_chain")?.body;
-    if (served === undefined || !chain.equals(served)) {
-      throw new Error(`${key} does not serve the new leaf's chain`);
-    }
-  }
+/** Opens the device, builds the direct app and publishes the seed, without which the bucket serves no reply. */
+export async function prepare(
+  stack: Stack,
+  version: ExpoVersion,
+  platform: Platform,
+  driver: Driver,
+  say: (line: string) => void,
+): Promise<Builds> {
+  const { device, about, build } = await driver.open(stack);
+  say(`using ${about}`);
+  const target = async (identity: Identity, name: string): Promise<Target> => {
+    const app = materialise(stack, version, platform, identity);
+    say(`building the expo-updates ${version} ${name} release ${platform} app`);
+    const marker = `${name}-${version}-${randomUUID().slice(0, 8)}`;
+    const cli = tideCli(stack, identity);
+    return { stack, device, cli, app, build: await build(app, marker) };
+  };
+  const direct = await target(stack.identity, "embedded");
+  const from = await exportUpdate(stack, direct.cli, direct.app, "seed", SEED_RUNTIME);
+  await direct.cli.publish(from, "seed");
+  const buildChained = async (): Promise<Chained> => {
+    const rotate = await chainAuthority(stack);
+    return { ...(await target(await rotate(), "chained")), rotate };
+  };
+  let chained: Promise<Chained> | undefined;
+  return { ...direct, chained: () => (chained ??= buildChained()) };
 }
 
 /** Installs the build afresh and returns its embedded update. */
@@ -662,8 +660,9 @@ async function exchange(
 /**
  * Returns the label of a `/manifest` reply: `update <id>` or the directive's type. Throws unless the request expected
  * the build's keyid and the reply is the exact bytes of the keyid's stored no-update reply or of the app's pointer,
- * whose one signed part names that keyid and verifies under the build's certificate, in chain mode under the served
- * chain's leaf. Any other body, such as one with no parts, could pass a client's check with nothing to verify.
+ * whose one signed part names that keyid and verifies under the build's certificate, in chain mode under the leaf of
+ * the identity's chain, which the reply serves exactly. Any other body, such as one with no parts, could pass a
+ * client's check with nothing to verify.
  */
 async function verifyReply(s: Served, r: Recorded): Promise<string> {
   const { keyId, certificateFile, chainFile } = s.app.identity;
@@ -690,7 +689,10 @@ async function verifyReply(s: Served, r: Recorded): Promise<string> {
       throw new Error("not one signed manifest or directive");
     }
     const pem = readFileSync(certificateFile, "utf8");
-    const chain = parts.find((p) => p.name === "certificate_chain")?.body;
+    const chain = parts.find((p) => p.name === "certificate_chain")?.body ?? new Uint8Array();
+    if (chainFile !== undefined && !readFileSync(chainFile).equals(chain)) {
+      throw new Error("its certificate_chain is not the writers'");
+    }
     const key =
       chainFile === undefined
         ? await certificatePublicKey(pem)

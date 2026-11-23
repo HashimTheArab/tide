@@ -43,17 +43,15 @@ simulator and two native builds per version. `pnpm conformance --help` lists the
   CA root and opts in to certificate chains. They have their own keyid, certificate and runtimeVersion, and share one
   bucket, server and channel. The chained build's writers sign with a leaf that `tide certificate` issues under an
   intermediate. Every `/manifest` request must expect its build's keyid, and every reply verify under its certificate.
-
 - **Versions:** the oldest expo-updates line with bsdiff support (opt-in, which the app enables) and the latest
   stable. `conformance/apps/sdk-<n>` pins each.
 - **Scenarios:** the embedded build gets no update; a first update downloads the full bundle because no patch exists;
   a patch from the running OTA update; a tampered patch falls back to the full bundle; a rollback returns to the
   embedded update; a patch from the embedded bundle; an update delta-compiled against the embedded bundle
   (`--base-bytecode`), patched from an OTA update and from the embedded bundle.
-- **Identity and chain scenarios:** `identities`: the chained build joins the bucket (`tide publish --add-identity`) while
-  the direct build is installed, which keeps getting its no-update reply and takes its own next update, and each build
-  runs only its own updates; `chain-patch` and `chain-rollback`: a patch and a rollback on the chained build;
-  `leaf-rotation`: the same chained build takes an update signed by a new leaf key under the same root.
+- **Identity and chain scenarios:** `identities`: the chained build joins the bucket (`tide publish --add-identity`)
+  and each build runs only its own updates; `chain-patch`: a patch on the chained build; `chain-rollback`: its rollback;
+  `leaf-rotation`: it takes an update signed by a new leaf key under the same root.
 - **Android** runs nightly and on demand in `.github/workflows/conformance.yml`: one job per version on a hosted Linux
   runner, with an AVD created in the run and a KVM-accelerated emulator. **iOS** runs on a Mac before each release
   ([release checklist](release.md)).

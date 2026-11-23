@@ -22,8 +22,8 @@ import { SCENARIOS } from "../src/options.ts";
 import {
   checkCorruptPatch,
   checkDeltaCompiled,
-  checkEmbedded,
   checkFull,
+  checkNoUpdate,
   checkPatch,
   checkRollback,
   plan,
@@ -188,7 +188,7 @@ describe("the embedded scenario", () => {
     await withStack(async (stack) => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
-      await checkEmbedded(served(stack), e, await launches(stack, e));
+      await checkNoUpdate(served(stack), e, await launches(stack, e));
     });
   });
 
@@ -197,7 +197,7 @@ describe("the embedded scenario", () => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       rewriteNoUpdate(stack, (_, boundary) => new Uint8Array(Buffer.from(`--${boundary}--\r\n`)));
-      await expect(checkEmbedded(served(stack), e, await launches(stack, e))).rejects.toThrow(
+      await expect(checkNoUpdate(served(stack), e, await launches(stack, e))).rejects.toThrow(
         UNSIGNED,
       );
     });
@@ -208,7 +208,7 @@ describe("the embedded scenario", () => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       breakSignature(stack);
-      await expect(checkEmbedded(served(stack), e, await launches(stack, e))).rejects.toThrow(
+      await expect(checkNoUpdate(served(stack), e, await launches(stack, e))).rejects.toThrow(
         UNSIGNED,
       );
     });
@@ -219,7 +219,7 @@ describe("the embedded scenario", () => {
       const e = embedded(await hexOf(bundle()));
       await publish(stack, "seed", bundle(), "seed");
       await expect(
-        checkEmbedded(served(stack), e, await launches(stack, e, "other")),
+        checkNoUpdate(served(stack), e, await launches(stack, e, "other")),
       ).rejects.toThrow(
         `a /manifest request expected sig, keyid="other", alg="rsa-v1_5-sha256", not keyid conformance`,
       );

@@ -25,14 +25,13 @@ import { contentKey, sha256Base64Url } from "@tide-ota/protocol";
 import type { App, Build } from "../src/app.ts";
 import type { Device } from "../src/device.ts";
 import type { Platform } from "../src/options.ts";
-import type { Builds } from "../src/scenarios.ts";
-import type { Identity, Stack } from "../src/stack.ts";
+import type { Builds, Driver } from "../src/scenarios.ts";
+import type { Stack } from "../src/stack.ts";
 import type { FakeBuild } from "./fake-app.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
 import { androidDevice } from "../src/android.ts";
-import { materialise } from "../src/app.ts";
 import { iosDevice } from "../src/ios.ts";
-import { chainAuthority, tideCli } from "../src/tide-cli.ts";
+import { prepare } from "../src/scenarios.ts";
 import { markedBundle } from "./fake-app.ts";
 
 const FAKE_EXPO = fileURLToPath(new URL("../../packages/cli/test/fake-expo.ts", import.meta.url));
@@ -79,48 +78,37 @@ function fakeDevice(stack: Stack, platform: Platform): Promise<Device> {
   return iosDevice(stack, { xcrun, simulator: undefined });
 }
 
-/** Returns a fake device's builds of the materialised apps, whose exports run without Expo; `change` alters each build. */
-export async function fakeBuilds(
-  stack: Stack,
-  platform: Platform,
-  change: (build: FakeBuild) => FakeBuild = (build) => build,
-): Promise<Builds> {
-  const device = await fakeDevice(stack, platform);
-  const target = (identity: Identity) => {
-    const app = materialise(stack, "58", platform, identity);
-    fakeExpo(app.dir, `'${process.execPath}' '${FAKE_EXPORT}'`);
-    writeFileSync(
-      join(app.dir, "app.config.mjs"),
-      `import { readFileSync } from "node:fs";\nexport default () => JSON.parse(readFileSync("app.json", "utf8")).expo;\n`,
-    );
-    return { stack, device, cli: tideCli(stack, identity), app, build: fakeBuild(app, change) };
+/** Prepares a fake device's builds of the 58 app, whose exports run without Expo; `keyid` replaces the one they send. */
+export function fakeBuilds(stack: Stack, platform: Platform, keyid?: string): Promise<Builds> {
+  const driver: Driver = {
+    async open() {
+      const device = await fakeDevice(stack, platform);
+      const build = (app: App, marker: string) => Promise.resolve(fakeBuild(app, marker, keyid));
+      return { device, about: "", build };
+    },
   };
-  const direct = target(stack.identity);
-  await direct.cli.publish(fixtureExport(stack, "seed", undefined, platform), "seed");
-  const rotate = await chainAuthority(stack);
-  const chained = { ...target(await rotate()), rotate };
-  return { ...direct, chained: () => Promise.resolve(chained) };
+  return prepare(stack, "58", platform, driver, () => undefined);
 }
 
-function fakeBuild(app: App, change: (build: FakeBuild) => FakeBuild): Build {
-  const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
-    expo: FakeBuild["config"] & { plugins: string[] };
-  };
-  const id = randomUUID();
-  const marker = `embedded-${id}`;
-  const bundle = markedBundle(marker);
-  const built = change({
-    appId: app.appId,
-    platform: app.platform,
-    config: expo,
-    certificate: readFileSync(join(app.dir, expo.updates.codeSigningCertificate), "utf8"),
-    includeChain: expo.plugins.includes("./certificate-chain.js"),
-    embedded: { id, bundle: bundle.toString("base64") },
-  });
+function fakeBuild(app: App, marker: string, keyid?: string): Build {
   const file = (name: string, content: string | Uint8Array) => {
     writeFileSync(join(app.dir, name), content);
     return join(app.dir, name);
   };
+  fakeExpo(app.dir, `'${process.execPath}' '${FAKE_EXPORT}'`);
+  file(
+    "app.config.mjs",
+    `import { readFileSync } from "node:fs";\nexport default () => JSON.parse(readFileSync("app.json", "utf8")).expo;\n`,
+  );
+  const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
+    expo: FakeBuild["config"];
+  };
+  if (keyid !== undefined) expo.updates.codeSigningMetadata.keyid = keyid;
+  const id = randomUUID();
+  const bundle = markedBundle(marker);
+  const { appId, platform } = app;
+  const embedded = { id, bundle: bundle.toString("base64") };
+  const built: FakeBuild = { appId, platform, config: expo, embedded };
   return {
     artifact: file("build.json", JSON.stringify(built)),
     marker,
