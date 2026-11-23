@@ -23,8 +23,8 @@ const emulatorStarts = (calls: string[][]) =>
   calls.filter(([tool, first]) => tool === "emulator" && first !== "-list-avds");
 
 describe("the Android device driver", () => {
-  test("uses the running emulator, maps the Tide port and leaves the emulator running", async () => {
-    const fake = fakeSdk({ running: { "emulator-5560": {} } });
+  test("uses the running emulator, maps the Tide port and leaves the emulator as it was", async () => {
+    const fake = fakeSdk({ running: { "emulator-5560": {} }, installed: ["dev.other"] });
     await withStack(async (stack) => {
       const device = await androidDevice(stack, {
         sdk: fake.sdk,
@@ -34,8 +34,13 @@ describe("the Android device driver", () => {
       expect(device).toMatchObject({ serial: "emulator-5560", abi: "x86_64", booted: false });
       await device.reverse(4321);
       expect(fake.state().reverse).toEqual(["tcp:4321"]);
+      const apk = join(stack.dir, "app.apk");
+      writeFileSync(apk, PKG);
+      await device.install(apk, PKG);
+      expect(fake.state().installed).toEqual(["dev.other", PKG]);
     });
     expect(fake.state()).toMatchObject({ running: { "emulator-5560": {} }, reverse: [] });
+    expect(fake.state().installed).toEqual(["dev.other"]);
     expect(emulatorStarts(fake.calls())).toEqual([]);
     expect(fake.calls().filter((c) => c.includes("emu"))).toEqual([]);
   });
