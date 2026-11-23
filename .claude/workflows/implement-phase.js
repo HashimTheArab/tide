@@ -538,7 +538,8 @@ async function finish() {
   if (AUTO_MERGE) {
     await ok(
       "auto-merge",
-      `cd ${WT} && gh pr merge ${PR} --squash --auto --match-head-commit ${g.headSha}`,
+      // The default squash body repeats every commit's trailers.
+      `cd ${WT} && gh pr merge ${PR} --squash --auto --match-head-commit ${g.headSha} --body ${q(`Roadmap slice ${S.id}.`)}`,
     );
     state = "auto-merge";
   }
