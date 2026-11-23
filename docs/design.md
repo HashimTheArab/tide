@@ -911,9 +911,10 @@ unchanged, and a throw or rejection is logged by error name only, never with the
 
 **Node.** The Node entry records nothing unless `TIDE_ANALYTICS` is `stdout`; unset or empty is off, and any other value
 exits 1 at startup. Stdout must be a pipe or a socket, as under a container runtime without a TTY, or startup exits 1 too:
-Node writes to a file or a terminal synchronously, so a slow one would hold every reply. On Windows, where Node writes to a
-pipe synchronously as well, startup always exits 1. To keep the lines in a file, pipe them to a process that writes it. Each
-point is then one line of JSON on stdout, the only lines that start with `{` (the entry's own are `tide listening on port <port>` and `tide closing`; errors go to stderr):
+Node writes to a file or a terminal synchronously, so a slow one would hold every reply. On Windows Node writes to a pipe
+synchronously as well, so `TIDE_ANALYTICS=stdout` always exits 1 there. To keep the lines in a file, pipe them to a process
+that writes it. Each point is then one line of JSON on stdout, the only lines that start with `{` (the entry's own are
+`tide listening on port <port>` and `tide closing`; errors go to stderr):
 
 ```json
 {"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002","none"],"doubles":[1]}
@@ -921,9 +922,9 @@ point is then one line of JSON on stdout, the only lines that start with `{` (th
 
 `indexes[0]` is `index1`, `blobs[0]` to `blobs[6]` are `blob1` to `blob7` and `doubles[0]` is `double1`, exactly as in the
 table; only `schema` and `time` are added, since Analytics Engine stamps its own time. `schema` changes by the rule under
-JSON output. Nothing is sampled, but a line is never waited for: one whose reader has closed is
-lost, and while a stalled reader has filled Node's 64 KiB stdout buffer new points are dropped until it drains, so at most
-that and one line is held. Lines still buffered at exit are lost, and the last one can be cut.
+JSON output. Nothing is sampled, but a line is never waited for: one whose reader has closed is lost, and while a stalled
+reader has filled Node's 64 KiB stdout buffer new points are dropped until it drains, so at most that and one line is
+held. Lines still buffered at exit are lost, and the last one can be cut.
 
 ### `tide probe`
 

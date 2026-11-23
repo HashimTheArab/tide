@@ -84,7 +84,7 @@ jobs:
           jq -e '.schema == 1' <<< "$status" > /dev/null
           failed=0
 
-          # Exit 1 is retried in place, so no other writer runs in between.
+          # Exit 1 may have written, so a retry finishes it in place, with no other writer and no head check in between.
           revert() {
             local code
             for attempt in 1 2 3 4 5; do
