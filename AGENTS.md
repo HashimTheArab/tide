@@ -60,6 +60,7 @@ AI agents write most of the code.
 - **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide-ota/server types`; the gate fails
   when it is stale.
 - **Committing secrets.** Never commit `.env`, keys or credentials.
+- **Attribution trailers.** Commit messages carry no `Co-Authored-By` line for an AI tool.
 - **Formatting by hand.** Run `pnpm format:fix`; oxfmt orders imports.
 
 ## Where things are decided
