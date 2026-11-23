@@ -8,13 +8,15 @@ import type { StoredReply } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   baseKey,
+  certificateChain,
   certificatePublicKey,
   contentKey,
   decodeBaseRecord,
+  decodeNoUpdate,
   decodeStoredReply,
   diskPath,
+  expectedKeyId,
   parseMultipart,
-  parseSfvDictionary,
   patchKey,
   replyKey,
   verifyExpoSignature,
@@ -23,11 +25,12 @@ import {
 import type { App, Build } from "./app.ts";
 import type { Device, Report } from "./device.ts";
 import type { Scenario } from "./options.ts";
-import type { Recorded, Stack } from "./stack.ts";
+import type { Identity, Recorded, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
 import { exportUpdate } from "./app.ts";
 import { SCENARIOS } from "./options.ts";
 import { tamperPatch } from "./stack.ts";
+import { tideCli } from "./tide-cli.ts";
 
 // A launch that reloads once settles in four reports; more means the app is looping.
 const MAX_REPORTS = 8;
@@ -43,7 +46,19 @@ export interface Target {
   readonly build: Build;
 }
 
-/** What the checks read: the store and identity, and the channel, runtime and platform the app asks for. */
+/** The chained build: it embeds a root, and its writers sign with leaves under it. */
+export interface Chained extends Target {
+  /** Issues another leaf under the root; returns the identity that signs with its new key. */
+  rotate(): Promise<Identity>;
+}
+
+/** The direct build under test, and the chained one that shares its bucket, channel and device. */
+export interface Builds extends Target {
+  /** Returns the chained build, built on the first call. */
+  chained(): Promise<Chained>;
+}
+
+/** What the checks read: the store, and the identity, channel, runtime and platform the app has. */
 export type Served = Pick<Target, "stack" | "app">;
 
 /** An update: its ID, the marker its bundle reports, its launch bundle's content key, and whether it is embedded. */
@@ -62,7 +77,7 @@ export interface Trace {
 
 interface Step {
   readonly from: "fresh" | "ota"; // Fresh reinstalls the app; ota starts from the update the step before left running.
-  run(t: Target, running: Update | undefined): Promise<{ running: Update; saw: string }>;
+  run(t: Builds, running: Update | undefined): Promise<{ running: Update; saw: string }>;
 }
 
 /** What a recorded reply shows, reduced to the fields the expectations name. */
@@ -128,26 +143,13 @@ export const STEPS: Record<Scenario, Step> = {
   },
   rollback: {
     from: "ota",
-    async run(t, from) {
-      const { channel, runtimeVersion } = t.app;
-      await t.cli.rollbackToEmbedded({ channel, runtimeVersion, platform: t.app.platform });
-      const e = embedded(t.build);
-      await checkRollback(t, ran(from), e, await launch(t));
-      return { running: e, saw: `rolled back from ${ran(from).updateId} to ${e.updateId}` };
-    },
+    run: (t, from) => rollBack(t, ran(from)),
   },
   "patch-embedded": {
     from: "fresh",
     async run(t) {
       const e = await install(t);
-      const { manifest, bundle, assetsDir } = t.build;
-      await t.cli.registerBuild({
-        platform: t.app.platform,
-        runtimeVersion: t.app.runtimeVersion,
-        manifest,
-        bundle,
-        assetsDir,
-      });
+      await register(t);
       const to = await publish(t, "u4");
       await checkPatch(t, e, to, await launch(t));
       return {
@@ -160,7 +162,7 @@ export const STEPS: Record<Scenario, Step> = {
     from: "ota",
     async run(t, from) {
       const plain = ran(from);
-      const to = await publish(t, "u5", t.build.bundle);
+      const to = await publish(t, "u5", { compileBase: t.build.bundle });
       await checkPatch(t, plain, to, await launch(t));
       const e = await install(t);
       await checkPatch(t, e, to, await launch(t));
@@ -168,6 +170,60 @@ export const STEPS: Record<Scenario, Step> = {
       return {
         running: to,
         saw: `ran ${to.updateId}, compiled against the embedded bundle, from patches on update ${plain.updateId} and on embedded update ${e.updateId}`,
+      };
+    },
+  },
+  identities: {
+    from: "fresh",
+    async run(t) {
+      const c = await t.chained();
+      const e = await install(t);
+      await register(t);
+      const a1 = await publish(t, "a1");
+      await checkPatch(t, e, a1, await launch(t));
+      const before = readFileSync(storePath(t, NO_UPDATE_KEY));
+      const b1 = await publish(c, "b1", { addIdentity: true });
+      checkAdded(t, c, before);
+      await checkNoUpdate(t, a1, await launch(t));
+      await checkFull(c, await install(c), b1, [await launch(c), await launch(c)]);
+      const a2 = await publish(t, "a2");
+      await checkPatch(t, a1, a2, await launch(t));
+      await checkNoUpdate(c, b1, await launch(c));
+      return {
+        running: b1,
+        saw: `keyid ${t.app.identity.keyId} ran ${a1.updateId} and ${a2.updateId} across keyid ${c.app.identity.keyId} joining, whose build ran only ${b1.updateId}`,
+      };
+    },
+  },
+  "chain-patch": {
+    from: "ota",
+    async run(t, from) {
+      const c = await t.chained();
+      const to = await publish(c, "b2");
+      await checkPatch(c, ran(from), to, await launch(c));
+      return {
+        running: to,
+        saw: `ran ${to.updateId} from a patch on update ${ran(from).updateId}`,
+      };
+    },
+  },
+  "chain-rollback": {
+    from: "ota",
+    run: async (t, from) => rollBack(await t.chained(), ran(from)),
+  },
+  "leaf-rotation": {
+    from: "ota",
+    async run(t, from) {
+      const c = await t.chained();
+      const next = await c.rotate();
+      const r = { ...c, cli: tideCli(c.stack, next) };
+      await register(r); // So the update patches from the embedded bundle the rollback left running.
+      const to = await publish(r, "b3");
+      checkRotated(c, next);
+      await checkPatch(c, ran(from), to, await launch(c));
+      return {
+        running: to,
+        saw: `the same build ran ${to.updateId}, signed by a new leaf, from a patch on update ${ran(from).updateId}`,
       };
     },
   },
@@ -224,8 +280,12 @@ export async function runScenarios(
 
 /** Two launches of a fresh install each run the embedded update and accept the signed no-update reply. */
 export async function checkEmbedded(s: Served, e: Update, traces: readonly Trace[]): Promise<void> {
-  const each = { reports: [running(e), fetched(e, false)], exchanges: [manifest(e, NO_UPDATE)] };
-  await compare(s, traces, [each, each], new Map());
+  await compare(s, traces, [stays(e), stays(e)], new Map());
+}
+
+/** The client running `u` gets the signed no-update reply, whatever other identities published. */
+export async function checkNoUpdate(s: Served, u: Update, trace: Trace): Promise<void> {
+  await compare(s, [trace], [stays(u)], new Map());
 }
 
 /**
@@ -250,7 +310,7 @@ export async function checkFull(
         reports: [running(e), fetched(e, true), running(u1), fetched(u1, false)],
         exchanges: [manifest(e, update(u1)), full(e, u1, "bsdiff"), manifest(u1, NO_UPDATE)],
       },
-      { reports: [running(u1), fetched(u1, false)], exchanges: [manifest(u1, NO_UPDATE)] },
+      stays(u1),
     ],
     patchLabels(s),
   );
@@ -336,6 +396,45 @@ export async function checkRollback(
   );
 }
 
+/**
+ * Throws unless the publish of `added` converted the version-1 `reply/no-update` in `before` to one entry per keyid,
+ * the direct identity's reply kept byte for byte.
+ */
+export function checkAdded(direct: Served, added: Served, before: Uint8Array): void {
+  const was = decodeNoUpdate(before);
+  if (was.kind === "identities") {
+    throw new Error(`${NO_UPDATE_KEY} already held one entry per keyid before the publish`);
+  }
+  const now = decodeNoUpdate(readFileSync(storePath(direct, NO_UPDATE_KEY)));
+  if (now.kind !== "identities") throw new Error(`${NO_UPDATE_KEY} was not converted`);
+  const keyIds = [direct, added].map((s) => s.app.identity.keyId);
+  if (!isDeepStrictEqual([...now.entries.keys()], keyIds.toSorted())) {
+    throw new Error(
+      `${NO_UPDATE_KEY} holds ${[...now.entries.keys()].join(", ")}, not ${keyIds.join(", ")}`,
+    );
+  }
+  if (!isDeepStrictEqual(now.entries.get(direct.app.identity.keyId), was)) {
+    throw new Error(`${NO_UPDATE_KEY} changed the reply of keyid ${direct.app.identity.keyId}`);
+  }
+}
+
+/** Throws unless every reply stored for the build serves exactly `next`'s chain, not the one it first published under. */
+export function checkRotated(s: Served, next: Identity): void {
+  const chainOf = ({ chainFile = "" }: Identity) => readFileSync(chainFile);
+  const chain = chainOf(next);
+  if (chain.equals(chainOf(s.app.identity))) {
+    throw new Error("the new leaf's chain is the one already served");
+  }
+  for (const key of [NO_UPDATE_KEY, pointerKey(s)]) {
+    const { body, boundary } = storedReply(s, key) ?? {};
+    const parts = body && boundary ? parseMultipart(body, boundary) : [];
+    const served = parts.find((p) => p.name === "certificate_chain")?.body;
+    if (served === undefined || !chain.equals(served)) {
+      throw new Error(`${key} does not serve the new leaf's chain`);
+    }
+  }
+}
+
 /** Installs the build afresh and returns its embedded update. */
 export async function install(t: Target): Promise<Update> {
   await t.device.install(t.build.artifact, t.app.appId);
@@ -366,14 +465,34 @@ export function checkDeltaCompiled(
   }
 }
 
+/** Records the build as a base its updates patch from. */
+async function register({ cli, app, build }: Target): Promise<void> {
+  const { manifest, bundle, assetsDir } = build;
+  const { platform, runtimeVersion } = app;
+  await cli.registerBuild({ platform, runtimeVersion, manifest, bundle, assetsDir });
+}
+
+/** Rolls the pointer back to embedded and requires the build running `from` to return to its embedded update. */
+async function rollBack(t: Target, from: Update) {
+  const { channel, runtimeVersion, platform } = t.app;
+  await t.cli.rollbackToEmbedded({ channel, runtimeVersion, platform });
+  const e = embedded(t.build);
+  await checkRollback(t, from, e, await launch(t));
+  return { running: e, saw: `rolled back from ${from.updateId} to ${e.updateId}` };
+}
+
 /**
  * Exports the app with a new marker, delta-compiled against `compileBase` when given, publishes it to the app's
  * channel and returns the update as stored.
  */
-async function publish(t: Target, name: string, compileBase?: string): Promise<Update> {
+async function publish(
+  t: Target,
+  name: string,
+  { compileBase, addIdentity }: { compileBase?: string; addIdentity?: boolean } = {},
+): Promise<Update> {
   const marker = `${name}-${t.app.version}-${randomUUID().slice(0, 8)}`;
   const from = await exportUpdate(t.stack, t.cli, t.app, marker, undefined, compileBase);
-  const updateId = (await t.cli.publish(from, t.app.channel))[t.app.platform];
+  const updateId = (await t.cli.publish(from, t.app.channel, addIdentity))[t.app.platform];
   if (updateId === undefined) {
     throw new Error(`tide publish wrote no ${t.app.platform} pointer for ${marker}`);
   }
@@ -435,6 +554,12 @@ const manifest = (current: Update, reply: string): Exchange => ({
   status: 200,
   currentUpdateId: current.updateId,
   reply,
+});
+
+/** A launch that runs `u` and gets the signed no-update reply. */
+const stays = (u: Update): Launch => ({
+  reports: [running(u), fetched(u, false)],
+  exchanges: [manifest(u, NO_UPDATE)],
 });
 
 /** A full-bundle reply for `to` to a client running `from` that sent `aIm`. */
@@ -536,50 +661,60 @@ async function exchange(
 
 /**
  * Returns the label of a `/manifest` reply: `update <id>` or the directive's type. Throws unless the request expected
- * the run's signature and the reply is the exact bytes of the stored no-update reply or of the app's pointer, whose
- * one signed part verifies under the run's certificate. Any other body, such as one with no parts, could pass a
- * client's check with nothing to verify.
+ * the build's keyid and the reply is the exact bytes of the keyid's stored no-update reply or of the app's pointer,
+ * whose one signed part names that keyid and verifies under the build's certificate, in chain mode under the served
+ * chain's leaf. Any other body, such as one with no parts, could pass a client's check with nothing to verify.
  */
 async function verifyReply(s: Served, r: Recorded): Promise<string> {
-  const { identity } = s.stack;
-  const keyId =
-    r.expectSignature === undefined
-      ? undefined
-      : parseSfvDictionary(r.expectSignature, "expo-expect-signature").get("keyid");
-  if (keyId?.kind !== "string" || keyId.text !== identity.keyId) {
-    throw new Error(`a /manifest request did not expect the run's signature`);
+  const { keyId, certificateFile, chainFile } = s.app.identity;
+  if (expectedKeyId(r.expectSignature) !== keyId) {
+    throw new Error(
+      `a /manifest request expected ${r.expectSignature ?? "no signature"}, not keyid ${keyId}`,
+    );
   }
-  const pointer = replyKey(s.app.channel, s.app.runtimeVersion, s.app.platform);
+  const pointer = pointerKey(s);
   const { boundary, body } = r;
-  const key = [NO_UPDATE_KEY, pointer].find((k) => {
-    const stored = storedReply(s, k);
-    if (stored === undefined || body === undefined) return false;
-    return stored.boundary === boundary && Buffer.from(stored.body).equals(body);
+  const stored = [NO_UPDATE_KEY, pointer].find((k) => {
+    const reply = storedReply(s, k);
+    if (reply === undefined || body === undefined) return false;
+    return reply.boundary === boundary && Buffer.from(reply.body).equals(body);
   });
-  if (key === undefined || boundary === undefined || body === undefined) {
+  if (stored === undefined || boundary === undefined || body === undefined) {
     throw new Error(`a /manifest reply was not the bytes of ${NO_UPDATE_KEY} or ${pointer}`);
   }
   try {
-    const signed = parseMultipart(body, boundary).filter(
-      (p) => p.name === "manifest" || p.name === "directive",
-    );
+    const parts = parseMultipart(body, boundary);
+    const signed = parts.filter((p) => p.name === "manifest" || p.name === "directive");
     const [part] = signed;
     if (part?.signature === undefined || signed.length > 1) {
       throw new Error("not one signed manifest or directive");
     }
-    const cert = await certificatePublicKey(readFileSync(identity.certificateFile, "utf8"));
-    await verifyExpoSignature(part.body, part.signature, cert, identity.keyId);
+    const pem = readFileSync(certificateFile, "utf8");
+    const chain = parts.find((p) => p.name === "certificate_chain")?.body;
+    const key =
+      chainFile === undefined
+        ? await certificatePublicKey(pem)
+        : await certificateChain(chain, pem, new Date());
+    // A chained client ignores the keyid; the server does not.
+    await verifyExpoSignature(part.body, part.signature, key, keyId);
     const value = JSON.parse(utf8.decode(part.body)) as { id?: unknown; type?: unknown };
     return part.name === "manifest" ? `update ${String(value.id)}` : String(value.type);
   } catch (e) {
-    throw new Error(`got ${key}, which is not signed for the run (${String(e)})`);
+    throw new Error(`got ${stored}, which is not signed for keyid ${keyId} (${String(e)})`);
   }
 }
 
+/** The reply stored for the build at `key`, of `reply/no-update` its keyid's; undefined when absent. */
 function storedReply(s: Served, key: string): StoredReply | undefined {
   const path = storePath(s, key);
-  return existsSync(path) ? decodeStoredReply(readFileSync(path)) : undefined;
+  if (!existsSync(path)) return undefined;
+  const bytes = readFileSync(path);
+  if (key !== NO_UPDATE_KEY) return decodeStoredReply(bytes);
+  const record = decodeNoUpdate(bytes);
+  return record.kind === "identities" ? record.entries.get(s.app.identity.keyId) : record;
 }
+
+const pointerKey = ({ app }: Served) => replyKey(app.channel, app.runtimeVersion, app.platform);
 
 /** Every stored patch's key. */
 function storedPatches(s: Served): string[] {

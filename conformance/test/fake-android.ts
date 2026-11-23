@@ -1,10 +1,12 @@
 // Stands in for the SDK's adb (argv[2] "adb") and emulator (argv[2] "emulator") over a state file in argv[3], the
-// fake SDK dir. Every call is appended to calls.log; `am start` appends the lines in app.log to logcat.txt. The AVD
+// fake SDK dir. Every call is appended to calls.log; `am start` appends what the app logs to logcat.txt. The AVD
 // "Crash" exits while booting; "Fresh" drops adb's connection once, as a fresh AVD's first boot does. A device marked
 // `phone` reports no emulator properties.
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
+
+import { installApp, launchApp } from "./fake-app.ts";
 
 interface State {
   running: Record<string, { pid?: number; avd?: string; phone?: boolean }>;
@@ -96,7 +98,7 @@ if (role === "emulator") {
         : [...state.reverse, rest[0] ?? ""];
     write(state);
   } else if (command === "install") {
-    state.installed.push(readFileSync(rest[0] ?? "", "utf8").trim());
+    state.installed.push(installApp(sdk, rest[0] ?? ""));
     write(state);
   } else if (command === "uninstall") {
     state.installed = state.installed.filter((p) => p !== rest[0]);
@@ -121,7 +123,7 @@ if (role === "emulator") {
       process.stdout.write(`Error: Activity class {${rest.at(-1)}} does not exist.\n`);
     } else {
       process.stdout.write("Status: ok\n");
-      appendFileSync(file("logcat.txt"), readFileSync(file("app.log"), "utf8"));
+      await launchApp(sdk, pkg, file("logcat.txt"));
     }
   } else if (!sub.startsWith("am force-stop ")) {
     process.stderr.write(`fake adb: unknown command ${args.join(" ")}\n`);

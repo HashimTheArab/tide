@@ -3,16 +3,16 @@ import { randomUUID } from "node:crypto";
 
 import type { App, Build } from "./app.ts";
 import type { Device } from "./device.ts";
-import type { ExpoVersion, Run, Scenario } from "./options.ts";
-import type { Outcome, Target } from "./scenarios.ts";
-import type { Stack } from "./stack.ts";
+import type { ExpoVersion, Platform, Run, Scenario } from "./options.ts";
+import type { Builds, Chained, Outcome, Target } from "./scenarios.ts";
+import type { Identity, Stack } from "./stack.ts";
 import { androidDevice } from "./android.ts";
 import { buildAndroid, buildIos, exportUpdate, materialise } from "./app.ts";
 import { iosDevice } from "./ios.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
 import { STEPS, message, plan, runScenarios } from "./scenarios.ts";
 import { withStack } from "./stack.ts";
-import { tideCli } from "./tide-cli.ts";
+import { chainAuthority, tideCli } from "./tide-cli.ts";
 
 // The seed's own runtime keeps it out of every tested runtime's patch bases.
 const SEED_RUNTIME = "conformance-seed";
@@ -86,65 +86,59 @@ const ios = (run: Run): Driver => ({
 });
 
 /**
- * Builds each version's app and runs the scenarios on one device, printing one line per version and scenario;
- * returns 1 if any failed or did not run.
+ * Builds each version's app and runs the scenarios on one device, with a stack per version; prints one line per
+ * version and scenario, and returns 1 if any failed or did not run.
  */
 async function conform(run: Run, driver: Driver): Promise<number> {
   const names = plan(run.scenarios);
   const failed: string[] = [];
-  const report = (version: ExpoVersion, name: Scenario, outcome: Outcome) => {
-    const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
-    const result = outcome.pass ? "pass" : "fail";
-    out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
-    if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
-    if (!outcome.pass) failed.push(`${version} ${name}`);
-  };
-  const notRun = (versions: readonly ExpoVersion[], e: unknown) => {
-    for (const version of versions) {
-      for (const name of names)
-        report(version, name, { pass: false, why: `not run: ${message(e)}` });
-    }
-  };
-  await withStack(async (stack) => {
-    const cli = tideCli(stack);
-    let opened;
-    try {
-      opened = await driver.open(stack);
-    } catch (e) {
-      return notRun(run.versions, e);
-    }
-    const { device, about, build } = opened;
-    say(`using ${about}`);
-    let seeded = false;
-    for (const [i, version] of run.versions.entries()) {
-      let target: Target;
+  for (const version of run.versions) {
+    const report = (name: Scenario, outcome: Outcome) => {
+      const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
+      const result = outcome.pass ? "pass" : "fail";
+      out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
+      if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
+      if (!outcome.pass) failed.push(`${version} ${name}`);
+    };
+    await withStack(async (stack) => {
+      let builds: Builds;
       try {
-        const app = materialise(stack, version, run.platform);
-        say(`building the expo-updates ${version} release ${run.platform} app`);
-        const marker = `embedded-${version}-${randomUUID().slice(0, 8)}`;
-        target = { stack, device, cli, app, build: await build(app, marker) };
+        builds = await prepare(stack, version, run.platform, driver);
       } catch (e) {
-        notRun([version], e);
-        continue;
+        for (const name of names) report(name, { pass: false, why: `not run: ${message(e)}` });
+        return;
       }
-      if (!seeded) {
-        // The bucket serves no-update and the identity only once something is published.
-        try {
-          const from = await exportUpdate(stack, cli, target.app, "seed", SEED_RUNTIME);
-          await cli.publish(from, "seed");
-          seeded = true;
-        } catch (e) {
-          return notRun(run.versions.slice(i), e);
-        }
-      }
-      await runScenarios(
-        names,
-        (name, running) => STEPS[name].run(target, running),
-        (name, outcome) => report(version, name, outcome),
-      );
-    }
-  });
+      await runScenarios(names, (name, running) => STEPS[name].run(builds, running), report);
+    });
+  }
   return failed.length > 0 ? 1 : 0;
+}
+
+/** Opens the device, builds the direct app and publishes the seed, without which the bucket serves no reply. */
+async function prepare(
+  stack: Stack,
+  version: ExpoVersion,
+  platform: Platform,
+  driver: Driver,
+): Promise<Builds> {
+  const { device, about, build } = await driver.open(stack);
+  say(`using ${about}`);
+  const target = async (identity: Identity, name: string): Promise<Target> => {
+    const app = materialise(stack, version, platform, identity);
+    say(`building the expo-updates ${version} ${name} release ${platform} app`);
+    const marker = `${name}-${version}-${randomUUID().slice(0, 8)}`;
+    const cli = tideCli(stack, identity);
+    return { stack, device, cli, app, build: await build(app, marker) };
+  };
+  const direct = await target(stack.identity, "embedded");
+  const from = await exportUpdate(stack, direct.cli, direct.app, "seed", SEED_RUNTIME);
+  await direct.cli.publish(from, "seed");
+  const buildChained = async (): Promise<Chained> => {
+    const rotate = await chainAuthority(stack);
+    return { ...(await target(await rotate(), "chained")), rotate };
+  };
+  let chained: Promise<Chained> | undefined;
+  return { ...direct, chained: () => (chained ??= buildChained()) };
 }
 
 process.exitCode = await main(process.argv.slice(2));

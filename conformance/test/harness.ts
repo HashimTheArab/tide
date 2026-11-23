@@ -1,6 +1,6 @@
 // Fixtures the harness tests share: what `tide export` writes without running Expo, and fake Android and iOS tools.
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -22,11 +22,22 @@ import { onTestFinished } from "vitest";
 
 import { contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
+import type { App, Build } from "../src/app.ts";
+import type { Device } from "../src/device.ts";
 import type { Platform } from "../src/options.ts";
-import type { Stack } from "../src/stack.ts";
+import type { Builds } from "../src/scenarios.ts";
+import type { Identity, Stack } from "../src/stack.ts";
+import type { FakeBuild } from "./fake-app.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
+import { androidDevice } from "../src/android.ts";
+import { materialise } from "../src/app.ts";
+import { iosDevice } from "../src/ios.ts";
+import { chainAuthority, tideCli } from "../src/tide-cli.ts";
+import { markedBundle } from "./fake-app.ts";
 
+const FAKE_EXPO = fileURLToPath(new URL("../../packages/cli/test/fake-expo.ts", import.meta.url));
 const FAKE = fileURLToPath(new URL("fake-android.ts", import.meta.url));
+const FAKE_EXPORT = fileURLToPath(new URL("fake-export.ts", import.meta.url));
 const FAKE_IOS = fileURLToPath(new URL("fake-ios.ts", import.meta.url));
 export const FIXTURE_EXPORT = fileURLToPath(
   new URL("../../packages/cli/test/fixtures/export", import.meta.url),
@@ -43,6 +54,82 @@ export const signingMetadata = (stack: Stack) => ({
   keyid: stack.identity.keyId,
   alg: "rsa-v1_5-sha256" as const,
 });
+
+/** Installs the CLI tests' fake `expo` tools in the project at `root`; `expo export` runs `exporter` instead when given. */
+export function fakeExpo(root: string, exporter?: string) {
+  const bin = join(root, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  for (const tool of ["expo", "expo-updates"]) {
+    const instead = exporter === undefined ? "" : `[ "$1" = export ] && exec ${exporter} "$@"\n`;
+    writeFileSync(
+      join(bin, tool),
+      `#!/bin/sh\n${tool === "expo" ? instead : ""}exec '${process.execPath}' '${FAKE_EXPO}' ${tool} "$@"\n`,
+    );
+    chmodSync(join(bin, tool), 0o755);
+  }
+}
+
+/** Returns `platform`'s driver over a running fake emulator or simulator. */
+function fakeDevice(stack: Stack, platform: Platform): Promise<Device> {
+  if (platform === "android") {
+    const { sdk } = fakeSdk({ running: { "emulator-5554": {} } });
+    return androidDevice(stack, { sdk, serial: undefined, avd: undefined });
+  }
+  const { xcrun } = fakeXcrun([{ udid: "A1", name: "iPhone", state: "Booted" }]);
+  return iosDevice(stack, { xcrun, simulator: undefined });
+}
+
+/** Returns a fake device's builds of the materialised apps, whose exports run without Expo; `change` alters each build. */
+export async function fakeBuilds(
+  stack: Stack,
+  platform: Platform,
+  change: (build: FakeBuild) => FakeBuild = (build) => build,
+): Promise<Builds> {
+  const device = await fakeDevice(stack, platform);
+  const target = (identity: Identity) => {
+    const app = materialise(stack, "58", platform, identity);
+    fakeExpo(app.dir, `'${process.execPath}' '${FAKE_EXPORT}'`);
+    writeFileSync(
+      join(app.dir, "app.config.mjs"),
+      `import { readFileSync } from "node:fs";\nexport default () => JSON.parse(readFileSync("app.json", "utf8")).expo;\n`,
+    );
+    return { stack, device, cli: tideCli(stack, identity), app, build: fakeBuild(app, change) };
+  };
+  const direct = target(stack.identity);
+  await direct.cli.publish(fixtureExport(stack, "seed", undefined, platform), "seed");
+  const rotate = await chainAuthority(stack);
+  const chained = { ...target(await rotate()), rotate };
+  return { ...direct, chained: () => Promise.resolve(chained) };
+}
+
+function fakeBuild(app: App, change: (build: FakeBuild) => FakeBuild): Build {
+  const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
+    expo: FakeBuild["config"] & { plugins: string[] };
+  };
+  const id = randomUUID();
+  const marker = `embedded-${id}`;
+  const bundle = markedBundle(marker);
+  const built = change({
+    appId: app.appId,
+    platform: app.platform,
+    config: expo,
+    certificate: readFileSync(join(app.dir, expo.updates.codeSigningCertificate), "utf8"),
+    includeChain: expo.plugins.includes("./certificate-chain.js"),
+    embedded: { id, bundle: bundle.toString("base64") },
+  });
+  const file = (name: string, content: string | Uint8Array) => {
+    writeFileSync(join(app.dir, name), content);
+    return join(app.dir, name);
+  };
+  return {
+    artifact: file("build.json", JSON.stringify(built)),
+    marker,
+    embeddedUpdateId: id,
+    manifest: file("app.manifest", JSON.stringify({ id, assets: [] })),
+    bundle: file("embedded.bundle", bundle),
+    assetsDir: app.dir,
+  };
+}
 
 /**
  * Writes at `<stack>/<name>` what `tide export` writes for the CLI tests' fixture export of `platform` under the run's

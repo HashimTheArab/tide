@@ -20,6 +20,7 @@ describe("the conformance app", () => {
         expect(app).toEqual({
           version,
           platform,
+          identity: stack.identity,
           dir: join(stack.dir, `app-${version}`),
           appId: `dev.tide.conformance.sdk${version}`,
           channel: `expo-${version}`,
@@ -55,6 +56,33 @@ describe("the conformance app", () => {
         expect(readFileSync(join(app.dir, "marker.js"), "utf8")).toBe(
           'export const MARKER = "u1 \\"quoted\\"";\n',
         );
+        return Promise.resolve();
+      });
+    },
+  );
+
+  test.each(VERSIONS)(
+    "a chain-mode identity gives the %s app its own ID and runtime on the same channel, and the native opt-in",
+    async (version) => {
+      await withStack((stack) => {
+        const identity = { ...stack.identity, keyId: "chain", chainFile: "chain.pem" };
+        const direct = materialise(stack, version, "android");
+        const app = materialise(stack, version, "android", identity);
+        expect(app).toEqual({
+          ...direct,
+          identity,
+          dir: `${direct.dir}-chained`,
+          appId: `${direct.appId}.chained`,
+          runtimeVersion: `${direct.runtimeVersion}-chained`,
+        });
+        const { expo } = JSON.parse(readFileSync(join(app.dir, "app.json"), "utf8")) as {
+          expo: { plugins: string[]; updates: Record<string, unknown> };
+        };
+        expect(expo.plugins).toEqual(["./cleartext.js", "./certificate-chain.js"]);
+        expect(expo.updates).toMatchObject({
+          codeSigningMetadata: { keyid: "chain" },
+          codeSigningIncludeManifestResponseCertificateChain: true,
+        });
         return Promise.resolve();
       });
     },

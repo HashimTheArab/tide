@@ -23,11 +23,12 @@ const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS)_/i;
 type Step = () => Promise<void> | void;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** The run's code-signing identity; the files live in the run's temp dir only. */
-interface Identity {
+/** What builds embed and what their writers sign with; the files live in the stack's temp dir only. */
+export interface Identity {
   readonly keyId: string;
-  readonly keyFile: string; // PKCS#8 PEM, mode 0600
-  readonly certificateFile: string;
+  readonly keyFile: string; // The writers' PKCS#8 PEM, mode 0600; the leaf's in chain mode.
+  readonly certificateFile: string; // What the builds embed; the root in chain mode.
+  readonly chainFile: string | undefined; // The chain the writers serve, leaf first; undefined in direct mode.
 }
 
 /** One reply the local Tide sent, with the request and reply headers the scenarios assert on. */
@@ -49,7 +50,7 @@ export interface Stack {
   readonly dir: string; // Removed by `close`.
   readonly storeDir: string; // TIDE_DISK_DIR
   readonly serverUrl: string; // TIDE_SERVER_URL and TIDE_ASSET_URL: the recorder.
-  readonly identity: Identity;
+  readonly identity: Identity; // The direct identity, whose publish fills the empty bucket.
   readonly responses: readonly Recorded[]; // In the order their headers were sent.
   /**
    * Starts `command` with exactly `env` in a process group of its own. The group is killed once the child's stdout
@@ -220,7 +221,7 @@ async function writeIdentity(dir: string): Promise<Identity> {
   const certificateFile = join(dir, "certificate.pem");
   await writeFile(keyFile, pem(pkcs8, "PRIVATE KEY"), { mode: 0o600, flag: "wx" });
   await writeFile(certificateFile, cert, { flag: "wx" });
-  return { keyId: "conformance", keyFile, certificateFile };
+  return { keyId: "conformance", keyFile, certificateFile, chainFile: undefined };
 }
 
 /**
