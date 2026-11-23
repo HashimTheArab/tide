@@ -1062,7 +1062,7 @@ nothing, needs no token or account ID, and does not go with `--json`.
 | 2 | Usage or configuration; nothing was sent |
 | 3 | Unreachable: a request failed or passed its deadline |
 | 4 | The SQL API answered a status other than 200: a redirect, a token it refuses, a rate limit, or an error of its own |
-| 5 | Unparseable reply: over 1 MiB, not JSON, a missing column, or a value or count of another form |
+| 5 | Unparseable reply: over 1 MiB, not JSON, a missing column, a repeated group, or a value or count of another form |
 | 10 | The update is bad; no other Tide failure exits with it |
 
 Exit 1 is left to an uncaught error, so it always means a bug, and an outage never reads as a bad update.

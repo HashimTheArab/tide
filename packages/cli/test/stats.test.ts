@@ -409,6 +409,16 @@ describe("failures", () => {
       5,
       "the SQL API's reply counts more checks than fit a number",
     ],
+    [
+      "a repeated group",
+      reply([
+        { outcome: "running", checks: "97" },
+        { outcome: "failed", checks: "3" },
+        { outcome: "failed", checks: "3" },
+      ]),
+      5,
+      "the SQL API's reply has two rows for one outcome",
+    ],
   ])("%s has its fixed code and text", async (_, fault, code, message) => {
     const api = await fake();
     api.fault(fault);

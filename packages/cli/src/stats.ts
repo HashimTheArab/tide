@@ -386,6 +386,10 @@ function countsOf(body: Uint8Array, alias: string, values: RegExp): Counts {
     }
     return { name: name === "" ? null : name, checks };
   });
+  // A repeated group would count its checks twice.
+  if (new Set(counts.map(({ name }) => name)).size !== counts.length) {
+    throw unparseable(`has two rows for one ${alias}`);
+  }
   // No sum of a reply's rows is larger, so every count reported is exact.
   if (!Number.isSafeInteger(counts.reduce((n, row) => n + row.checks, 0))) {
     throw unparseable("counts more checks than fit a number");
