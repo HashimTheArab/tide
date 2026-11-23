@@ -10,7 +10,13 @@ export type Fault = "throw" | "reject" | "hang";
 
 /** One runtime's app with an analytics sink the test observes. */
 export interface AnalyticsHarness extends Pick<Harness, "request" | "put" | "putFault"> {
-  /** Returns the points written from now until the test ends; with `fault`, each write then fails that way. Once per test. */
+  /** Returns the points written from now until the test ends. Once per test. */
+  capture(): () => readonly ManifestPoint[] | Promise<readonly ManifestPoint[]>;
+}
+
+/** An `AnalyticsHarness` that can replace the sink. */
+export interface SinkFaultHarness extends AnalyticsHarness {
+  /** With `fault`, each write from now on fails that way. */
   capture(fault?: Fault): () => readonly ManifestPoint[];
 }
 
@@ -45,35 +51,43 @@ function expectWithinLimits(point: ManifestPoint) {
   expect(blobBytes).toBeLessThanOrEqual(16 * 1024);
 }
 
+/** Sends stock requests to `harness` and writes the pointers they read. */
+function client(harness: Pick<Harness, "request" | "put">) {
+  return {
+    /** Sends a stock iOS request for `channel`; an undefined value drops that header. */
+    get: async (channel: string, change: Record<string, string | undefined> = {}) => {
+      const all: Record<string, string | undefined> = {
+        accept: "multipart/mixed,application/expo+json,application/json",
+        "expo-protocol-version": "1",
+        "expo-platform": "ios",
+        "expo-runtime-version": RUNTIME,
+        "expo-channel-name": channel,
+        ...change,
+      };
+      const headers = Object.fromEntries(
+        Object.entries(all).filter((e): e is [string, string] => e[1] !== undefined),
+      );
+      const res = await harness.request("/manifest", headers);
+      return { res, body: new Uint8Array(await res.arrayBuffer()) };
+    },
+    pointer: (channel: string, record: Uint8Array<ArrayBuffer>, platform = "ios") =>
+      harness.put(replyKey(channel, RUNTIME, platform), record),
+  };
+}
+
 /** Registers the `/manifest` analytics tests every runtime must pass. */
 export function analyticsCases(harness: AnalyticsHarness): void {
   const MANIFEST = fixture("manifest.reply.json");
   const ROLLBACK = fixture("rollback.reply.json");
+  const { get, pointer } = client(harness);
 
-  /** Sends a stock iOS request for `channel`; an undefined value drops that header. */
-  const get = async (channel: string, change: Record<string, string | undefined> = {}) => {
-    const all: Record<string, string | undefined> = {
-      accept: "multipart/mixed,application/expo+json,application/json",
-      "expo-protocol-version": "1",
-      "expo-platform": "ios",
-      "expo-runtime-version": RUNTIME,
-      "expo-channel-name": channel,
-      ...change,
-    };
-    const headers = Object.fromEntries(
-      Object.entries(all).filter((e): e is [string, string] => e[1] !== undefined),
-    );
-    const res = await harness.request("/manifest", headers);
-    return { res, body: new Uint8Array(await res.arrayBuffer()) };
-  };
-  const pointer = (channel: string, record: Uint8Array<ArrayBuffer>, platform = "ios") =>
-    harness.put(replyKey(channel, RUNTIME, platform), record);
   /** Returns the one point `send` records. */
   const onePoint = async (send: () => Promise<unknown>) => {
     const points = harness.capture();
     await send();
-    expect(points()).toHaveLength(1);
-    const [point] = points();
+    const written = await points();
+    expect(written).toHaveLength(1);
+    const [point] = written;
     if (point === undefined) throw new Error("no point");
     expectWithinLimits(point);
     return point;
@@ -150,7 +164,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     await pointer("an-rejected", MANIFEST);
     const points = harness.capture();
     expect((await get("an-rejected", change)).res.status).toBe(status);
-    expect(points()).toEqual([]);
+    expect(await points()).toEqual([]);
   });
 
   const many = Array.from({ length: 200 }, (_, i) => `"${ID(i + 1)}"`).join(", ");
@@ -264,7 +278,7 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     const points = harness.capture();
     const { res } = await get("an-v3-refused", { "expo-expect-signature": value });
     expect(res.status).toBe(status);
-    expect(points()).toEqual([]);
+    expect(await points()).toEqual([]);
   });
 
   test("a version-3 record at a pointer key records a 503", async () => {
@@ -306,6 +320,16 @@ export function analyticsCases(harness: AnalyticsHarness): void {
     );
     expect(point.doubles).toEqual([1]);
     expect(point.blobs.join("")).not.toContain("Error");
+  });
+}
+
+/** Registers the tests that a failing sink changes no reply, for a runtime whose sink the test can replace. */
+export function sinkFaultCases(harness: SinkFaultHarness): void {
+  const MANIFEST = fixture("manifest.reply.json");
+  const { get, pointer } = client(harness);
+
+  beforeEach(async () => {
+    await harness.put(NO_UPDATE_KEY, fixture("no-update.reply.json"));
   });
 
   /** A reply as bytes: status, every header but `date`, which marks when it was sent, and the body. */

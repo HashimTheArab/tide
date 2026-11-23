@@ -34,7 +34,8 @@ TIDE_DISK_DIR=/srv/tide-bucket node node_modules/@tide-ota/server/dist/node.js
 
 Use `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID` and `TIDE_S3_SECRET_ACCESS_KEY`
 (read-only keys) instead of `TIDE_DISK_DIR` for an S3-compatible bucket. `PORT` defaults to 8787 and `GET /hc` is the
-health check. The repository also has a [Dockerfile](https://github.com/HashimTheArab/tide/blob/main/packages/server/Dockerfile).
+health check. It records nothing unless `TIDE_ANALYTICS=stdout`, which writes one JSON line per update check on stdout
+([fields](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#observability)). The repository also has a [Dockerfile](https://github.com/HashimTheArab/tide/blob/main/packages/server/Dockerfile).
 
 ## Your app
 

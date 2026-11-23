@@ -1,16 +1,22 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
+import type { Readable } from "node:stream";
 import { onTestFinished } from "vitest";
 
 const ENTRY = fileURLToPath(new URL("../../src/node.ts", import.meta.url));
 
-/** Runs the Node entry with only `env` and PORT=0; the process is killed when the test finishes. */
-export function runEntry(env: Record<string, string>): {
+/** Runs the Node entry with only `env` and PORT=0; `onDone`, by default the test's end, kills the process. */
+export function runEntry(
+  env: Record<string, string>,
+  onDone: (kill: () => void) => unknown = onTestFinished,
+): {
   /** Resolves the listening port, or rejects with stderr if the process exits first. */
   listening: Promise<number>;
   /** Resolves the first match of `pattern` in stdout, or rejects if the process exits first. */
   printed: (pattern: RegExp) => Promise<RegExpExecArray>;
+  /** The reader of the process's stdout, to pause or close. */
+  stdout: Readable;
   kill: (signal: NodeJS.Signals) => void;
   exited: Promise<{
     code: number | null;
@@ -23,7 +29,7 @@ export function runEntry(env: Record<string, string>): {
     env: { ...env, PORT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  onTestFinished(() => {
+  onDone(() => {
     child.kill("SIGKILL");
   });
   let stdout = "";
@@ -54,5 +60,11 @@ export function runEntry(env: Record<string, string>): {
     });
   const listening = printed(/tide listening on port (\d+)\n/).then(([, port]) => Number(port));
   void listening.catch(() => undefined); // A test that expects an exit never awaits it.
-  return { listening, printed, kill: (signal) => child.kill(signal), exited };
+  return {
+    listening,
+    printed,
+    stdout: child.stdout,
+    kill: (signal) => child.kill(signal),
+    exited,
+  };
 }

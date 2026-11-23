@@ -2,8 +2,9 @@ import { SELF, env } from "cloudflare:test";
 import { describe, expect, onTestFinished, vi } from "vitest";
 
 import type { ManifestPoint } from "../../src/core/analytics.ts";
+import type { SinkFaultHarness } from "../shared/analytics-cases.ts";
 import type { Harness } from "../shared/server-cases.ts";
-import { analyticsCases, faultySink } from "../shared/analytics-cases.ts";
+import { analyticsCases, faultySink, sinkFaultCases } from "../shared/analytics-cases.ts";
 import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
 
 const harness: Harness = {
@@ -33,7 +34,7 @@ describe("/bundles patch negotiation", () => {
   bundleCases(harness);
 });
 describe("/manifest analytics through the local Analytics Engine binding", () => {
-  analyticsCases({
+  const analytics: SinkFaultHarness = {
     ...harness,
     capture(fault) {
       // The entry reads the same binding object, so the spy sees its writes and still calls the binding.
@@ -44,5 +45,7 @@ describe("/manifest analytics through the local Analytics Engine binding", () =>
       if (fault !== undefined) spy.mockImplementation(faultySink(fault));
       return () => spy.mock.calls.map(([point]) => point as ManifestPoint);
     },
-  });
+  };
+  analyticsCases(analytics);
+  sinkFaultCases(analytics);
 });
