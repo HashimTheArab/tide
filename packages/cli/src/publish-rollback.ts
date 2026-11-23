@@ -22,7 +22,7 @@ import {
   readTargets,
   recordedKeys,
   storedContent,
-  writeOutput,
+  writeStep,
 } from "./publish.ts";
 
 export const ROLLBACK_USAGE = `usage: tide rollback --embedded --channel <name> --runtime-version <version> [--platform ios|android]...
@@ -123,10 +123,9 @@ async function run(
   const { out, now = Date.now } = options;
   return await execute(options, async () => {
     const { json, prepare } = parse();
-    const output = writeOutput(json, out);
-    const writer = await openWriter(env, { now, watch: output.watch });
+    const writer = await openWriter(env, { now });
     const ready = await prepare(writer, now);
-    return output.step(() => commit(ready, output.done));
+    return writeStep(json, out, (done) => commit(ready, done));
   });
 }
 

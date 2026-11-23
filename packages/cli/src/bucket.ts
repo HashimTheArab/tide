@@ -7,7 +7,7 @@ interface BucketObject {
 
 /** A listed name, a store key or a stored name outside the key grammar, and its stored bytes. */
 export type ListEntry = ({ readonly key: string } | { readonly unknown: string }) & {
-  readonly size: number | bigint; // A bigint only past 2^53 - 1; 0 on disk for anything but a regular file.
+  readonly size: number; // 0 on disk for anything but a regular file.
 };
 
 /**

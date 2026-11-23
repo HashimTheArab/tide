@@ -43,30 +43,6 @@ export interface NoUpdateRecord {
   readonly entries: ReadonlyMap<string, Entry>;
 }
 
-/** A stored reply as reported; its fields are null when it has none, as a directive has no update ID. */
-interface ReportedSide {
-  readonly kind: StoredReply["kind"];
-  readonly updateId: string | null;
-  readonly time: string | null;
-  readonly keyid: string;
-}
-
-/** A readable pointer as reported: a reply's own fields, or a rollout's percentage and sides. */
-type ReportedPointer = {
-  readonly key: string;
-  readonly channel: string | undefined;
-  readonly runtimeVersion: string | undefined;
-  readonly platform: string | undefined;
-} & (
-  | ReportedSide
-  | {
-      readonly kind: "rollout";
-      readonly percent: number;
-      readonly new: ReportedSide;
-      readonly earlier: ReportedSide | null;
-    }
-);
-
 /**
  * Prints one line per pointer under `reply/` and whether `reply/no-update` exists, per keyid when it is version 3,
  * reading each record's signed parts as stored, or with `json` one document of them. Returns 1 when any listed record
@@ -78,7 +54,7 @@ export async function status(
   err: (line: string) => void,
   json = false,
 ): Promise<0 | 1> {
-  const reported: ReportedPointer[] = [];
+  const reported: ReturnType<typeof pointerOf>[] = [];
   const unreadable: { readonly key: string | null; readonly reason: string }[] = [];
   let noUpdate: NoUpdateRecord | "missing" | "unreadable" = "missing";
   for (const entry of await bucket.list("reply/")) {
@@ -133,29 +109,31 @@ export async function status(
   return unreadable.length > 0 ? 1 : 0;
 }
 
-/** What `status` reports of the pointer `entry` at `key`. */
-function pointerOf(key: string, { reply, sides: [first, earlier] }: Entry): ReportedPointer {
-  const side = (s: Side): ReportedSide => ({
-    kind: s.kind,
-    updateId: s.updateId ?? null,
-    time: s.time ?? null,
-    keyid: s.keyId,
-  });
+/** A stored reply as reported; its fields are null when it has none, as a directive has no update ID. */
+const sideOf = (s: Side) => ({
+  kind: s.kind,
+  updateId: s.updateId ?? null,
+  time: s.time ?? null,
+  keyid: s.keyId,
+});
+
+/** What `status` reports of the pointer `entry` at `key`: a reply's own fields, or a rollout's percentage and sides. */
+function pointerOf(key: string, { reply, sides: [first, earlier] }: Entry) {
   const [, channel, runtimeVersion, platform] = key.split("/");
   const named = { key, channel, runtimeVersion, platform };
-  if (reply.kind !== "rollout") return { ...named, ...side(first) };
+  if (reply.kind !== "rollout") return { ...named, ...sideOf(first) };
   return {
     ...named,
-    kind: "rollout",
+    kind: "rollout" as const,
     percent: reply.percent,
-    new: side(first),
-    earlier: earlier === undefined ? null : side(earlier),
+    new: sideOf(first),
+    earlier: earlier === undefined ? null : sideOf(earlier),
   };
 }
 
 /** A pointer's status line: its key's columns, then `<kind> <updateId|-> <time>` or a rollout's percentage and sides. */
-function row(p: ReportedPointer): string {
-  const side = (s: ReportedSide) => `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
+function row(p: ReturnType<typeof pointerOf>): string {
+  const side = (s: ReturnType<typeof sideOf>) => `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
   const columns =
     p.kind === "rollout"
       ? `rollout ${p.percent} new ${p.new.updateId} ${p.new.time} earlier ${p.earlier === null ? "none" : side(p.earlier)}`

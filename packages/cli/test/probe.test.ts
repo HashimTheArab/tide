@@ -8,17 +8,15 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
-import type { NoUpdateReply, Rollout } from "@tide-ota/protocol";
+import type { NoUpdateReply } from "@tide-ota/protocol";
 import {
   MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
-  buildManifest,
   cryptoKeySigner,
   decodePointer,
   diskPath,
   encodeIdentityNoUpdate,
   encodeMultipart,
-  encodeRollout,
   encodeStoredReply,
   expoSignature,
 } from "@tide-ota/protocol";
@@ -462,8 +460,8 @@ describe.each([
     });
   });
 
+  // `mismatch` and `status` are with the rollout probe below.
   test.each<[keyof typeof PROBE_EXIT, () => Promise<string[]> | string[], string?]>([
-    ["status", () => args(store.published().base, "main", ["--app-id", "another-app"])],
     [
       "unparseable",
       () => {
@@ -488,15 +486,6 @@ describe.each([
         store.put(store.published().bundleKey, utf8("tampered bundle"));
         return args(store.published().base);
       },
-    ],
-    [
-      "mismatch",
-      async () =>
-        args(
-          await proxy(store.published().base, {
-            reply: (h) => h.set("expo-manifest-filters", 'channel="beta"'),
-          }),
-        ),
     ],
     [
       "unreachable",
@@ -623,44 +612,6 @@ describe.each([
       code: PROBE_EXIT.status,
       stdout: report({ failure: "status", rolloutSide: "new" }),
     });
-  });
-
-  test("a completed update that is now a later rollout's earlier side passes when it is the one served", async () => {
-    const { hash, launchUrl } = store.published();
-    const manifest = async (id: string): Promise<Rollout["new"]> => {
-      const body = buildManifest({
-        id,
-        createdAt: new Date("2030-01-01T00:00:00Z"),
-        runtimeVersion: "1.0.0",
-        launchAsset: {
-          hash,
-          contentType: "application/javascript",
-          fileExtension: ".bundle",
-          url: launchUrl,
-        },
-        assets: [],
-        metadata: {},
-        extra: {},
-      });
-      const signature = await expoSignature(body, cryptoKeySigner(main.keys.privateKey, "main"));
-      const multipart = encodeMultipart([{ name: "manifest", body, signature }]);
-      return { kind: "manifest", updateId: id, manifestFilters: "", ...multipart };
-    };
-    const [was, later] = [
-      "1a2b3c4d-0000-4000-8000-00000000000a",
-      "1a2b3c4d-0000-4000-8000-00000000000b",
-    ];
-    const record: Rollout = {
-      kind: "rollout",
-      percent: 0.01,
-      new: await manifest(later),
-      earlier: await manifest(was),
-    };
-    store.put(iosKey("later"), encodeRollout(record));
-    expect(await probing("later", was)).toEqual(passing(was));
-    expect(await probing("later", later)).toEqual(passing(later));
-    store.put(iosKey("later"), encodeRollout({ ...record, percent: 100 }));
-    expect(await probing("later", was)).toEqual(MISMATCH);
   });
 
   test("the client ID sent is in bucket 0 of the update's rollout, the same each run, and only with the flags", async () => {
@@ -852,7 +803,7 @@ describe("tide probe configuration", () => {
   });
 
   const ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
-  const TOGETHER = "--rollout-side and --rollout-update go together, each given once";
+  const TOGETHER = "--rollout-side and --rollout-update go together";
   test.each<[string, string[], string]>([
     ["no --rollout-update", ["--rollout-side", "new"], TOGETHER],
     ["no --rollout-side", ["--rollout-update", ID], TOGETHER],
@@ -864,8 +815,6 @@ describe("tide probe configuration", () => {
     ["an uppercase ID", asking(ID.toUpperCase()), "--rollout-update must be a lowercase UUID"],
     ["an ID that is not a UUID", asking("latest"), "--rollout-update must be a lowercase UUID"],
     ["an empty ID", asking(""), "--rollout-update must be a lowercase UUID"],
-    ["a repeated ID", [...asking("latest"), "--rollout-update", ID], TOGETHER],
-    ["a repeated side", [...asking(ID), "--rollout-side", "new"], TOGETHER],
   ])("the rollout probe with %s is a usage error before any request", async (_, extra, message) => {
     const result = await tide([...at(), ...extra]);
     expect(result).toEqual(failure(PROBE_EXIT.usage, message));

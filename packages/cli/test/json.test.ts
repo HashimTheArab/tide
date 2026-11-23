@@ -1,17 +1,8 @@
 // `--json` through the bin. A document is asserted as exact stdout bytes, which pin every field, their order and the
 // one trailing newline; each expectation is ASCII, so its `JSON.stringify` is the document.
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  truncateSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import type { Rollout } from "@tide-ota/protocol";
 import {
@@ -19,30 +10,19 @@ import {
   contentKey,
   decodePointer,
   decodeStoredReply,
-  diskPath,
   encodeRollout,
   sha256Base64Url,
 } from "@tide-ota/protocol";
 
 import type { Objects, Store } from "./publish-fixture.ts";
-import { decodeRecord, encodeRecord, recordKey } from "../src/publish-record.ts";
+import { decodeRecord, recordKey } from "../src/publish-record.ts";
 import { rollback } from "../src/publish-rollback.ts";
 import { bucketFromEnv } from "../src/storage.ts";
-import {
-  chainEnv,
-  chainExport,
-  generate,
-  leaf,
-  root as issueRoot,
-  served,
-} from "./chain-fixture.ts";
 import { fixture, rejection, run, tempRoot, utf8 } from "./helpers.ts";
 import {
   ANDROID,
-  ASSET_URL,
   IOS,
   MAIN,
-  SERVER_URL,
   STORES,
   T,
   artifact,
@@ -294,29 +274,6 @@ test("a storage total past 2^53 is exact", async () => {
   );
 });
 
-test("a disk file past 2^53 bytes is exact in the document and rounded as before in text", async () => {
-  // ext4 refuses a sparse file this long; tmpfs and APFS do not.
-  const root = existsSync("/dev/shm") ? tempRoot("/dev/shm") : tempRoot();
-  const { key } = await content("assets", "huge");
-  const path = join(root, diskPath(key));
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, "");
-  truncateSync(path, Number.MAX_SAFE_INTEGER);
-  appendFileSync(path, "xx");
-  const size = "9007199254740993"; // 2^53 + 1, which a double cannot hold.
-  expect(await reader("storage", { TIDE_DISK_DIR: root })).toBe(
-    document({
-      schema: 1,
-      unreferenced: [{ name: key, isKey: true, size }],
-      count: 1,
-      totalBytes: size,
-    }),
-  );
-  expect((await tide(["storage"], { TIDE_DISK_DIR: root })).stdout).toBe(
-    `${key} 9007199254740992\n1 unreferenced objects, 9007199254740992 bytes\n`,
-  );
-});
-
 test("a failed storage scan exits 1 with nothing on stdout", async () => {
   const key = recordKey(UPDATE_ID);
   s3.objects.set(key, utf8("{}"));
@@ -517,158 +474,30 @@ describe("a write that fails after writes began", () => {
   });
 });
 
-describe("a clock failure around the first write", () => {
-  const LATER = T + 2 * 3_600_000;
-
-  /** Publishes in chain mode at T, then returns a rollback whose renewed chain must replace `reply/no-update` first. */
-  async function renewing() {
-    s3.setNow(T);
-    const root = await issueRoot(await generate());
-    const first = await leaf(root, "Tide root", "Tide leaf 1");
-    const second = await leaf(root, "Tide root", "Tide leaf 2", {
-      notAfter: new Date(T + 3_600_000),
-    });
-    const dir = artifact({ fields: chainExport(root.certificate) });
-    const writer = chainEnv(s3Env(), root.certificate, served(first), first);
-    const at = () => T;
-    expect(await cmd("publish", ["--channel", "main", "--from", dir], writer, at)).toMatchObject({
-      code: 0,
-    });
-    s3.puts.length = 0;
-    const renewed = chainEnv(s3Env(), root.certificate, served(second), second);
-    const out: string[] = [];
-    const err: string[] = [];
-    const roll = (now: () => number) =>
-      rollback(["--embedded", ...TARGET, "--json"], renewed, {
-        out: (l) => out.push(l),
-        err: (l) => err.push(l),
-        now,
-      });
-    return { out, err, roll };
-  }
-  /** A clock at T whose call `n`, and any later one, is `late`'s. */
-  const clock = (n: number, late: () => number) => {
-    const state = { calls: 0, now: () => (++state.calls < n ? T : late()) };
-    return state;
+test("an uncaught error after the first pointer prints it as incomplete, and still rejects", async () => {
+  s3.setNow(T);
+  expect(
+    await cmd("publish", ["--channel", "main", "--from", artifact()], env(s3Env()), () => T),
+  ).toMatchObject({ code: 0 });
+  s3.puts.length = 0;
+  const out: string[] = [];
+  const err: string[] = [];
+  const now = () => {
+    if (s3.puts.includes(IOS)) throw new Error("clock");
+    return T;
   };
-  // Opening the writer, reading the pointers and the plan's check are the first three; the fourth is commit's own
-  // check before reply/no-update, with nothing written yet.
-  const RECHECK = 4;
-
-  test("a chain that expires at the check before the first write exits 1 and prints nothing", async () => {
-    const { out, err, roll } = await renewing();
-    const at = clock(RECHECK, () => LATER);
-    expect(await roll(at.now)).toBe(1);
-    expect({ out, err, calls: at.calls, puts: s3.puts }).toEqual({
-      out: [],
-      err: ["tide: TIDE_CERTIFICATE_CHAIN: certificate_chain leaf has expired"],
-      calls: RECHECK,
-      puts: [],
-    });
+  const rolling = rollback(["--embedded", ...TARGET, "--json"], writerEnv(STORES.s3()), {
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+    now,
   });
-
-  test("an uncaught error there prints nothing", async () => {
-    const { out, err, roll } = await renewing();
-    const at = clock(RECHECK, () => {
-      throw new Error("clock");
-    });
-    expect((await rejection(roll(at.now))).message).toBe("clock");
-    expect({ out, err, calls: at.calls, puts: s3.puts }).toEqual({
-      out: [],
-      err: [],
-      calls: RECHECK,
-      puts: [],
-    });
+  expect((await rejection(rolling)).message).toBe("clock");
+  const time = new Date(T + 1).toISOString();
+  expect({ out, err }).toEqual({
+    out: [written(false, [{ key: IOS, updateId: null, time }]).trimEnd()],
+    err: [],
   });
-
-  test("an uncaught error after the first pointer prints it as incomplete, and still rejects", async () => {
-    const { out, err, roll } = await renewing();
-    const now = () => {
-      if (s3.puts.includes(IOS)) throw new Error("clock");
-      return T;
-    };
-    expect((await rejection(roll(now))).message).toBe("clock");
-    const time = new Date(T + 1).toISOString();
-    expect({ out, err }).toEqual({
-      out: [written(false, [{ key: IOS, updateId: null, time }]).trimEnd()],
-      err: [],
-    });
-    expect(s3.puts).not.toContain(ANDROID);
-  });
-});
-
-test("a crash after a long document still writes the whole document and prints the error as before", async () => {
-  const root = tempRoot();
-  const store: Store = { env: { TIDE_DISK_DIR: root }, objects: () => new Map() };
-  const bucket = bucketFromEnv(store.env);
-  const launch = await content("bundles", "launch");
-  await bucket.put(launch.key, launch.bytes);
-  // Each update republishes onto its own pointer; 400 of them make a document over 64 KiB, what a pipe holds.
-  const updates = Array.from({ length: 400 }, (_, i) => ({
-    updateId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
-    channel: `${i}`.padStart(64, "c"),
-    runtimeVersion: "r".repeat(64),
-  }));
-  mkdirSync(join(root, "updates"));
-  for (const u of updates) {
-    const record = encodeRecord({
-      ...u,
-      platform: "ios",
-      createdAt: CREATED_AT,
-      serverUrl: SERVER_URL,
-      assetUrl: ASSET_URL,
-      launchAsset: { hash: await sha256Base64Url(launch.bytes) },
-      assets: [],
-      extra: {},
-    });
-    writeFileSync(join(root, diskPath(recordKey(u.updateId))), record);
-  }
-  const keyOf = (u: (typeof updates)[number]) => `reply/${u.channel}/${u.runtimeVersion}/ios`;
-  const acknowledged = updates.slice(0, -1).map(keyOf);
-  const last = join(root, diskPath(acknowledged.at(-1)!));
-
-  // The clock is read before each pointer write; it throws once the last pointer but one is stored.
-  const preload = join(root, "preload.mjs");
-  writeFileSync(
-    preload,
-    `import { existsSync } from "node:fs";
-const now = Date.now;
-Date.now = () => {
-  if (existsSync(${JSON.stringify(last)})) throw new Error("clock");
-  return now();
-};
-`,
-  );
-  // A real pipe, not the larger socket Node gives a child, read a byte at a time at first, so it cannot drain during
-  // the one write a crash would keep.
-  const codeFile = join(root, "code");
-  const proc = spawn(
-    "/bin/sh",
-    [
-      ...["-c", '{ "$@"; echo $? > "$CODE"; } | { dd bs=1 count=20000 2>/dev/null; cat; }', "sh"],
-      ...[process.execPath, "--import", preload, MAIN, "republish", "--json"],
-      ...updates.map((u) => u.updateId),
-    ],
-    { env: { ...writerEnv(store), CODE: codeFile }, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  onTestFinished(() => {
-    proc.kill("SIGKILL");
-  });
-  let stdout = "";
-  let stderr = "";
-  proc.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
-  proc.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
-  await once(proc, "close");
-  expect(readFileSync(codeFile, "utf8")).toBe("1\n");
-  expect(stderr).toContain("Error: clock\n    at Date.now");
-  expect(stdout.length).toBeGreaterThan(80 * 1024);
-  expect(stdout.endsWith("\n")).toBe(true);
-  const { complete, pointers } = JSON.parse(stdout) as {
-    complete: boolean;
-    pointers: { key: string }[];
-  };
-  expect(complete).toBe(false);
-  expect(pointers.map((p) => p.key)).toEqual(acknowledged);
+  expect(s3.puts).not.toContain(ANDROID);
 });
 
 // Literal text, not the constants, so a refusal's text cannot change with them.

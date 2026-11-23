@@ -36,9 +36,9 @@ export async function storage(
     err(`tide: ${e.message}`);
     return 1;
   }
+  const total = unreferenced.reduce((n, e) => n + BigInt(e.size), 0n);
   if (json) {
     // Decimal strings: a JSON number past 2^53 is not exact in most readers.
-    const total = unreferenced.reduce((n, e) => n + BigInt(e.size), 0n);
     const objects = unreferenced.map((e) => ({
       name: "key" in e ? e.key : e.unknown,
       isKey: "key" in e,
@@ -54,11 +54,8 @@ export async function storage(
     );
     return 0;
   }
-  let total = 0n;
   for (const e of unreferenced) {
-    const size = Number(e.size);
-    out(`${"key" in e ? e.key : jsonDocument(e.unknown)} ${size}`);
-    total += BigInt(size);
+    out(`${"key" in e ? e.key : jsonDocument(e.unknown)} ${e.size}`);
   }
   out(`${unreferenced.length} unreferenced objects, ${total} bytes`);
   return 0;

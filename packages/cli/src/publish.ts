@@ -18,7 +18,7 @@ import {
   replyKey,
 } from "@tide-ota/protocol";
 
-import type { Bucket, ListEntry } from "./bucket.ts";
+import type { Bucket } from "./bucket.ts";
 import type { Env, StoredNoUpdate, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
@@ -94,14 +94,8 @@ export interface Plan {
 /** A write command's writes, returned once every refusal has been made; every failure in it follows a write. */
 export type WriteStep = () => Promise<void>;
 
-/** A write command's stdout. */
-export interface WriteOutput {
-  /** Returns `bucket` with every mutation noted before it is sent; a failed run prints a document only after one. */
-  readonly watch: (bucket: Bucket) => Bucket;
-  /** Reports a target once its pointer write was acknowledged, or it needed none. */
-  readonly done: (pointer: PointerWrite) => void;
-  readonly step: (write: WriteStep) => WriteStep;
-}
+/** Reports a target once its pointer write was acknowledged, or it needed none. */
+type Done = (pointer: PointerWrite) => void;
 
 /** Asset keys, lowercased because iOS stores asset files on a case-insensitive disk, to the one SHA-256 each names. */
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
@@ -121,53 +115,39 @@ export async function publish(
   options: PublishOptions,
 ): Promise<0 | 1 | 2> {
   return await execute(options, async () => {
-    const { output, ready, exported, stored, patches } = await prepare(args, env, options);
-    return output.step(async () => {
+    const { json, ready, exported, stored, patches } = await prepare(args, env, options);
+    return writeStep(json, options.out, async (done) => {
       await uploadObjects(ready.writer.bucket, exported, stored);
       await uploadPatches(ready.writer.bucket, patches);
-      await commit(ready, output.done);
+      await commit(ready, done);
     });
   });
 }
 
 /**
- * Returns a write command's stdout: a line per target as it is done, or with `json` one document listing only the
- * pointer writes this run had acknowledged. A failure, a crash included, prints it as incomplete once a write was sent.
+ * Returns `write` with its stdout: a line per target as it is done, or with `json` one document listing only the
+ * pointer writes this run had acknowledged, printed as incomplete when `write` fails or crashes.
  */
-export function writeOutput(json: boolean, out: (line: string) => void): WriteOutput {
-  let attempted = false;
-  const written: ({ readonly key: string } & PointerReport)[] = [];
-  const noted = <T>(mutate: () => Promise<T>) => {
-    attempted = true;
-    return mutate();
-  };
-  return {
-    // Every method by name, so a new one must say here whether it mutates.
-    watch: (bucket) => ({
-      get: (key, maxBytes) => bucket.get(key, maxBytes),
-      list: (prefix) => bucket.list(prefix),
-      time: () => bucket.time(),
-      put: (key, bytes) => noted(() => bucket.put(key, bytes)),
-      putIfAbsent: (key, bytes, type) => noted(() => bucket.putIfAbsent(key, bytes, type)),
-      putIfMatch: (key, bytes, etag) => noted(() => bucket.putIfMatch(key, bytes, etag)),
-      delete: (key) => noted(() => bucket.delete(key)),
-    }),
-    done({ key, reply, report }) {
-      if (!json) {
-        out(`${key} ${report.updateId ?? "-"} ${"time" in report ? report.time : report.percent}`);
-      } else if (reply !== undefined) written.push({ key, ...report });
-    },
-    step: (write) => async () => {
-      let complete = false;
-      try {
-        await write();
-        complete = true;
-      } finally {
-        if (json && (complete || attempted)) {
-          out(jsonDocument({ schema: SCHEMA, complete, pointers: written }));
-        }
-      }
-    },
+export function writeStep(
+  json: boolean,
+  out: (line: string) => void,
+  write: (done: Done) => Promise<void>,
+): WriteStep {
+  return async () => {
+    const written: ({ readonly key: string } & PointerReport)[] = [];
+    let complete = false;
+    try {
+      await write(({ key, reply, report }) => {
+        if (!json) {
+          out(
+            `${key} ${report.updateId ?? "-"} ${"time" in report ? report.time : report.percent}`,
+          );
+        } else if (reply !== undefined) written.push({ key, ...report });
+      });
+      complete = true;
+    } finally {
+      if (json) out(jsonDocument({ schema: SCHEMA, complete, pointers: written }));
+    }
   };
 }
 
@@ -209,20 +189,14 @@ export function report<Code extends 1 | 2>(e: unknown, { err }: PublishOptions, 
 async function prepare(
   args: readonly string[],
   env: Env,
-  { out, now = Date.now, cwd = process.cwd() }: PublishOptions,
+  { now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
   const { channel, from, percent, addIdentity, json } = parse(args, cwd);
-  const output = writeOutput(json, out);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
 
   const artifact = await readProjectExport(from);
-  const writer = await openWriter(env, {
-    now,
-    app: artifact,
-    addIdentity,
-    watch: output.watch,
-  });
+  const writer = await openWriter(env, { now, app: artifact, addIdentity });
   const exported = artifact.platforms.map((p) => ({
     ...p,
     key: replyKey(channel, p.runtime, p.platform),
@@ -271,7 +245,7 @@ async function prepare(
   // Before the plan, so its fresh certificate check also covers the time spent diffing.
   const patches = await preparePatches(writer.bucket, exported, bases, stored);
   return {
-    output,
+    json,
     ready: await plan(writer, checkCertificate, records, writes),
     exported,
     stored,
@@ -372,7 +346,7 @@ function noUpdateRecord(
  */
 export async function commit(
   { writer, noUpdate, records, pointers, checkCertificate }: Plan,
-  done: WriteOutput["done"],
+  done: Done,
 ): Promise<void> {
   const { bucket } = writer;
   let attempted = false;
@@ -631,7 +605,7 @@ async function ensureNoUpdate(
 async function uploadObjects(
   bucket: Bucket,
   exported: readonly ExportedPlatform[],
-  stored: ReadonlyMap<string, ListEntry["size"]>,
+  stored: ReadonlyMap<string, number>,
 ): Promise<void> {
   const existing = new Set(stored.keys());
   const upload = async (key: string, bytes: Uint8Array<ArrayBuffer>, contentType: string) => {
@@ -648,7 +622,7 @@ async function uploadObjects(
 }
 
 /** Returns every stored bundle and asset key, objects the server can serve, with its size. */
-export async function storedContent(bucket: Bucket): Promise<Map<string, ListEntry["size"]>> {
+export async function storedContent(bucket: Bucket): Promise<Map<string, number>> {
   const entries = [...(await bucket.list("assets/")), ...(await bucket.list("bundles/"))];
   return new Map(entries.flatMap((e) => ("key" in e ? [[e.key, e.size] as const] : [])));
 }

@@ -109,14 +109,14 @@ function report(
   failure: keyof typeof PROBE_EXIT | null,
   checked?: Checked,
 ): string {
-  const manifest = checked !== undefined && "updateId" in checked ? checked : undefined;
   return jsonDocument({
     schema: SCHEMA,
     failure,
     rolloutSide: rolloutUpdate === undefined ? null : "new",
-    directive: checked !== undefined && "directive" in checked ? checked.directive : null,
-    updateId: manifest?.updateId ?? null,
-    launchAssetHash: manifest?.launchAssetHash ?? null,
+    directive: null,
+    updateId: null,
+    launchAssetHash: null,
+    ...checked,
   });
 }
 
@@ -141,9 +141,8 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
         "runtime-version": { type: "string" },
         platform: { type: "string" },
         "app-id": { type: "string" },
-        // Repeatable to the parser, so a repeat is refused rather than its first value dropped.
-        "rollout-side": { type: "string", multiple: true },
-        "rollout-update": { type: "string", multiple: true },
+        "rollout-side": { type: "string" },
+        "rollout-update": { type: "string" },
         json: { type: "boolean" },
       },
       strict: true,
@@ -178,17 +177,14 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw usage("--app-id must be printable ASCII without edge whitespace");
   }
-  const sides = values["rollout-side"] ?? [];
-  const updates = values["rollout-update"] ?? [];
-  const [rolloutUpdate] = updates;
-  if (sides.length > 0 || updates.length > 0) {
-    if (sides.length !== 1 || updates.length !== 1) {
-      throw usage("--rollout-side and --rollout-update go together, each given once");
-    }
-    if (sides[0] !== "new") throw usage("--rollout-side must be new");
-    if (rolloutUpdate === undefined || !UUID.test(rolloutUpdate)) {
-      throw usage("--rollout-update must be a lowercase UUID");
-    }
+  const side = values["rollout-side"];
+  const rolloutUpdate = values["rollout-update"];
+  if ((side === undefined) !== (rolloutUpdate === undefined)) {
+    throw usage("--rollout-side and --rollout-update go together");
+  }
+  if (side !== undefined && side !== "new") throw usage("--rollout-side must be new");
+  if (rolloutUpdate !== undefined && !UUID.test(rolloutUpdate)) {
+    throw usage("--rollout-update must be a lowercase UUID");
   }
 
   let identity;

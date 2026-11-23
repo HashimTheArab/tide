@@ -16,7 +16,7 @@ import {
   readReleaseRecord,
   recordKey,
 } from "./publish-record.ts";
-import { execute, parsed, writeOutput } from "./publish.ts";
+import { execute, parsed, writeStep } from "./publish.ts";
 import { bucketFromEnv } from "./storage.ts";
 
 export const ROLLOUT_USAGE =
@@ -47,9 +47,8 @@ export async function rollout(
   const { now = Date.now, out } = options;
   return await execute(options, async () => {
     const { goal, keys, json } = parse(args);
-    const output = writeOutput(json, out);
     const identity = await buildIdentity(env, now());
-    const bucket = output.watch(bucketFromEnv(env));
+    const bucket = bucketFromEnv(env);
     // So a rollout's absent earlier reply always has the stored reply/no-update to serve.
     await servingBucket(
       bucket,
@@ -83,7 +82,7 @@ export async function rollout(
       }
     };
     for (const { rise, key } of writes) if (rise !== undefined) await checkRise(rise, key);
-    return output.step(async () => {
+    return writeStep(json, out, async (done) => {
       let attempted = false;
       for (const target of writes) {
         const { key, previous, reply, rise } = target;
@@ -92,7 +91,7 @@ export async function rollout(
           attempted = true;
           await writePointer(bucket, key, reply, previous);
         }
-        output.done(target);
+        done(target);
       }
     });
   });

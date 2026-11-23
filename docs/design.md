@@ -662,15 +662,15 @@ present, in this order; `null` means it does not apply.
 | the writers | `schema`, `complete`, `pointers` |
 | one of a writer's `pointers` | `key`, `updateId` (`null` for a directive), then `time`, or for `rollout` `percent` |
 
-- **Sizes.** `size` and `totalBytes` are decimal strings, exact at any size; a JSON number past 2^53 is not.
+- **Sizes.** `size` and `totalBytes` are decimal strings, since a JSON number past 2^53 is not exact.
 - **Keyids.** A pointer's keyid is its own; nothing names one for the bucket
   ([0003](decisions/0003-one-identity-per-runtime.md)).
 - **Nothing printed.** Exit 2 of any command, and a failed `storage` scan, leave stdout empty. `status` prints its
   document with exit 1 when a record is unreadable, and `probe` on every failure but 2.
-- **Writers.** `pointers` holds exactly the pointer writes this run made and the bucket acknowledged, in write order,
-  so a target already as asked is not listed, nor is one whose write lost its race or has an unknown outcome.
-  `complete` is true only with exit 0. A run that fails, or crashes, after sending any write prints its document with
-  `complete` false; one that fails before sending any prints nothing. Each attempt of a retry loop prints its own.
+- **Writers.** Exit 0 or 1 prints the document. `pointers` holds exactly the pointer writes this run made and the
+  bucket acknowledged, in write order, so a target already as asked is not listed, nor is one whose write lost its race
+  or has an unknown outcome. `complete` is true only with exit 0; a crash while writing prints it as false. Each attempt
+  of a retry loop prints its own.
 
 ### `tide certificate`
 
@@ -933,7 +933,7 @@ manifest's signed `runtimeVersion` must be the one requested, and no `expo-manif
 from the signed `metadata` key it names, since a client launches neither. Its `launchAsset.url` is then fetched
 wherever it points and its SHA-256 compared with `launchAsset.hash`; other assets are not fetched. `/manifest` has 10 s and the launch asset 60 s, each covering the body.
 
-**A rollout's new side.** `--rollout-side new --rollout-update <updateId>`, given together and once each, sends an
+**A rollout's new side.** `--rollout-side new --rollout-update <updateId>`, given together, sends an
 `EAS-Client-ID` in bucket 0 of that update's rollout: the first of a fixed sequence that `rolloutBucket` puts there, so
 the same one each run. Bucket 0 is on the new side at every percentage from 0.01, and on the earlier one at 0. The probe
 has no bucket access, so the operator gives the ID, a lowercase UUID as `tide status` prints it. Exit 0 then means the
