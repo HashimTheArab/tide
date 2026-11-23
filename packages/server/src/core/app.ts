@@ -1,11 +1,12 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import type { BaseRecord, PointerEntry, StoredReply } from "@tide-ota/protocol";
+import type { BaseRecord, StoredReply } from "@tide-ota/protocol";
 import {
   HEADER_VALUE,
   MAX_BASE_BYTES,
   MAX_IDENTITIES_BYTES,
+  MAX_REPLY_BYTES,
   NO_UPDATE_KEY,
   ProtocolError,
   UUID,
@@ -37,7 +38,7 @@ const ACCEPTS_MULTIPART = /multipart\/mixed|multipart\/\*|\*\/\*/;
 const QVALUE = /^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$/; // RFC 9110 12.4.2.
 const QUOTED = /"(?:[^"\\]|\\[\s\S]?)*(?:"|$)/g; // A quoted-string, to the end when unterminated.
 const NO_PATCH = new Error("no patch"); // Thrown by a lookup that found nothing without a fault.
-// A version-3 record answers these for a keyid it cannot serve; neither body names the keyid or holds stored bytes.
+// A version-3 reply/no-update answers these for a keyid it cannot serve; neither body names the keyid or holds stored bytes.
 const UNUSABLE_KEYID = { status: 400, text: "expo-expect-signature must name a keyid\n" } as const;
 const UNSIGNED_KEYID = { status: 404, text: "no reply is signed for this keyid\n" } as const;
 type Refusal = typeof UNUSABLE_KEYID | typeof UNSIGNED_KEYID;
@@ -126,27 +127,18 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
     let reply: StoredReply | undefined;
     let refusal: Refusal | undefined;
     let side: RolloutSide = "none";
-    const keyId = expectedKeyId(header("expo-expect-signature"));
-    let byKeyId = false; // A version-3 record was read, so the reply depends on the keyid.
+    let byKeyId = false; // A version-3 reply/no-update was read, so the reply depends on the keyid.
     try {
-      const pointer = await readRecord(key, MAX_IDENTITIES_BYTES, decodePointer, signal);
-      let entry: StoredReply | PointerEntry | undefined;
-      if (pointer?.kind === "identities") {
-        byKeyId = true;
-        if (keyId === undefined) refusal = UNUSABLE_KEYID;
-        else entry = pointer.entries.get(keyId);
-      } else {
-        entry = pointer;
-      }
-      if (entry?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
+      const pointer = await readRecord(key, MAX_REPLY_BYTES, decodePointer, signal);
+      if (pointer?.kind === "noUpdateAvailable") throw new Error(`${key} holds noUpdateAvailable`);
       const current = header("expo-current-update-id")?.toLowerCase();
       let candidate: StoredReply | undefined;
-      if (entry?.kind === "rollout") {
-        side = await rolloutSide(entry, header("eas-client-id"));
+      if (pointer?.kind === "rollout") {
+        side = await rolloutSide(pointer, header("eas-client-id"));
         // A device on the new update gets no-update on either side: a reply whose filters it fails would move it back.
-        candidate = current === entry.new.updateId ? undefined : entry[side];
+        candidate = current === pointer.new.updateId ? undefined : pointer[side];
       } else {
-        candidate = entry;
+        candidate = pointer;
       }
       // A rollback is always served; the client's selection policy decides whether it applies.
       if (
@@ -154,7 +146,7 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
         (candidate.kind !== "manifest" || current !== candidate.updateId)
       ) {
         reply = candidate;
-      } else if (refusal === undefined) {
+      } else {
         const noUpdate = await readRecord(
           NO_UPDATE_KEY,
           MAX_IDENTITIES_BYTES,
@@ -164,11 +156,9 @@ export function createApp(store: Store, options: AppOptions = {}): Hono {
         if (noUpdate === undefined) throw new Error(`${NO_UPDATE_KEY} is missing`);
         if (noUpdate.kind === "identities") {
           byKeyId = true;
+          const keyId = expectedKeyId(header("expo-expect-signature"));
           reply = keyId === undefined ? undefined : noUpdate.entries.get(keyId);
           if (reply === undefined) refusal = keyId === undefined ? UNUSABLE_KEYID : UNSIGNED_KEYID;
-        } else if (pointer?.kind === "identities") {
-          // Signed for one identity, and the server cannot tell which.
-          throw new Error(`${NO_UPDATE_KEY} is version 1 under a version-3 pointer`);
         } else {
           reply = noUpdate;
         }

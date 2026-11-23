@@ -1,6 +1,6 @@
 ---
 status: draft
-updated: 2026-11-22
+updated: 2026-11-23
 ---
 
 # Design
@@ -30,6 +30,9 @@ CLI refuses to publish without a key. Without it, anyone who can write the bucke
   config plugin writes them.
 - Every signing client sends `expo-expect-signature` with its metadata `keyid` (`root` when absent), chain mode
   included.
+- It checks signatures only at download. The launcher picks the newest downloaded update whose runtimeVersion matches
+  the build and never verifies it again, so a build that switches signing identity needs a new runtimeVersion
+  ([0003](decisions/0003-one-identity-per-runtime.md)).
 - With bsdiff enabled (default from SDK 56, expo-updates 56.0.13; opt-in on 55 with `enableBsdiffPatchSupport`), a
   launch-asset request carries `A-IM: bsdiff`,
   `Expo-Current-Update-ID` (the running update, which can be the embedded one) and `Expo-Requested-Update-ID`.
@@ -47,12 +50,12 @@ One bucket (R2 or S3-compatible), written only by the CLI:
 assets/<sha256>                          immutable non-launch assets
 bundles/<sha256>                         launch bundles
 updates/<updateId>.json                  release record (CLI, Release records)
-reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer), or one per keyid
+reply/<channel>/<runtime>/<platform>     stored reply: a signed manifest or rollBackToEmbedded (the pointer)
 reply/no-update                          stored reply: the signed noUpdateAvailable, or one per keyid
 legacy/map.json                          content keys that URLs from earlier servers name (legacy import)
 bases/<updateId>                         base record: a launch bundle patches start from (Base records)
 patches/<fromHash>/<toHash>              BSDIFF40 patch between two launch bundles (Patches)
-identities/<sha256(keyid)>               the certificate or root a keyid is bound to (Keys); the server never reads it
+identities/<sha256(keyid)>               the root a chain-mode keyid is bound to (Keys); the server never reads it
 ```
 
 The server's credentials are read-only, with one exception: a Workers R2 binding cannot be made read-only, so the
@@ -135,39 +138,35 @@ this order, no whitespace, no trailing newline:
 
 #### Several signing identities (version 3)
 
-A pointer or `reply/no-update` may hold a version-3 record: one entry per signing identity, keyed by the keyid its
-builds send in `expo-expect-signature`. Protocol `encodeIdentityPointer` and `encodeIdentityNoUpdate` write it;
-`decodePointer` and `decodeNoUpdate` read it beside the earlier versions (`decodeStoredReply` stays version 1 only).
-Golden files: `identities-*.reply.json`. Each entry is `keyid` followed by the fields of a version-1 reply or a
-version-2 rollout without `version`:
+One signing identity per runtime ([0003](decisions/0003-one-identity-per-runtime.md)): a pointer holds one identity's
+replies, and only `reply/no-update`, which every runtime shares, may hold a version-3 record with one entry per
+signing identity, keyed by the keyid its builds send in `expo-expect-signature`. Protocol `encodeIdentityNoUpdate`
+writes it and `decodeNoUpdate` reads it beside version 1; `decodePointer` and `decodeStoredReply` refuse it. Golden
+file: `identities-no-update.reply.json`. Each entry is `keyid` followed by the fields of a version-1
+`noUpdateAvailable` reply without `version`:
 
 ```json
-{"version":3,"identities":[{"keyid":"main","kind":"rollout","percent":12.5,"new":{…},"earlier":null},{"keyid":"root","kind":"manifest","updateId":"…","contentType":"…","manifestFilters":"…","body":"…"}]}
+{"version":3,"identities":[{"keyid":"main","kind":"noUpdateAvailable","contentType":"…","body":"…"},{"keyid":"root","kind":"noUpdateAvailable","contentType":"…","body":"…"}]}
 ```
 
-- An array, sorted by keyid in code-unit order, each keyid once, 1 to 16 entries. A pointer entry is a `manifest`,
-  `rollBackToEmbedded` or `rollout` (every version-2 rule applies); a `reply/no-update` entry is `noUpdateAvailable`.
+- An array, sorted by keyid in code-unit order, each keyid once, 1 to 16 entries, each a `noUpdateAvailable`.
 - A keyid is non-empty printable ASCII whose escaped length (each `"` and `\` counts twice, the same in JSON and in
   the RFC 8941 header string) is at most 4 KiB, leaving room in Node's default 16 KiB request head for the
   `expo-expect-signature` syntax and a stock client's other headers. Protocol `checkKeyId` applies the one rule to
   records, requests and the keyids the CLI accepts.
-- Size: at most 2 MiB plus 8 KiB, measured with each rollout's percent padded to its longest spelling (5
-  characters), so a later percent change never makes a stored record too large. The margin lets any valid version-1
-  or version-2 record become a one-entry record under any keyid, body bytes unchanged.
+- Size: at most 2 MiB plus 8 KiB. The margin lets any valid version-1 `reply/no-update` become a one-entry record
+  under any keyid, body bytes unchanged.
 - Decode refuses anything encode would not write byte for byte, as for version 2, naming the field where it can.
 
 Migration rules, for the writers:
 
-- A version-1 or version-2 record counts as the one identity its signatures carry. The server never reads that
-  keyid and serves the record to every request, so buckets written before version 3 keep serving the same bytes.
-  A legacy keyid over 4 KiB keeps serving, but the CLI refuses to publish under it.
-- Convert `reply/no-update` to version 3 first, then every pointer, each as one entry for the existing identity. Add
-  an entry for a second identity only when no version-1 or version-2 record is left: a legacy pointer would serve the
-  old identity's manifest to the new identity's builds.
-- Before a direct keyid's first version-3 body, bind it to its exact certificate (Keys, One certificate per keyid),
-  taken from a shipped build's pins after every legacy body verifies under it.
-- Servers first: no CLI may write version 3 until every server sharing the bucket reads it; an older server answers
-  503 for every key that holds one ([deploy.md](deploy.md#upgrade-order)).
+- A version-1 or version-2 record counts as the one identity its signatures carry, and the server serves it to every
+  request whatever the keyid, so buckets written before version 3 keep serving the same bytes.
+- Only `tide publish --add-identity` converts a version-1 `reply/no-update`: the existing reply is kept byte for byte
+  under the keyid its `expo-signature` names, beside the new identity's. A legacy keyid over 4 KiB keeps serving, but
+  cannot be converted.
+- Servers first, and every writer's CLI: an older server answers 503 wherever a request needs a version-3
+  `reply/no-update`, and an older CLI refuses to write over one ([deploy.md](deploy.md#upgrade-order)).
 
 ### Base records
 
@@ -236,8 +235,7 @@ An empty request header counts as absent. In order:
 4. `expo-channel-name` or `expo-runtime-version` missing or outside the reply key grammar: 400. There is no default
    channel: a misconfigured app sees a 400 in its logs rather than a silent no-update, and keeps its current update.
 5. No pointer for `<channel>/<runtime>/<platform>`: the stored `reply/no-update`.
-6. A version-3 pointer picks the entry for the request's keyid (below); no entry means `reply/no-update`. A rollout
-   pointer or entry picks a side, then the reply on that side, as below.
+6. A rollout pointer picks a side, then the reply on that side, as below.
 7. `Expo-Current-Update-ID` equal to the update ID of the manifest picked (compared ignoring case), or no reply on
    the side picked: the stored `reply/no-update`.
 8. Otherwise the reply picked. A rollback is served even to a client running its embedded update: the client applies
@@ -262,17 +260,16 @@ A rollout's side:
   Lowering the percentage never moves a device back: devices already on the new update stay there. To move them off
   it, publish a newer update or use `tide rollback`.
 
-A request's keyid is the `keyid` string of its `expo-expect-signature`, or `root` when it has none: every signing
-stock client sends the header, in chain mode too. It is read only when a version-3 record decides the reply, so
-version-1 and version-2 records serve exactly as before, whatever the header says.
+A pointer is served to every request alike: one runtime has one signing identity, and a chain-mode client ignores the
+signature's keyid anyway. A version-3 `reply/no-update` serves the entry of the request's keyid: the `keyid` string of
+its `expo-expect-signature`, or `root` when it has none, since every signing stock client sends the header, in chain
+mode too. The keyid is read only when a version-3 `reply/no-update` decides the reply, so version-1 records serve
+exactly as before, whatever the header says.
 
 - An absent or malformed header, or a keyid that is not a string `checkKeyId` accepts: 400 with exactly
   `expo-expect-signature must name a keyid`.
-- A version-3 `reply/no-update` with no entry for the keyid: 404 with exactly `no reply is signed for this keyid`.
-  Neither body names the keyid or holds stored bytes.
-- A version-1 `reply/no-update` under a version-3 pointer is a storage inconsistency (its body is signed for one
-  identity, and the server cannot tell which): 503 wherever the pointer needs no-update. A version-1 or version-2
-  pointer over a version-3 `reply/no-update` falls back per keyid, with the 400 and 404 above.
+- No entry for the keyid: 404 with exactly `no reply is signed for this keyid`. Neither body names the keyid or holds
+  stored bytes.
 
 A served reply is 200 with the stored body, `content-type: multipart/mixed; boundary=…`, `expo-protocol-version: 1`,
 `expo-sfv-version: 0`, `cache-control: private, max-age=0`, and, for a manifest only, the served manifest's stored
@@ -285,9 +282,10 @@ gives one identity's reply to another. Legacy responses carry no `vary`, but `ma
 them, and with no validator that is a full request. An app whose `requestHeaders` allow stale responses
 (`max-stale`) must also send `cache-control: no-cache` from the build that moves to a new identity.
 
-One deadline (10 s) covers every read of a request. A missing `reply/no-update` when it is needed, a record over
-the version-3 limit (checked from its stored size before reading), one that fails to decode (a malformed or oversize
-version-2 or version-3 record included) or has the wrong kind for its key, a store error, and a read past the
+One deadline (10 s) covers every read of a request. A missing `reply/no-update` when it is needed, a record over its
+limit (2 MiB for a pointer, the version-3 limit for `reply/no-update`; checked from its stored size before reading),
+one that fails to decode (a malformed or oversize version-2 or version-3 record, and a version-3 record at a pointer
+key, included) or has the wrong kind for its key, a store error, and a read past the
 deadline are each 503 with `cache-control: no-store`; 400, 404 and 406 are `no-store` too, and record no analytics
 point. A server older than a record's version answers 503 for it.
 
@@ -380,10 +378,9 @@ empty counts as unset). A configuration error exits before any request.
 `tide status` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
 read from the stored signed part without re-serialising it) and whether `reply/no-update` is present, unreadable or
 missing. A rollout prints `<channel> <runtime> <platform> rollout <percent> new <updateId> <createdAt> earlier <kind>
-<updateId|-> <createdAt|commitTime>`, or `earlier none`, with both sides checked. A version-3 pointer prints one such
-line per entry in keyid order, with `keyid "<keyid>"` (JSON-quoted) after the platform, and a version-3
-`reply/no-update` prints `reply/no-update keyid "<keyid>": present` per entry. A version-3 record is unreadable when
-any entry is, or when a side is signed under another keyid than its entry's. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. An unreadable record is
+<updateId|-> <createdAt|commitTime>`, or `earlier none`, with both sides checked. A version-3 `reply/no-update` prints
+`reply/no-update keyid "<keyid>": present` (JSON-quoted) per entry in keyid order, and is unreadable when any entry
+is, or when an entry is signed under another keyid than its own. A version-3 record at a pointer key is unreadable. It exits 1 if any record is unreadable, and 2 on a configuration or listing error. An unreadable record is
 reported by its key, the same name a readable row prints, with a fixed reason; a name outside the key grammar and a
 stored field are never printed.
 
@@ -450,8 +447,8 @@ bytes are unchanged.
 4. After the export is read: the wrapper must have run, and the launch bundle must be HBC of the base's version. A
    refusal here leaves no `tide-export.json`.
 
-`tide publish --from <dir> --channel <name> [--rollout <percent>]` publishes one update per platform the export names
-(`--rollout`: Staged rollouts). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
+`tide publish --from <dir> --channel <name> [--rollout <percent>] [--add-identity]` publishes one update per platform
+the export names (`--rollout`: Staged rollouts; `--add-identity`: Keys, One signing identity per runtime). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
 one line per pointer written: `<key> <updateId> <createdAt>`.
 
 **Configuration.** `TIDE_SERVER_URL` (the Tide server) and `TIDE_ASSET_URL` (the bucket's public domain) are each an
@@ -478,7 +475,8 @@ Steps, in order; every refusal comes before the first write, and all replies are
 1. Read the export and open the writer (Keys).
 2. Refuse an asset key recorded for another SHA-256 in any retained release record or registered build, or in
    two of them, comparing keys case-insensitively. An unreadable release or base record refuses too.
-3. Read each pointer and its ETag, then the bucket's time. Refuse a local clock more than a minute from it, or a
+3. Read each pointer and its ETag, and refuse a runtime and platform that another keyid's pointer holds (Keys, One
+   signing identity per runtime). Then read the bucket's time; refuse a local clock more than a minute from it, or a
    certificate invalid by either clock.
 4. Compose each platform's manifest under a fresh UUID with `createdAt = max(now, previous createdAt or commitTime
    + 1 ms)`, one clock sample for all; metadata `channel`, filter `channel="<channel>"`. Sign the exact part bytes
@@ -491,14 +489,16 @@ Steps, in order; every refusal comes before the first write, and all replies are
    read. `makeBsdiff` builds each patch, and protocol `applyBsdiff` applies it to the base: a refusal, or a result
    whose SHA-256 is not the new bundle's, refuses the publish. A checked patch is kept only when at most half the
    new bundle's level-9 gzip size, the encoding every client accepts; otherwise the full bundle serves alone. Then
-   build `reply/no-update` if it is missing (in chain mode, also when it serves another chain than the configured
-   one), and re-check the certificate by both clocks.
+   build `reply/no-update` if it is missing, holds no entry for this keyid (`--add-identity`), or in chain mode serves
+   this keyid another chain than the configured one, and re-check the certificate by both clocks.
 6. Upload missing `bundles/` and `assets/` (put-if-absent; a lost race stored the same bytes), then kept patches
    at `patches/<from hex>/<to hex>` (put-if-absent, `no-store`; a lost race stored the same deterministic, checked
    bytes), then in chain mode the identity binding (put-if-absent; a winner must bind the same root), then
-   `reply/no-update` (put-if-absent, or `If-Match` for a renewal; in chain mode the chain is re-checked by both
-   clocks just before it; a winner must verify under the identity), then each release record followed by its `update`
-   base record (put-if-absent). A patch that lands late is harmless: no pointer names its target yet.
+   `reply/no-update` (put-if-absent, or `If-Match` on the record read; in chain mode the chain is re-checked by both
+   clocks just before it), then each release record followed by its `update` base record (put-if-absent). A lost
+   `reply/no-update` race is kept only when the winner needs no change from this writer (this identity's entry, and in
+   chain mode the configured chain), judged without signing; otherwise the publish exits 1 and its rerun writes over
+   the winner. A patch that lands late is harmless: no pointer names its target yet.
    Then,
    per platform, re-check the certificate by both clocks, each read afresh, and write the pointer with `If-Match` on
    its ETag, or `If-None-Match: *` when there was none. A lost race fails at once and keeps the other writer's pointer;
@@ -516,8 +516,8 @@ changes; a new URL shape needs a new `version`. `contentType` follows from `file
 always `.bundle`.
 
 **Rollback and republish.** Both take the identity from the build pins alone (Keys), read no app config, need no
-`TIDE_SERVER_URL` or `TIDE_ASSET_URL`, and share publish's exit codes, clock and certificate checks,
-`reply/no-update` repair and pointer writes. Every refusal, including each argument rule below, comes before the
+`TIDE_SERVER_URL` or `TIDE_ASSET_URL`, and share publish's exit codes, clock and certificate checks, runtime check,
+`reply/no-update` repair and pointer writes. They take no `--add-identity`. Every refusal, including each argument rule below, comes before the
 first write; arguments are checked before the writer opens.
 
 - `tide rollback --embedded --channel <name> --runtime-version <v> [--platform ios|android]...`
@@ -550,9 +550,7 @@ codes as publish.
 
 `tide rollout <percent>|complete|revert --channel <name> --runtime-version <v> [--platform ios|android]...` rewrites
 each existing rollout from its stored bodies, byte for byte, and signs nothing: it reads the build pins (Keys) and
-needs no key, and refuses a bucket whose `reply/no-update` is absent or signed under another identity. On a version-3
-pointer it moves only the configured keyid's entry and copies every other entry byte for byte; it refuses a pointer
-without that entry, and one over a version-1 `reply/no-update`, which the server cannot serve beneath it. `complete`
+needs no key, and refuses a bucket whose `reply/no-update` is absent or holds no entry of this identity. `complete`
 writes the record at 100%, which serves exactly what a version-1 pointer to the new reply serves (GET /manifest).
 `revert` writes it at 0%: every device gets the earlier reply, or `reply/no-update`, except a device already running
 the new update, which keeps getting signed no-update and stays on it. A version-1 pointer to the earlier reply would
@@ -603,10 +601,11 @@ listing or read fails or a record or the legacy map does not decode; 2 on a usag
 `tide register-build --platform ios|android --runtime-version <v> --manifest <app.manifest> --bundle <file>
 [--assets-dir <dir>]` records a store build as an `embedded` base record, so patches can start from its bundle and
 its asset keys join the identity check. Nothing is signed or timestamped, so it needs no key, but it reads the build
-pins (Keys) before the bucket is opened and refuses a bucket whose `reply/no-update` is absent or signed under another
+pins (Keys) before the bucket is opened and refuses a bucket whose `reply/no-update` is absent or holds no entry of this
 identity: a build is registered only where its own certificate and `keyid` are already served, so a first publish
-cannot pin another identity over its asset keys. In a version-3 bucket that means the keyid's `reply/no-update` entry. A version-1 `reply/no-update` beside a version-3 pointer refuses, as the server answers 503 there. Exit codes as publish; stdout
-`bases/<id> bundles/<64 hex>`.
+cannot pin another identity over its asset keys. It also refuses a runtime and platform that another keyid's pointer
+holds on any channel (Keys, One signing identity per runtime), so a build reusing another identity's runtime is caught
+before it ships. Exit codes as publish; stdout `bases/<id> bundles/<64 hex>`.
 
 - **Inputs**, all from one build: its update ID is random per build, so mixing builds registers a base no installed
   client has. Android: `assets/app.manifest` and `assets/index.android.bundle` from the built APK (`base/assets/`
@@ -624,7 +623,8 @@ cannot pin another identity over its asset keys. In a version-3 bucket that mean
   location, since packaging may re-encode them; two files with one MD5 and different bytes refuse.
   `--assets-dir` is required only when the manifest lists assets.
 - **Refused before any write** (exit 2): a missing or repeated option or a positional; a bad runtime or platform;
-  a missing or invalid build pin; a bucket with no `reply/no-update` or signed under another identity;
+  a missing or invalid build pin; a bucket with no `reply/no-update` or none of this identity; a runtime and platform
+  another keyid's pointer holds;
   an ID that is not a lowercase UUID; an unreadable input; an asset key with no matching file; an asset key that a
   release record or another registered build records with another SHA-256; and a `bases/<id>` holding other bytes.
 - **Writes**: `bundles/<hex>` put-if-absent (immutable, `application/javascript`), then `bases/<id>` put-if-absent.
@@ -745,27 +745,39 @@ produce a part the app rejects. Every key, pin or export identity refusal exits 
 reads replies. Each refusal has a fixed message that names variables and config fields, never a key,
 credential or provider text.
 
-**One signing identity per bucket.** Every build a bucket serves gets the same signed `reply/no-update`. When it
-exists, the CLI requires its directive to be a signed `noUpdateAvailable` that verifies under the configured
-certificate and `keyid` (in chain mode, that belongs to the identity: Chain mode). When it is absent, every entry under `reply/` must be a pointer whose signed part verifies
-the same way, both bodies of a rollout included (an empty `reply/` is a new bucket), so no writer repairs another
-identity's bucket. A new direct key, a new root or a new key ID therefore needs a new bucket and `updates.url`.
+**One signing identity per runtime** ([0003](decisions/0003-one-identity-per-runtime.md)). A store build that changes
+its signing identity (a new key, certificate or root) ships under a new `keyid` and a new runtimeVersion, on the same
+bucket and `updates.url`: the client never verifies a downloaded update again at launch (Client rules). Each writer's
+identity check, before any write, reads only:
 
-**One certificate per keyid.** In a bucket holding version-3 records (Stored replies), every body of the configured
-`keyid` (no-update entry, pointer entries, both sides of a rollout) must belong to the identity as above; other
-keyids' entries need only be readable and signed under their own `keyid`. A legacy pointer beside a version-3
-`reply/no-update` serves every keyid, so it must be the configured keyid's. The binding
-`identities/<sha256(keyid)>` names the keyid's mode and exact certificate: a chain-mode `root` (Chain mode), or in
-direct mode `{"version":1,"keyid":"<keyid>","certificate":"<DER SHA-256 hex>"}`, required once the keyid has a
-version-3 body. A client accepts any certificate of the same key, so the binding is what refuses a same-key reissue.
-A direct writer reads it unless the keyid has only legacy bodies, and refuses one naming a root or another
-certificate. `publish`, `rollback` and `republish` refuse, before any write, a version-3 record they would overwrite
-with one identity's reply.
+1. The binding key `identities/<sha256(keyid)>`. In chain mode it must bind this root (Chain mode). In direct mode it
+   must be absent: only chain writers write one, so the keyid belongs to a chain root, perhaps one whose first publish
+   stopped after binding.
+2. `reply/no-update`. This keyid's reply in it (the version-1 record when its signature names this keyid, or this
+   keyid's version-3 entry) must be a signed `noUpdateAvailable` that verifies under the configured certificate and
+   `keyid` (in chain mode, that belongs to the identity). Without one, the writer is refused unless it is
+   `tide publish --add-identity`, which then adds it, copying every other keyid's reply as stored. When
+   `reply/no-update` is absent, every entry under `reply/` must be a pointer whose signed parts verify the same way,
+   both bodies of a rollout included (an empty `reply/` is a new bucket), so only its own writer recreates it. A pointer
+   signed under another keyid means a version-3 record was lost, which no writer can rebuild: every writer refuses and
+   says to restore it ([deploy.md](deploy.md#adding-a-signing-identity)).
+3. In chain mode, this keyid's replies without the binding refuse as lost (Chain mode).
 
-`publish`, `rollback` and `republish` create a missing
-`reply/no-update` with put-if-absent before any pointer and re-check a winner they did not write; and they re-check
-the certificate's validity by both clocks after signing and, once a write has been attempted, before each pointer
-write. No writer runs project code (CLI).
+Then `publish`, `republish`, `rollback` and `register-build` refuse a target runtime and platform that another
+keyid's pointer holds on any channel, a rollout's either side included, judging the targets as it read them and
+listing `reply/` once for the rest; an unreadable pointer of a target's runtime and platform refuses too, as its
+owner is unknown. Pointers of other runtimes are never read. The check reads; it does not fence: a write landing
+after the listing, or from a writer that skipped the check, is not seen, and the operator rule (a new runtimeVersion
+per identity, one concurrency group) is what prevents it. `tide rollout` writes no new runtime and copies only its
+target's bodies, each checked.
+
+A direct keyid is its keyid plus its key, as in a single-identity bucket; a client accepts any certificate of the
+same key. Chain-mode keyids keep their root binding (Chain mode).
+
+`publish`, `rollback` and `republish` write `reply/no-update` with put-if-absent, or `If-Match` on the record read,
+before any pointer, and keep a winner only when it needs no change from them; and they re-check the certificate's
+validity by both clocks after signing and, once a write has been attempted, before each pointer write. No writer runs
+project code (CLI).
 
 **Chain mode.** The writers sign with a leaf under the pinned root, and every reply they build (manifest,
 `rollBackToEmbedded`, `noUpdateAvailable`) carries the signed part followed by a `certificate_chain` part.
@@ -785,12 +797,14 @@ write. No writer runs project code (CLI).
   new bucket. The served chain omits the root, so the bucket also binds the `keyid` to the root's exact DER: the
   first chain-mode write creates `identities/<sha256(keyid)>`, `{"version":1,"keyid":"<keyid>","root":"<DER
   SHA-256 hex>"}`, with put-if-absent, and every writer refuses a binding to another root. A root reissued with the
-  same subject and key is therefore another identity: it could carry other constraints than the builds embed.
+  same subject and key is therefore another identity, with its own `keyid` and runtimeVersion: it could carry other
+  constraints than the builds embed.
   Writers bind before any chained reply, so a bucket holding chained replies without the binding has lost it:
   every writer refuses it until the binding is restored, rather than bind whichever root its chains link to.
-- **Shared no-update.** `reply/no-update` carries the leaf that signed it, so a signing writer whose configured chain
-  differs from the stored body's re-signs it, replacing it with `If-Match` on the ETag it read. A lost race keeps the
-  winner when it is this identity's; an unknown outcome is re-read by the next run.
+- **Shared no-update.** This keyid's `reply/no-update` reply carries the leaf that signed it, so a signing writer whose
+  configured chain differs from the stored body's re-signs it, replacing only its own entry with `If-Match` on the
+  ETag it read; a version-1 record stays version 1. A lost race keeps the winner only when it already serves the
+  configured chain; an unknown outcome is re-read by the next run.
 - **Expiry.** An expired leaf or intermediate in the served chain stops every writer until it is replaced; bodies
   already stored keep their own chain, and each device rejects one whose chain has expired. Publish or republish each
   live channel, and finish or replace rollouts, before an old leaf expires; `tide probe` fails on an expired served
@@ -808,9 +822,9 @@ write. No writer runs project code (CLI).
 Such a key cannot be exported, so there is no recovery copy. Disabling it stops every publish until `enable-key`, and
 a pending deletion can be cancelled with `cancel-key-deletion`, then `enable-key`. Once it is deleted, or left
 disabled, every installed build is stranded: it keeps the updates it has, but nothing new is signed for it until a
-new store build ships. That build needs a new key, a new bucket and a new `updates.url` (One signing identity per
-bucket); in chain mode a lost leaf key needs only a new leaf under the root (Chain mode), and per-`keyid`
-identities are roadmap P11. So schedule any deletion with the longest
+new store build ships. That build needs a new key under a new `keyid` and a new runtimeVersion, on the same bucket
+and `updates.url` (One signing identity per runtime); in chain mode a lost leaf key needs only a new leaf under the
+root (Chain mode). So schedule any deletion with the longest
 waiting period, `schedule-key-deletion --pending-window-in-days 30`, and give the key a policy that allows
 `kms:ScheduleKeyDeletion` and `kms:DisableKey` only to a break-glass role.
 
@@ -873,7 +887,7 @@ the root, the reply must carry a `certificate_chain` part, and the signed part v
 a `certificate_chain` part.
 
 The probe sends `GET /manifest` as a stock client: `expo-protocol-version: 1`, `expo-expect-signature` with the
-pinned keyid (so a version-3 record answers with that keyid's entry), `accept: multipart/mixed`, and no current
+pinned keyid (so a version-3 `reply/no-update` answers with that keyid's entry), `accept: multipart/mixed`, and no current
 update ID, so a pointer is served whenever one exists. It
 parses the multipart reply and verifies the `expo-signature` of the one manifest or directive part over its exact
 bytes. A directive (`rollBackToEmbedded`, or `noUpdateAvailable` from `reply/no-update`) passes on that alone. A

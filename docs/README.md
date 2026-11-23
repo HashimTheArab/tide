@@ -24,3 +24,4 @@ Decisions:
 
 - [0001 Architecture](decisions/0001-architecture.md)
 - [0002 Hermes delta compiles](decisions/0002-hermes-delta-compiles.md)
+- [0003 One signing identity per runtime](decisions/0003-one-identity-per-runtime.md)

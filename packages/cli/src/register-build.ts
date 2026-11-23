@@ -18,8 +18,8 @@ import {
 import type { Bucket } from "./bucket.ts";
 import type { Env } from "./keys.ts";
 import type { PublishOptions, WriteStep } from "./publish.ts";
-import { buildIdentity, member, refuseMixedLayout, servingBucket } from "./keys.ts";
-import { writing } from "./pointer.ts";
+import { buildIdentity, member, servingBucket } from "./keys.ts";
+import { ownRuntimes, writing } from "./pointer.ts";
 import { readRegular } from "./publish-export.ts";
 import { PublishError, platformOf } from "./publish-record.ts";
 import { addKey, execute, once, parsed, recordedKeys, requiredOnce } from "./publish.ts";
@@ -72,12 +72,13 @@ async function prepare(
   });
 
   // An empty bucket serves no identity, so its first publish could pin another under this build's asset keys.
-  const fallback = await servingBucket(
+  await servingBucket(
     bucket,
     identity,
     "reply/no-update is absent: publish before register-build, so the bucket serves the builds' identity",
   );
-  if (fallback === "legacy") await refuseMixedLayout(bucket);
+  // So a build reusing another identity's runtime is refused before it ships.
+  await ownRuntimes(bucket, identity.keyId, new Set([`${given.runtime}/${given.platform}`]));
   const stored = await bucket.get(key, MAX_BASE_BYTES);
   if (stored !== undefined && !Buffer.from(record).equals(stored.bytes)) {
     throw new PublishError(`${key} holds another build`);

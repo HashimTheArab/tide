@@ -7,12 +7,12 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
+import type { NoUpdateReply } from "@tide-ota/protocol";
 import {
   MAX_REPLY_BYTES,
-  buildManifest,
   cryptoKeySigner,
   diskPath,
-  encodeIdentityPointer,
+  encodeIdentityNoUpdate,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
@@ -27,9 +27,7 @@ import { run, utf8 } from "./helpers.ts";
 import {
   IOS,
   MAIN,
-  T,
   diskObjects,
-  entryOf,
   env,
   identitiesNoUpdate,
   main,
@@ -37,7 +35,6 @@ import {
   artifact,
   s3,
   s3Env,
-  seededPointer,
   signedManifest,
   useFixture,
 } from "./publish-fixture.ts";
@@ -301,38 +298,8 @@ describe.each([
     );
   });
 
-  test("each pinned keyid is sent, and gets and verifies its own identity's entry or no-update", async () => {
-    const { base, updateId, hash, launchUrl } = store.published();
-    const rootId = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff";
-    const manifest = async (id: string, by: typeof main, keyid: string) => {
-      const body = buildManifest({
-        id,
-        createdAt: new Date(T),
-        runtimeVersion: "1.0.0",
-        launchAsset: {
-          hash,
-          contentType: "application/javascript",
-          fileExtension: ".bundle",
-          url: launchUrl,
-        },
-        assets: [],
-        metadata: {},
-        extra: {},
-      });
-      const signature = await expoSignature(body, cryptoKeySigner(by.keys.privateKey, keyid));
-      const multipart = encodeMultipart([{ name: "manifest", body, signature }]);
-      return { kind: "manifest" as const, updateId: id, manifestFilters: "", ...multipart };
-    };
-    const ios = new Map([
-      ["main", await manifest(updateId, main, "main")],
-      ["root", await manifest(rootId, other, "root")],
-    ]);
-    store.put(IOS, encodeIdentityPointer(ios));
-    const rollbackOfMain = entryOf(await seededPointer("rollback", T, main));
-    store.put(
-      "reply/main/1.0.0/android",
-      encodeIdentityPointer(new Map([["main", rollbackOfMain]])),
-    );
+  test("each pinned keyid is sent, and gets and verifies its own no-update entry", async () => {
+    const { base } = store.published();
     store.put("reply/no-update", await identitiesNoUpdate({ main, root: other }));
     const sent: (string | null)[] = [];
     const watched = await proxy(base, {
@@ -340,58 +307,36 @@ describe.each([
         sent.push(h.get("expo-expect-signature"));
       },
     });
-    const verified = (id: string) => ({
-      code: 0,
-      stdout: `manifest ${id}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
-      stderr: "",
-    });
-    expect(await tide(args(watched))).toEqual(verified(updateId));
-    const root = pins(other.certificate, "root");
-    expect(await tide(args(watched), root)).toEqual(verified(rootId));
-    // The Android pointer has no root entry, so root gets its own no-update.
-    expect(await tide(args(watched, "main", [], "android"), root)).toEqual({
+    const noUpdate = {
       code: 0,
       stdout:
         "directive noUpdateAvailable: signature verified; a directive has no bundle to check\n",
       stderr: "",
-    });
+    };
+    expect(await tide(args(watched, "nothing"))).toEqual(noUpdate);
+    expect(await tide(args(watched, "nothing"), pins(other.certificate, "root"))).toEqual(noUpdate);
     expect(sent).toEqual([
       'sig, keyid="main", alg="rsa-v1_5-sha256"',
-      'sig, keyid="root", alg="rsa-v1_5-sha256"',
       'sig, keyid="root", alg="rsa-v1_5-sha256"',
     ]);
   });
 
-  test("a version-3 entry whose multipart body is over MAX_REPLY_BYTES passes", async () => {
-    const { base, updateId, hash, launchUrl } = store.published();
-    const signer = cryptoKeySigner(main.keys.privateKey, "main");
-    const entry = async (pad: number) => {
-      const body = buildManifest({
-        id: updateId,
-        createdAt: new Date(T),
-        runtimeVersion: "1.0.0",
-        launchAsset: {
-          hash,
-          contentType: "application/javascript",
-          fileExtension: ".bundle",
-          url: launchUrl,
-        },
-        assets: [],
-        metadata: {},
-        extra: { pad: "a".repeat(pad) },
-      });
-      const multipart = encodeMultipart([
-        { name: "manifest", body, signature: await expoSignature(body, signer) },
-      ]);
-      return { kind: "manifest" as const, updateId, manifestFilters: "", ...multipart };
+  test("a version-3 no-update entry whose multipart body is over MAX_REPLY_BYTES passes", async () => {
+    const { base } = store.published();
+    const body = utf8(
+      JSON.stringify({ type: "noUpdateAvailable", pad: "a".repeat(MAX_REPLY_BYTES) }),
+    );
+    const signature = await expoSignature(body, cryptoKeySigner(main.keys.privateKey, "main"));
+    const reply: NoUpdateReply = {
+      kind: "noUpdateAvailable",
+      ...encodeMultipart([{ name: "directive", body, signature }]),
     };
-    const overhead = (await entry(0)).body.length;
-    const reply = await entry(MAX_REPLY_BYTES + 1 - overhead);
-    expect(reply.body.length).toBe(MAX_REPLY_BYTES + 1);
-    store.put(IOS, encodeIdentityPointer(new Map([["main", reply]])));
-    expect(await tide(args(base))).toEqual({
+    expect(reply.body.length).toBeGreaterThan(MAX_REPLY_BYTES);
+    store.put("reply/no-update", encodeIdentityNoUpdate(new Map([["main", reply]])));
+    expect(await tide(args(base, "nothing"))).toEqual({
       code: 0,
-      stdout: `manifest ${updateId}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
+      stdout:
+        "directive noUpdateAvailable: signature verified; a directive has no bundle to check\n",
       stderr: "",
     });
   });

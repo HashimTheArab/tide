@@ -39,6 +39,7 @@ import {
   IOS,
   MAIN,
   MISMATCH,
+  OWN_KEYID,
   PNG_MD5,
   SERVER_URL,
   T,
@@ -862,20 +863,25 @@ describe("publish to S3", () => {
       const result = await publishIn(artifact(), env(s3Env()));
       expect(result).toMatchObject({
         code: 1,
-        err: [
-          "tide: this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket",
-        ],
+        err: [`tide: ${OWN_KEYID("reply/no-update")}`],
       });
       expect(s3.puts.filter((k) => k.startsWith("reply/main/"))).toEqual([]);
     });
 
-    test("a reply/no-update created for several keyids fails the publish before any record or pointer", async () => {
-      s3.raceOnPut(NO_UPDATE_KEY, await identitiesNoUpdate({ main, root: other }));
+    test("a reply/no-update created for several keyids, main's among them, is kept and the publish goes on", async () => {
+      const theirs = await identitiesNoUpdate({ main, root: other });
+      s3.raceOnPut(NO_UPDATE_KEY, theirs);
+      expect(await publishIn(artifact(), env(s3Env()))).toMatchObject({ code: 0, err: [] });
+      expect(s3.objects.get(NO_UPDATE_KEY)).toEqual(theirs);
+    });
+
+    test("a reply/no-update created for another keyid alone fails the publish before any record or pointer", async () => {
+      s3.raceOnPut(NO_UPDATE_KEY, await noUpdateBy(other, "root"));
       const result = await publishIn(artifact(), env(s3Env()));
       expect(result).toMatchObject({
         code: 1,
         err: [
-          "tide: reply/no-update holds replies for several keyids, which tide publish, rollback and republish do not write",
+          "tide: reply/no-update was changed by another writer during the publish; it keeps theirs: run again",
         ],
       });
       const after = s3.puts.slice(s3.puts.indexOf(NO_UPDATE_KEY) + 1);

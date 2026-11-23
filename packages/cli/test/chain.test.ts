@@ -12,7 +12,6 @@ import {
   cryptoKeySigner,
   decodeStoredReply,
   encodeIdentityNoUpdate,
-  encodeIdentityPointer,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
@@ -21,12 +20,10 @@ import {
 
 import type { Issued } from "./chain-fixture.ts";
 import type { FakeKms } from "./fake-kms.ts";
+import type { Store } from "./publish-fixture.ts";
 import { startServer, storeFromEnv } from "../../server/src/node.ts";
 import { probe } from "../src/probe.ts";
-import { republish, rollback } from "../src/publish-rollback.ts";
 import { publish } from "../src/publish.ts";
-import { registerBuild } from "../src/register-build.ts";
-import { rollout } from "../src/rollout.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import {
   chainEnv,
@@ -47,22 +44,24 @@ import {
   BOUND_ELSEWHERE,
   IOS,
   T,
+  CHAIN_ROOT,
+  OWN_KEYID,
   UNBOUND,
   artifact,
   diskObjects,
-  entryOf,
   env,
   main,
   s3,
   s3Env,
   s3Snapshot,
   useFixture,
+  STORES,
+  cmd,
 } from "./publish-fixture.ts";
 
 useFixture();
 
-const OTHER_IDENTITY =
-  "this bucket's replies are signed by a different certificate or key ID: a new signing identity needs a new bucket";
+const OTHER_IDENTITY = OWN_KEYID(NO_UPDATE_KEY);
 const HOUR = 3_600_000;
 const SOON = new Date(T + HOUR); // A notAfter the S3 tests' clock passes.
 const LATER = T + 2 * HOUR;
@@ -128,34 +127,7 @@ afterAll(async () => {
   await kms.close();
 });
 
-const STORES = {
-  disk: () => {
-    const root = tempRoot();
-    return { env: { TIDE_DISK_DIR: root }, objects: () => diskObjects(root) };
-  },
-  s3: () => ({ env: s3Env(), objects: (): ReadonlyMap<string, Uint8Array> => s3.objects }),
-};
-type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
 const s3Store = (): Store => STORES.s3();
-
-const COMMANDS = { publish, rollback, republish, rollout, registerBuild };
-
-/** Runs a command in process; returns the exit code and output lines. */
-async function cmd(
-  command: keyof typeof COMMANDS,
-  args: string[],
-  environment: Record<string, string>,
-  now?: () => number,
-) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await COMMANDS[command](args, environment, {
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-    ...(now && { now }),
-  });
-  return { code, out, err };
-}
 
 /** A chain-mode writer configuration: the root's pins, the served chain, and the first member's key. */
 interface Config {
@@ -585,7 +557,7 @@ describe("another identity's bucket", () => {
     expect(await publishWith(chained, B())).toMatchObject({ code: 0 });
     expect(
       await cmd("publish", ["--channel", "main", "--from", artifact()], env(chained.env)),
-    ).toEqual({ code: 2, out: [], err: [`tide: ${OTHER_IDENTITY}`] });
+    ).toEqual({ code: 2, out: [], err: [`tide: ${CHAIN_ROOT(await identityKey("main"))}`] });
   });
 
   test("a dual-purpose root's direct-signed bodies are not its chained identity", async () => {
@@ -632,29 +604,9 @@ describe("several keyids in chain mode", () => {
     expect(await registerWith(store, w.root, "6f9619ff-8b86-4d01-b42d-00cf4fc964ff")).toEqual({
       code: 2,
       out: [],
-      err: [
-        'tide: reply/no-update: keyid "main" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid',
-      ],
+      err: [`tide: ${OTHER_IDENTITY}`],
     });
     expect(s3Snapshot()).toEqual(before);
-  });
-
-  test("a renewal of a version-1 reply/no-update refuses before any PUT while a version-3 pointer exists", async () => {
-    const store = s3Store();
-    expect(await publishWith(store, A())).toMatchObject({ code: 0 });
-    const untargeted = "reply/other/1.0.0/ios";
-    const ios = store.objects().get(IOS);
-    if (ios === undefined) throw new Error(`${IOS} is absent`);
-    s3.objects.set(untargeted, encodeIdentityPointer(new Map([["main", entryOf(ios)]])));
-    s3.puts.length = 0;
-    expect(await publishWith(store, B())).toEqual({
-      code: 2,
-      out: [],
-      err: [
-        `tide: ${untargeted} holds replies for several keyids, which tide publish, rollback and republish do not write`,
-      ],
-    });
-    expect(s3.puts).toEqual([]);
   });
 
   test("the longest keyid binds, and the next publish reads its binding", async () => {
@@ -725,14 +677,38 @@ describe("validity checks before each write", () => {
     expect(s3.puts).not.toContain(NO_UPDATE_KEY);
   });
 
-  test("a renewal another writer won is kept when it is this identity's, and refused under another root", async () => {
+  test("a renewal another writer won with the configured chain is kept", async () => {
     const store = s3Store();
     expect(await publishWith(store, A())).toMatchObject({ code: 0 });
-    const theirs = await chainedNoUpdate(B());
+    const theirs = await chainedNoUpdate(SOON_LEAF());
     s3.raceOnPut(NO_UPDATE_KEY, theirs);
     expect(await publishWith(store, SOON_LEAF())).toMatchObject({ code: 0, err: [] });
     expect(store.objects().get(NO_UPDATE_KEY)).toEqual(theirs);
+  });
 
+  // A winner still serving another chain would keep fallback requests on a chain that expires.
+  test("a renewal another writer won with another chain fails, and the rerun writes the configured chain", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, A())).toMatchObject({ code: 0 });
+    const old = await chainedNoUpdate(B());
+    s3.raceOnPut(NO_UPDATE_KEY, old);
+    s3.puts.length = 0;
+    expect(await publishWith(store, SOON_LEAF())).toEqual({
+      code: 1,
+      out: [],
+      err: [
+        "tide: reply/no-update was changed by another writer during the publish; it keeps theirs: run again",
+      ],
+    });
+    expect(store.objects().get(NO_UPDATE_KEY)).toEqual(old);
+    expect(s3.puts.filter((k) => k === IOS || k === ANDROID)).toEqual([]);
+    expect(await publishWith(store, SOON_LEAF())).toMatchObject({ code: 0, err: [] });
+    await expectServes(store, NO_UPDATE_KEY, SOON_LEAF());
+  });
+
+  test("a renewal another writer won under another root is refused", async () => {
+    const store = s3Store();
+    expect(await publishWith(store, B())).toMatchObject({ code: 0 });
     const foreign = await chainedNoUpdate({ root: w.root2, chain: [w.leaf2] });
     s3.raceOnPut(NO_UPDATE_KEY, foreign);
     const result = await publishWith(store, A());

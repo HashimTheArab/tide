@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import type { Rollout } from "@tide-ota/protocol";
+import type { NoUpdateReply, Rollout } from "@tide-ota/protocol";
 import {
   NO_UPDATE_KEY,
   ProtocolError,
@@ -12,20 +12,28 @@ import {
   buildNoUpdateAvailable,
   contentKey,
   encodeBaseRecord,
+  encodeIdentityNoUpdate,
   encodeSfvDictionary,
   encodeStoredReply,
   replyKey,
 } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
-import type { Env, Writer } from "./keys.ts";
+import type { Env, StoredNoUpdate, Writer } from "./keys.ts";
 import type { PointerState } from "./pointer.ts";
 import type { ExportedPlatform } from "./publish-export.ts";
 import type { PatchBase } from "./publish-patch.ts";
 import type { Platform, ReleaseRecord } from "./publish-record.ts";
 import { BucketError } from "./bucket.ts";
-import { KeyError, openWriter, severalKeyIds } from "./keys.ts";
-import { createdAtFloor, readPointer, writePointer, writing } from "./pointer.ts";
+import { KeyError, openWriter, sameBytes } from "./keys.ts";
+import {
+  createdAtFloor,
+  ownRuntimes,
+  readPointer,
+  runtimeOf,
+  writePointer,
+  writing,
+} from "./pointer.ts";
 import { readProjectExport } from "./publish-export.ts";
 import { preparePatches, uploadPatches } from "./publish-patch.ts";
 import {
@@ -66,7 +74,7 @@ export interface PointerWrite {
 /** Everything a write command writes after its uploads, prepared with every refusal already made. */
 export interface Plan {
   readonly writer: Writer;
-  /** The `reply/no-update` to create, or with `etag` to renew; absent when the stored one stays. */
+  /** The `reply/no-update` to create, or with `etag` to replace; absent when the stored one stays. */
   readonly noUpdate:
     | { readonly bytes: Uint8Array<ArrayBuffer>; readonly etag?: string }
     | undefined;
@@ -83,7 +91,7 @@ export type WriteStep = () => Promise<void>;
 type KeyHashes = Map<string, { readonly hash: string; readonly source: string }>;
 
 export const PUBLISH_USAGE =
-  "usage: tide publish --from <dir> --channel <name> [--rollout <percent>]";
+  "usage: tide publish --from <dir> --channel <name> [--rollout <percent>] [--add-identity]";
 const MAX_SKEW_MS = 60_000;
 
 /**
@@ -145,12 +153,12 @@ async function prepare(
   env: Env,
   { now = Date.now, cwd = process.cwd() }: PublishOptions,
 ) {
-  const { channel, from, percent } = parse(args, cwd);
+  const { channel, from, percent, addIdentity } = parse(args, cwd);
   const serverUrl = configuredBase(env, "TIDE_SERVER_URL");
   const assetBase = configuredBase(env, "TIDE_ASSET_URL");
 
   const artifact = await readProjectExport(from);
-  const writer = await openWriter(env, { now, app: artifact });
+  const writer = await openWriter(env, { now, app: artifact, addIdentity });
   const exported = artifact.platforms.map((p) => ({
     ...p,
     key: replyKey(channel, p.runtime, p.platform),
@@ -207,9 +215,9 @@ async function prepare(
 }
 
 /**
- * Reads each item's pointer, refusing a version-3 one, then the bucket's time, refusing a local clock more than a
- * minute from it or a certificate invalid by either clock. Returns the pointers and the one local sample every new
- * time comes from.
+ * Reads each item's pointer, refusing a runtime and platform another keyid's pointer holds on any channel, then the
+ * bucket's time, refusing a local clock more than a minute from it or a certificate invalid by either clock. Returns
+ * the pointers and the one local sample every new time comes from.
  */
 export async function readTargets<T extends { readonly key: string }>(
   writer: Writer,
@@ -218,11 +226,9 @@ export async function readTargets<T extends { readonly key: string }>(
 ) {
   const { bucket } = writer;
   const targets: (T & { readonly previous: PointerState })[] = [];
-  for (const t of items) {
-    const previous = await readPointer(bucket, t.key, writer.identity.keyId);
-    if (previous.others !== undefined) throw new PublishError(severalKeyIds(t.key));
-    targets.push({ ...t, previous });
-  }
+  for (const t of items) targets.push({ ...t, previous: await readPointer(bucket, t.key) });
+  const runtimes = new Set(items.map((t) => runtimeOf(t.key)));
+  await ownRuntimes(bucket, writer.identity.keyId, runtimes, targets);
   const bucketTime = await bucket.time();
   const local = now();
   if (Math.abs(local - bucketTime) > MAX_SKEW_MS) {
@@ -241,8 +247,8 @@ export async function readTargets<T extends { readonly key: string }>(
 }
 
 /**
- * Ends a plan once everything is signed: builds `reply/no-update` if the bucket lacks one or it serves an old chain,
- * then checks the certificate afresh, so an expiry before the first write is a refusal.
+ * Ends a plan once everything is signed: builds `reply/no-update` when `needsNoUpdate` says so, then checks the
+ * certificate afresh, so an expiry before the first write is a refusal.
  */
 export async function plan(
   writer: Writer,
@@ -250,15 +256,49 @@ export async function plan(
   records: Plan["records"],
   pointers: Plan["pointers"],
 ): Promise<Plan> {
-  const stored = writer.noUpdate;
-  const noUpdate =
-    stored === undefined
-      ? { bytes: await noUpdateReply(writer) }
-      : writer.renewNoUpdate
-        ? { bytes: await noUpdateReply(writer), etag: stored.etag }
-        : undefined;
+  const { noUpdate: stored, identity } = writer;
+  const noUpdate = needsNoUpdate(writer, stored)
+    ? noUpdateRecord(stored, identity.keyId, await noUpdateReply(writer))
+    : undefined;
   await checkCertificate();
   return { writer, noUpdate, records, pointers, checkCertificate };
+}
+
+/**
+ * Whether a write must replace `stored`, signing nothing: it is absent, has no entry for this keyid, or in chain mode
+ * this keyid's entry serves another chain than the configured one.
+ */
+function needsNoUpdate({ identity, chain }: Writer, stored: StoredNoUpdate | undefined): boolean {
+  if (stored === undefined) return true;
+  const own = stored.entries.get(identity.keyId);
+  if (own === undefined) return true;
+  // The identity check has verified it, so in chain mode it carries a chain.
+  const served = own.sides[0]?.signed.chain;
+  return chain !== undefined && served !== undefined && !sameBytes(served, chain);
+}
+
+/**
+ * Returns `reply/no-update` with `reply` as `keyId`'s entry over `stored`, and the ETag it replaces; a version-1 record
+ * of this keyid stays version 1, and any other keyid's entry is copied as stored.
+ */
+function noUpdateRecord(
+  stored: StoredNoUpdate | undefined,
+  keyId: string,
+  reply: NoUpdateReply,
+): NonNullable<Plan["noUpdate"]> {
+  try {
+    if (stored === undefined) return { bytes: encodeStoredReply(reply) };
+    const { entries, etag } = stored;
+    if (stored.version === 1 && entries.has(keyId)) {
+      return { bytes: encodeStoredReply(reply), etag };
+    }
+    // checkNoUpdate has refused any other kind at reply/no-update.
+    const replies = new Map([...entries].map(([k, e]) => [k, e.reply as NoUpdateReply]));
+    return { bytes: encodeIdentityNoUpdate(replies.set(keyId, reply)), etag };
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    throw new PublishError(`${NO_UPDATE_KEY}: ${e.message}`);
+  }
 }
 
 /**
@@ -307,18 +347,20 @@ function parse(args: readonly string[], cwd: string) {
         from: { type: "string" },
         channel: { type: "string" },
         rollout: { type: "string" },
+        "add-identity": { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
     }),
   );
   const { from, channel, rollout } = values;
+  const addIdentity = values["add-identity"] === true;
   if (from === undefined || channel === undefined) {
     throw new PublishError(`--from and --channel are required; ${PUBLISH_USAGE}`);
   }
   replyKey(channel, "1", "ios"); // Refuses a bad channel before the export is read.
   const percent = rollout === undefined ? undefined : percentOf(rollout, "--rollout");
-  return { channel, from: resolve(cwd, from), percent };
+  return { channel, from: resolve(cwd, from), percent, addIdentity };
 }
 
 /** Returns `parse()`, turning parseArgs' own error into a usage refusal. */
@@ -485,13 +527,16 @@ export async function compose(
   };
 }
 
-/** Builds and signs the stored `reply/no-update`. */
-async function noUpdateReply(writer: Writer): Promise<Uint8Array<ArrayBuffer>> {
+/** Builds and signs this identity's noUpdateAvailable reply. */
+async function noUpdateReply(writer: Writer): Promise<NoUpdateReply> {
   const { boundary, body } = await writer.signedReply("directive", buildNoUpdateAvailable());
-  return encodeStoredReply({ kind: "noUpdateAvailable", boundary, body });
+  return { kind: "noUpdateAvailable", boundary, body };
 }
 
-/** Creates or renews `reply/no-update` from `bytes`, or accepts one another writer stored first under this identity. */
+/**
+ * Writes `reply/no-update` over the ETag read, or only if still absent. A lost race succeeds only when the winner needs
+ * nothing from this writer; otherwise the rerun merges onto it.
+ */
 async function ensureNoUpdate(
   writer: Writer,
   { bytes, etag }: NonNullable<Plan["noUpdate"]>,
@@ -502,8 +547,14 @@ async function ensureNoUpdate(
       ? await bucket.putIfAbsent(NO_UPDATE_KEY, bytes)
       : await bucket.putIfMatch(NO_UPDATE_KEY, bytes, etag);
   if (written !== undefined) return;
-  if ((await writer.readNoUpdate()) === undefined) {
+  const winner = await writer.readNoUpdate();
+  if (winner === undefined) {
     throw new PublishError(`${NO_UPDATE_KEY} was removed by another writer during the publish`);
+  }
+  if (needsNoUpdate(writer, winner)) {
+    throw new PublishError(
+      `${NO_UPDATE_KEY} was changed by another writer during the publish; it keeps theirs: run again`,
+    );
   }
 }
 

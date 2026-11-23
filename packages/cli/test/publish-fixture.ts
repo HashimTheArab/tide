@@ -1,6 +1,6 @@
 // Identities, projects, stores and readers shared by the write-command tests. Keys and certificates are generated
 // per run; nothing here is a committed secret.
-import { createHash, KeyObject, X509Certificate } from "node:crypto";
+import { createHash, KeyObject } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -14,20 +14,18 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
-import type { NoUpdateReply, PointerEntry } from "@tide-ota/protocol";
+import type { NoUpdateReply } from "@tide-ota/protocol";
 import {
   buildManifest,
   buildRollBackToEmbedded,
   certificatePublicKey,
   cryptoKeySigner,
-  decodePointer,
   decodeStoredReply,
   diskKey,
   encodeIdentityNoUpdate,
   encodeMultipart,
   encodeStoredReply,
   expoSignature,
-  identityKey,
   parseMultipart,
   sha256Base64Url,
   verifyExpoSignature,
@@ -38,6 +36,10 @@ import { RSA_SHA256, certificate } from "../../protocol/test/fixtures.ts";
 import { FAKE_S3, startFakeS3 } from "../../server/test/fakes/s3.ts";
 import { exportProject } from "../src/export.ts";
 import { launchUrl } from "../src/publish-record.ts";
+import { republish, rollback } from "../src/publish-rollback.ts";
+import { publish } from "../src/publish.ts";
+import { registerBuild } from "../src/register-build.ts";
+import { rollout } from "../src/rollout.ts";
 import { bucketFromEnv } from "../src/storage.ts";
 import { fixture, tempRoot, utf8 } from "./helpers.ts";
 
@@ -228,6 +230,35 @@ export const s3Env = () => ({
   TIDE_S3_SECRET_ACCESS_KEY: FAKE_S3.secretAccessKey,
 });
 
+/** A disk or S3 store: its configuration and a reader of every object in it. */
+export const STORES = {
+  disk: () => {
+    const root = tempRoot();
+    return { env: { TIDE_DISK_DIR: root }, objects: () => diskObjects(root) };
+  },
+  s3: () => ({ env: s3Env(), objects: (): ReadonlyMap<string, Uint8Array> => s3.objects }),
+};
+export type Store = ReturnType<(typeof STORES)[keyof typeof STORES]>;
+
+const COMMANDS = { publish, rollback, republish, rollout, registerBuild };
+
+/** Runs a write command in process; returns the exit code and output lines. */
+export async function cmd(
+  command: keyof typeof COMMANDS,
+  args: string[],
+  environment: Record<string, string>,
+  now?: () => number,
+) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await COMMANDS[command](args, environment, {
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+    ...(now && { now }),
+  });
+  return { code, out, err };
+}
+
 /** The public config the fixture project exports in production mode. */
 const EXPO_CLIENT = {
   name: "Fixture",
@@ -402,9 +433,6 @@ export async function serveMain(store: Record<string, string>): Promise<void> {
   await bucketFromEnv(store).put("reply/no-update", await noUpdateBy(main));
 }
 
-/** The entry a version-1 or version-2 pointer record holds, for a version-3 record. */
-export const entryOf = (record: Uint8Array) => decodePointer(record) as PointerEntry;
-
 /** A version-3 `reply/no-update` holding, per keyid, a directive signed by that identity. */
 export async function identitiesNoUpdate(signers: Readonly<Record<string, Identity>>) {
   const entries = new Map<string, NoUpdateReply>();
@@ -414,20 +442,30 @@ export async function identitiesNoUpdate(signers: Readonly<Record<string, Identi
   return encodeIdentityNoUpdate(entries);
 }
 
-/** The refusal of a keyid whose binding names another certificate or root. */
+/** The refusal of a chain keyid whose binding names another root. */
 export const BOUND_ELSEWHERE = (key: string) =>
-  `${key} binds this keyid to another certificate or root: a new signing identity needs its own keyid`;
+  `${key} binds this keyid to another root: a new signing identity needs its own keyid`;
 
-/** The refusal of a keyid's bodies whose binding is absent. */
+/** The refusal of a chain keyid's replies whose binding is absent. */
 export const UNBOUND = (key: string) =>
-  `${key} is absent but the bucket holds replies under this keyid: restore it; it binds the certificate or root they were published under`;
+  `${key} is absent but the bucket holds chained replies under this keyid: restore it; it binds the root they were published under`;
 
-/** The direct-mode binding of `keyid` to `id`'s exact certificate, as the bucket stores it beside version-3 bodies. */
-export async function directBinding(
-  id: Pick<Identity, "certificate">,
-  keyid = "main",
-): Promise<[string, Uint8Array<ArrayBuffer>]> {
-  const sha256 = createHash("sha256").update(new X509Certificate(id.certificate).raw).digest("hex");
-  const json = `{"version":1,"keyid":${JSON.stringify(keyid)},"certificate":"${sha256}"}`;
-  return [await identityKey(keyid), utf8(json)];
-}
+/** The refusal of a direct writer whose keyid a chain root's binding holds. */
+export const CHAIN_ROOT = (key: string, keyid = "main") =>
+  `${key} binds keyid "${keyid}" to a chain root: a new signing identity needs its own keyid`;
+
+/** The refusal of a body of `keyid` at `key` that another certificate or root signed. */
+export const OWN_KEYID = (key: string, keyid = "main") =>
+  `${key}: keyid "${keyid}" already signs replies in this bucket with another certificate or root: a new signing identity needs its own keyid and runtimeVersion`;
+
+/** The refusal of a writer whose keyid has no `reply/no-update` entry, without --add-identity. */
+export const NOT_ADDED = (keyid = "main") =>
+  `reply/no-update holds no reply for keyid "${keyid}": tide publish --add-identity adds a signing identity (deploy.md, Adding a signing identity)`;
+
+/** The refusal of a missing `reply/no-update` beside a pointer of another keyid. */
+export const RESTORE = (key: string) =>
+  `reply/no-update is missing and ${key} is signed under another keyid: restore the last reply/no-update object, every keyid's entry, from object versioning or a backup (deploy.md, Adding a signing identity)`;
+
+/** The refusal of a target runtime and platform another keyid's pointer holds. */
+export const OTHER_RUNTIME = (key: string) =>
+  `${key} is signed under another keyid: a new signing identity needs a new runtimeVersion`;

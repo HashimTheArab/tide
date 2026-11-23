@@ -3,8 +3,8 @@ import { KeyObject } from "node:crypto";
 
 import {
   certificateChain,
+  decodeNoUpdate,
   decodePointer,
-  decodeStoredReply,
   parseMultipart,
   verifyChainedSignature,
 } from "@tide-ota/protocol";
@@ -120,7 +120,7 @@ export const chainExport = (rootPem: string) => ({
 /**
  * Checks a stored record as a chain-mode client would at `at`: every reply's parts are the signed part then a
  * `certificate_chain` holding exactly `chain` (for a rollout, one per side: new, then earlier), which passes over
- * `rootPem` and whose leaf verifies the signed part.
+ * `rootPem` and whose leaf verifies the signed part. A version-3 `reply/no-update` is checked at `keyId`'s entry.
  */
 export async function expectChained(
   stored: Uint8Array | undefined,
@@ -128,10 +128,15 @@ export async function expectChained(
   rootPem: string,
   chain: string | readonly string[],
   at: number,
+  keyId = "main",
 ): Promise<void> {
   if (stored === undefined) throw new Error(`${key} is absent`);
-  const record = key === "reply/no-update" ? decodeStoredReply(stored) : decodePointer(stored);
-  if (record.kind === "identities") throw new Error(`${key} holds a version-3 record`);
+  let record = key === "reply/no-update" ? decodeNoUpdate(stored) : decodePointer(stored);
+  if (record.kind === "identities") {
+    const entry = record.entries.get(keyId);
+    if (entry === undefined) throw new Error(`${key} has no entry for ${keyId}`);
+    record = entry;
+  }
   const replies =
     record.kind === "rollout"
       ? [record.new, ...(record.earlier === undefined ? [] : [record.earlier])]

@@ -1,46 +1,80 @@
-import type { PointerEntry, Rollout, StoredReply } from "@tide-ota/protocol";
-import { MAX_IDENTITIES_BYTES } from "@tide-ota/protocol";
+import type { Rollout, StoredReply } from "@tide-ota/protocol";
+import { MAX_REPLY_BYTES, NO_UPDATE_KEY } from "@tide-ota/protocol";
 
 import type { Bucket } from "./bucket.ts";
 import type { Entry, Side } from "./status.ts";
 import { BucketError } from "./bucket.ts";
 import { PublishError } from "./publish-record.ts";
-import { checkRecord } from "./status.ts";
+import { checkPointer, readRecord } from "./status.ts";
 
-/**
- * A pointer as read before composing for one keyid: the ETag its write must match, and that keyid's entry with its
- * newest time; all absent for none.
- */
+/** A pointer as read before composing: the ETag its write must match, its newest time and what it holds; all absent for none. */
 export interface PointerState {
   readonly etag?: string;
-  readonly time?: number; // The newest createdAt or commitTime the entry holds, epoch milliseconds.
+  readonly time?: number; // The newest createdAt or commitTime it holds, epoch milliseconds.
   readonly reply?: StoredReply | Rollout; // Exact bodies, so a writer can copy them.
   readonly sides?: readonly Side[]; // `[reply]`, or a rollout's `[new, earlier?]`.
-  readonly others?: ReadonlyMap<string, PointerEntry>; // Version 3 only: every other keyid's entry, to copy.
 }
 
-/** Reads the pointer at `key` for `keyId`, refusing one a signing client could not receive. */
-export async function readPointer(
-  bucket: Bucket,
-  key: string,
-  keyId: string,
-): Promise<PointerState> {
-  const object = await bucket.get(key, MAX_IDENTITIES_BYTES);
+/** Reads the pointer at `key`, refusing one a signing client could not receive. */
+export async function readPointer(bucket: Bucket, key: string): Promise<PointerState> {
+  const object = await bucket.get(key, MAX_REPLY_BYTES);
   if (object === undefined) return {};
-  const verdict = checkRecord(key, object.bytes);
-  if (typeof verdict === "string") throw new PublishError(`${key} is unreadable: ${verdict}`);
-  const { etag } = object;
-  if (verdict.layout === "legacy") return { etag, ...state(key, verdict.entry) };
-  const own = verdict.entries.get(keyId);
-  const others = new Map<string, PointerEntry>();
-  // checkRecord has refused a noUpdateAvailable entry in a pointer.
-  for (const [k, e] of verdict.entries) if (k !== keyId) others.set(k, e.reply as PointerEntry);
-  return { etag, ...(own && state(key, own)), others };
+  const entry = checkPointer(key, object.bytes);
+  if (typeof entry === "string") throw new PublishError(`${key} is unreadable: ${entry}`);
+  if (entry.time === undefined) throw new PublishError(`${key} is unreadable: it has no time`);
+  const { reply, sides } = entry;
+  return { etag: object.etag, time: Date.parse(entry.time), reply, sides };
 }
 
-function state(key: string, { reply, sides, time }: Entry) {
-  if (time === undefined) throw new PublishError(`${key} is unreadable: it has no time`);
-  return { time: Date.parse(time), reply, sides };
+/** Returns the `<runtime>/<platform>` a pointer key names. */
+export const runtimeOf = (key: string) => key.split("/").slice(2).join("/");
+
+/**
+ * Yields each pointer under `reply/` that `want` accepts, as checkPointer reads it and undefined when absent; a name
+ * outside the key grammar yields no key.
+ */
+export async function* pointers(
+  bucket: Bucket,
+  want: (key: string) => boolean = () => true,
+): AsyncGenerator<{ readonly key?: string; readonly entry?: Entry | string | undefined }> {
+  for (const listed of await bucket.list("reply/")) {
+    if (!("key" in listed)) {
+      yield {};
+      continue;
+    }
+    const { key } = listed;
+    if (key === NO_UPDATE_KEY || !want(key)) continue;
+    yield { key, entry: await readRecord(bucket, key, checkPointer) };
+  }
+}
+
+/**
+ * Refuses a pointer of `runtimes` on any channel signed under another keyid; `read` pointers are judged as read.
+ * Reads only, never fences.
+ */
+export async function ownRuntimes(
+  bucket: Bucket,
+  keyId: string,
+  runtimes: ReadonlySet<string>,
+  read: readonly { readonly key: string; readonly previous: PointerState }[] = [],
+): Promise<void> {
+  const refuse = (key: string, sides: readonly Side[] = []) => {
+    if (sides.some((s) => s.keyId !== keyId)) {
+      throw new PublishError(
+        `${key} is signed under another keyid: a new signing identity needs a new runtimeVersion`,
+      );
+    }
+  };
+  for (const { key, previous } of read) refuse(key, previous.sides);
+  const seen = new Set(read.map((t) => t.key));
+  const listed = pointers(bucket, (key) => !seen.has(key) && runtimes.has(runtimeOf(key)));
+  for await (const { key, entry } of listed) {
+    // A name outside the key grammar names no runtime.
+    if (key === undefined) continue;
+    // Its owner is unknown, as for an unreadable target.
+    if (typeof entry === "string") throw new PublishError(`${key} is unreadable: ${entry}`);
+    refuse(key, entry?.sides);
+  }
 }
 
 /** Returns a time a client accepts as newer than the pointer it replaces, whatever the local clock says. */
