@@ -14,11 +14,14 @@ import {
   parseSfvDictionary,
   readLimited,
   replyKey,
+  rolloutBucket,
+  rolloutClientId,
   verifyChainedSignature,
   verifyExpoSignature,
 } from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
+import { jsonDocument } from "./json.ts";
 import { BUILD_KEYID, KeyError, buildIdentity, isObject, member } from "./keys.ts";
 import { urlBase } from "./publish-record.ts";
 
@@ -44,6 +47,9 @@ const DIRECTIVES = {
   rollBackToEmbedded: true,
   noUpdateAvailable: true,
 } satisfies Record<Exclude<StoredReply["kind"], "manifest">, true>;
+const SCHEMA = 1;
+/** Client IDs tried for one in bucket 0; 10,000 are expected, and missing it by chance is e^-100. */
+const MAX_CLIENT_IDS = 1_000_000;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** A failed probe. Its message is fixed text and statuses, never a header value, key or response body. */
@@ -64,7 +70,14 @@ interface Probe {
   readonly key: CryptoKey;
   readonly keyId: string;
   readonly root: string | undefined; // Chain mode: the root the builds embed.
+  readonly rolloutUpdate: string | undefined; // The update the server must serve its rollout's new side.
+  readonly json: boolean;
 }
+
+/** What a passing probe checked: a directive, or a manifest and its launch asset. */
+type Checked =
+  | { readonly directive: keyof typeof DIRECTIVES }
+  | { readonly updateId: string; readonly launchAssetHash: string };
 
 /**
  * Fetches `/manifest` as a stock client would and verifies the signed part against the pinned certificate and keyid,
@@ -76,15 +89,44 @@ export async function probe(
   io: { readonly out: (line: string) => void; readonly err: (line: string) => void },
   options: { readonly timeoutMs?: number } = {},
 ): Promise<number> {
+  let config: Probe | undefined;
   try {
-    const config = await configure(args, env);
-    for (const line of await check(config, options.timeoutMs)) io.out(line);
+    config = await configure(args, env);
+    const checked = await check(config, options.timeoutMs);
+    for (const line of config.json ? [report(config, null, checked)] : lines(checked)) io.out(line);
     return 0;
   } catch (e) {
     if (!(e instanceof ProbeFailure)) throw e;
+    if (config?.json === true) io.out(report(config, e.failure));
     io.err(`tide: ${e.message}`);
     return PROBE_EXIT[e.failure];
   }
+}
+
+/** Returns the `--json` document of a probe that was sent; a failed one reports nothing it was served. */
+function report(
+  { rolloutUpdate }: Probe,
+  failure: keyof typeof PROBE_EXIT | null,
+  checked?: Checked,
+): string {
+  const manifest = checked !== undefined && "updateId" in checked ? checked : undefined;
+  return jsonDocument({
+    schema: SCHEMA,
+    failure,
+    rolloutSide: rolloutUpdate === undefined ? null : "new",
+    directive: checked !== undefined && "directive" in checked ? checked.directive : null,
+    updateId: manifest?.updateId ?? null,
+    launchAssetHash: manifest?.launchAssetHash ?? null,
+  });
+}
+
+function lines(checked: Checked): string[] {
+  return "directive" in checked
+    ? [`directive ${checked.directive}: signature verified; a directive has no bundle to check`]
+    : [
+        `manifest ${checked.updateId}: signature verified`,
+        `launch asset ${checked.launchAssetHash}: SHA-256 verified`,
+      ];
 }
 
 async function configure(args: readonly string[], env: Env): Promise<Probe> {
@@ -99,6 +141,10 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
         "runtime-version": { type: "string" },
         platform: { type: "string" },
         "app-id": { type: "string" },
+        // Repeatable to the parser, so a repeat is refused rather than its first value dropped.
+        "rollout-side": { type: "string", multiple: true },
+        "rollout-update": { type: "string", multiple: true },
+        json: { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
@@ -132,6 +178,18 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw usage("--app-id must be printable ASCII without edge whitespace");
   }
+  const sides = values["rollout-side"] ?? [];
+  const updates = values["rollout-update"] ?? [];
+  const [rolloutUpdate] = updates;
+  if (sides.length > 0 || updates.length > 0) {
+    if (sides.length !== 1 || updates.length !== 1) {
+      throw usage("--rollout-side and --rollout-update go together, each given once");
+    }
+    if (sides[0] !== "new") throw usage("--rollout-side must be new");
+    if (rolloutUpdate === undefined || !UUID.test(rolloutUpdate)) {
+      throw usage("--rollout-update must be a lowercase UUID");
+    }
+  }
 
   let identity;
   try {
@@ -152,16 +210,30 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
       "expo-expect-signature": `sig, ${encodeSfvDictionary({ keyid: keyId, alg: "rsa-v1_5-sha256" })}`,
       accept: "multipart/mixed",
       ...(appId !== undefined && { "expo-app-id": appId }),
+      ...(rolloutUpdate !== undefined && {
+        "eas-client-id": await newSideClient(rolloutUpdate),
+      }),
     },
     runtimeVersion: runtime,
     key,
     keyId,
     root: chain ? pem : undefined,
+    rolloutUpdate,
+    json: values.json ?? false,
   };
 }
 
-/** Returns the report lines of a passing probe. */
-async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
+/** Returns a client ID in bucket 0 of `updateId`'s rollout, on its new side at every percentage but 0; the same each run. */
+async function newSideClient(updateId: string): Promise<string> {
+  for (let i = 0; i < MAX_CLIENT_IDS; i++) {
+    const id = rolloutClientId(`00000000-0000-4000-8000-${i.toString(16).padStart(12, "0")}`);
+    if (id !== undefined && (await rolloutBucket(id, updateId)) === 0) return id;
+  }
+  throw new Error("no client ID in bucket 0");
+}
+
+/** Returns what a passing probe checked. */
+async function check(probe: Probe, timeoutMs?: number): Promise<Checked> {
   const res = await get(
     "GET /manifest",
     probe.manifestUrl,
@@ -211,7 +283,10 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
         "the directive is not rollBackToEmbedded or noUpdateAvailable",
       );
     }
-    return [`directive ${type}: signature verified; a directive has no bundle to check`];
+    if (probe.rolloutUpdate !== undefined) {
+      throw new ProbeFailure("mismatch", "the server served a directive, not --rollout-update");
+    }
+    return { directive: type as keyof typeof DIRECTIVES };
   }
   const id = member(json, "id");
   const launch = member(json, "launchAsset");
@@ -224,6 +299,9 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
   }
   if (typeof id !== "string" || !UUID.test(id)) {
     throw new ProbeFailure("unparseable", "the manifest's id is not a lowercase UUID");
+  }
+  if (probe.rolloutUpdate !== undefined && id !== probe.rolloutUpdate) {
+    throw new ProbeFailure("mismatch", "the server served another update than --rollout-update");
   }
   // A client never launches an update built for another runtime, so a misrouted pointer must fail here.
   if (member(json, "runtimeVersion") !== probe.runtimeVersion) {
@@ -243,7 +321,7 @@ async function check(probe: Probe, timeoutMs?: number): Promise<string[]> {
     throw new ProbeFailure("unparseable", "the manifest's launchAsset.url is not an http(s) URL");
   }
   await checkBundle(target.href, hash, timeoutMs ?? BUNDLE_TIMEOUT_MS);
-  return [`manifest ${id}: signature verified`, `launch asset ${hash}: SHA-256 verified`];
+  return { updateId: id, launchAssetHash: hash };
 }
 
 /**

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
@@ -7,13 +8,17 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, onTestFinished, test } from "vitest";
 
-import type { NoUpdateReply } from "@tide-ota/protocol";
+import type { NoUpdateReply, Rollout } from "@tide-ota/protocol";
 import {
   MAX_REPLY_BYTES,
+  NO_UPDATE_KEY,
+  buildManifest,
   cryptoKeySigner,
+  decodePointer,
   diskPath,
   encodeIdentityNoUpdate,
   encodeMultipart,
+  encodeRollout,
   encodeStoredReply,
   expoSignature,
 } from "@tide-ota/protocol";
@@ -23,6 +28,7 @@ import { startServer, storeFromEnv } from "../../server/src/node.ts";
 import { PROBE_EXIT, probe } from "../src/probe.ts";
 import { rollback } from "../src/publish-rollback.ts";
 import { publish } from "../src/publish.ts";
+import { rollout } from "../src/rollout.ts";
 import { run, utf8 } from "./helpers.ts";
 import {
   IOS,
@@ -161,6 +167,8 @@ async function publishThrough(
 }
 
 interface Store {
+  readonly env: Record<string, string>;
+  readonly objects: () => Objects;
   readonly published: () => Published;
   /** Replaces the object at `key` for this test, or removes it when `bytes` is undefined. */
   readonly put: (key: string, bytes: Uint8Array | undefined) => void;
@@ -173,6 +181,8 @@ function diskStore(): Store {
     published = await publishThrough({ TIDE_DISK_DIR: root }, () => diskObjects(root));
   });
   return {
+    env: { TIDE_DISK_DIR: root },
+    objects: () => diskObjects(root),
     published: () => published,
     put(key, bytes) {
       const path = join(root, diskPath(key));
@@ -208,6 +218,10 @@ function s3Store(): Store {
     for (const [key, bytes] of snapshot) s3.objects.set(key, bytes);
   });
   return {
+    get env() {
+      return s3Env();
+    },
+    objects: () => s3.objects,
     published: () => published,
     put(key, bytes) {
       if (bytes === undefined) s3.objects.delete(key);
@@ -407,6 +421,266 @@ describe.each([
   });
 });
 
+/** Runs the probe with and without `--json`; fails unless both exit alike with the same stderr. Returns the document. */
+async function reported(probeArgs: string[], probeEnv?: Record<string, string>) {
+  const text = await tide(probeArgs, probeEnv);
+  const json = await tide([...probeArgs, "--json"], probeEnv);
+  expect([json.code, json.stderr]).toEqual([text.code, text.stderr]);
+  return { code: json.code, stdout: json.stdout };
+}
+/** A report's exact stdout, its fields in their order and one newline; `fields` replaces those that are null. */
+const report = (fields: {
+  failure?: keyof typeof PROBE_EXIT;
+  rolloutSide?: "new";
+  directive?: string;
+  updateId?: string;
+  launchAssetHash?: string;
+}) =>
+  `${JSON.stringify({ schema: 1, failure: null, rolloutSide: null, directive: null, updateId: null, launchAssetHash: null, ...fields })}\n`;
+
+describe.each([
+  ["disk", diskStore],
+  ["s3", s3Store],
+] as const)("tide probe --json against the Node server on %s", (_, open) => {
+  const store = open();
+
+  test("a manifest reports its update ID and the launch asset hash checked", async () => {
+    const { base, updateId, hash } = store.published();
+    expect(await reported(args(base))).toEqual({
+      code: 0,
+      stdout: report({ updateId, launchAssetHash: hash }),
+    });
+  });
+
+  test.each([
+    ["main", "android", "rollBackToEmbedded"],
+    ["nothing", "ios", "noUpdateAvailable"],
+  ])("%s on %s reports its %s directive", async (channel, platform, directive) => {
+    expect(await reported(args(store.published().base, channel, [], platform))).toEqual({
+      code: 0,
+      stdout: report({ directive }),
+    });
+  });
+
+  test.each<[keyof typeof PROBE_EXIT, () => Promise<string[]> | string[], string?]>([
+    ["status", () => args(store.published().base, "main", ["--app-id", "another-app"])],
+    [
+      "unparseable",
+      () => {
+        store.put(
+          "reply/garbage/1.0.0/ios",
+          encodeStoredReply({ kind: "rollBackToEmbedded", boundary: "b", body: utf8("no parts") }),
+        );
+        return args(store.published().base, "garbage");
+      },
+    ],
+    ["signature", () => args(store.published().base), "another certificate"],
+    [
+      "bundleMissing",
+      () => {
+        store.put(store.published().bundleKey, undefined);
+        return args(store.published().base);
+      },
+    ],
+    [
+      "bundleHash",
+      () => {
+        store.put(store.published().bundleKey, utf8("tampered bundle"));
+        return args(store.published().base);
+      },
+    ],
+    [
+      "mismatch",
+      async () =>
+        args(
+          await proxy(store.published().base, {
+            reply: (h) => h.set("expo-manifest-filters", 'channel="beta"'),
+          }),
+        ),
+    ],
+    [
+      "unreachable",
+      async () => {
+        const closed = createTcpServer();
+        await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+        const { port } = closed.address() as AddressInfo;
+        await new Promise((resolve) => closed.close(resolve));
+        return args(`http://127.0.0.1:${port}`);
+      },
+    ],
+  ])("a %s failure reports its class and nothing it was served", async (failed, probeArgs, pin) => {
+    const probeEnv = pin === undefined ? pins() : pins(other.certificate);
+    expect(await reported(await probeArgs(), probeEnv)).toEqual({
+      code: PROBE_EXIT[failed],
+      stdout: report({ failure: failed }),
+    });
+  });
+
+  test("a usage error reports nothing", async () => {
+    expect(await reported([...args(store.published().base), "--platform", "web"])).toEqual({
+      code: PROBE_EXIT.usage,
+      stdout: "",
+    });
+  });
+});
+
+/** A rollout bucket, computed here independently of protocol `rolloutBucket`. */
+const bucketOf = (updateId: string, clientId: string) =>
+  createHash("sha256").update(`${updateId}:${clientId}`).digest().readUInt32BE(0) % 10_000;
+const asking = (updateId: string) => ["--rollout-side", "new", "--rollout-update", updateId];
+
+describe.each([
+  ["disk", diskStore],
+  ["s3", s3Store],
+] as const)("tide probe --rollout-side new against the Node server on %s", (_, open) => {
+  const store = open();
+  const write = () => ({ ...env(store.env), TIDE_SERVER_URL: store.published().base });
+  const channelArgs = (channel: string) => ["--channel", channel, "--runtime-version", "1.0.0"];
+  const iosKey = (channel: string) => `reply/${channel}/1.0.0/ios`;
+
+  /** Publishes the iOS fixture to `channel` and returns its update ID. */
+  async function publishIos(channel: string, extra: string[] = []): Promise<string> {
+    const ios = artifact({
+      fields: { platforms: { ios: { runtimeVersion: "1.0.0" } } },
+      parent: dir(),
+    });
+    const published = ["--channel", channel, "--from", ios, ...extra];
+    expect(await publish(published, write(), quiet)).toBe(0);
+    const pointer = decodePointer(store.objects().get(iosKey(channel))!);
+    const reply = pointer.kind === "rollout" ? pointer.new : pointer;
+    if (reply.kind !== "manifest") throw new Error("not a manifest");
+    return reply.updateId;
+  }
+  const move = async (channel: string, goal: string) => {
+    const moved = [goal, ...channelArgs(channel), "--platform", "ios"];
+    expect(await rollout(moved, write(), quiet)).toBe(0);
+  };
+  const probing = (channel: string, updateId: string) =>
+    reported(args(store.published().base, channel, asking(updateId)));
+  const passing = (updateId: string) => ({
+    code: 0,
+    stdout: report({
+      rolloutSide: "new",
+      updateId,
+      launchAssetHash: store.published().hash,
+    }),
+  });
+  const MISMATCH = {
+    code: PROBE_EXIT.mismatch,
+    stdout: report({ failure: "mismatch", rolloutSide: "new" }),
+  };
+
+  test("it gets the new side at 0.01% and 100%; without it, 0.01% gets the earlier side", async () => {
+    const { base, hash } = store.published();
+    const earlier = await publishIos("roll");
+    const next = await publishIos("roll", ["--rollout", "0.01"]);
+    expect(await probing("roll", next)).toEqual(passing(next));
+    expect(await tide(args(base, "roll", asking(next)))).toEqual({
+      code: 0,
+      stdout: `manifest ${next}: signature verified\nlaunch asset ${hash}: SHA-256 verified\n`,
+      stderr: "",
+    });
+    expect(await reported(args(base, "roll"))).toEqual({
+      code: 0,
+      stdout: report({ updateId: earlier, launchAssetHash: hash }),
+    });
+    await move("roll", "complete");
+    expect(await probing("roll", next)).toEqual(passing(next));
+  });
+
+  test("a rollout reverted to its earlier manifest, rollback or none is a mismatch", async () => {
+    const { base } = store.published();
+    await publishIos("to-manifest");
+    await publishIos("to-rollback");
+    const embedded = ["--embedded", ...channelArgs("to-rollback"), "--platform", "ios"];
+    expect(await rollback(embedded, write(), quiet)).toBe(0);
+    for (const [channel, message] of [
+      ["to-manifest", "the server served another update than --rollout-update"],
+      ["to-rollback", "the server served a directive, not --rollout-update"],
+      ["to-none", "the server served a directive, not --rollout-update"],
+    ] as const) {
+      const next = await publishIos(channel, ["--rollout", "50"]);
+      expect(await probing(channel, next), channel).toEqual(passing(next));
+      await move(channel, "revert");
+      expect(await probing(channel, next), channel).toEqual(MISMATCH);
+      expect(await tide(args(base, channel, asking(next)))).toEqual(failure(9, message));
+    }
+  });
+
+  test("a rollout replaced by another update is a mismatch, and the update it was replaced by passes", async () => {
+    const next = await publishIos("replaced", ["--rollout", "50"]);
+    const fix = await publishIos("replaced");
+    expect(await probing("replaced", next)).toEqual(MISMATCH);
+    // A plain pointer answers as a complete rollout does: every device gets that update.
+    expect(await probing("replaced", fix)).toEqual(passing(fix));
+  });
+
+  test("no pointer is a mismatch on a signed no-update, and a bad status when there is none", async () => {
+    const { updateId } = store.published();
+    expect(await probing("nothing", updateId)).toEqual(MISMATCH);
+    store.put(NO_UPDATE_KEY, undefined);
+    expect(await probing("nothing", updateId)).toEqual({
+      code: PROBE_EXIT.status,
+      stdout: report({ failure: "status", rolloutSide: "new" }),
+    });
+  });
+
+  test("a completed update that is now a later rollout's earlier side passes when it is the one served", async () => {
+    const { hash, launchUrl } = store.published();
+    const manifest = async (id: string): Promise<Rollout["new"]> => {
+      const body = buildManifest({
+        id,
+        createdAt: new Date("2030-01-01T00:00:00Z"),
+        runtimeVersion: "1.0.0",
+        launchAsset: {
+          hash,
+          contentType: "application/javascript",
+          fileExtension: ".bundle",
+          url: launchUrl,
+        },
+        assets: [],
+        metadata: {},
+        extra: {},
+      });
+      const signature = await expoSignature(body, cryptoKeySigner(main.keys.privateKey, "main"));
+      const multipart = encodeMultipart([{ name: "manifest", body, signature }]);
+      return { kind: "manifest", updateId: id, manifestFilters: "", ...multipart };
+    };
+    const [was, later] = [
+      "1a2b3c4d-0000-4000-8000-00000000000a",
+      "1a2b3c4d-0000-4000-8000-00000000000b",
+    ];
+    const record: Rollout = {
+      kind: "rollout",
+      percent: 0.01,
+      new: await manifest(later),
+      earlier: await manifest(was),
+    };
+    store.put(iosKey("later"), encodeRollout(record));
+    expect(await probing("later", was)).toEqual(passing(was));
+    expect(await probing("later", later)).toEqual(passing(later));
+    store.put(iosKey("later"), encodeRollout({ ...record, percent: 100 }));
+    expect(await probing("later", was)).toEqual(MISMATCH);
+  });
+
+  test("the client ID sent is in bucket 0 of the update's rollout, the same each run, and only with the flags", async () => {
+    const sent: (string | null)[] = [];
+    const watched = await proxy(store.published().base, {
+      request: (h) => {
+        sent.push(h.get("eas-client-id"));
+      },
+    });
+    const { updateId } = store.published();
+    for (const extra of [asking(updateId), asking(updateId), []]) {
+      expect((await tide(args(watched, "main", extra))).code).toBe(0);
+    }
+    const [client] = sent;
+    expect(client).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(bucketOf(updateId, client ?? "")).toBe(0);
+    expect(sent).toEqual([client, client, null]);
+  });
+});
+
 describe("tide probe on s3 failures", () => {
   const store = s3Store();
 
@@ -574,6 +848,28 @@ describe("tide probe configuration", () => {
     expect(code).toBe(PROBE_EXIT.usage);
     expect(err).toHaveLength(1);
     expect(err[0]).toContain(`tide: ${message}`);
+    expect(requests).toBe(0);
+  });
+
+  const ID = "0f6a9a3e-6c1b-4c4e-9d55-2b8f3f7c1a90";
+  const TOGETHER = "--rollout-side and --rollout-update go together, each given once";
+  test.each<[string, string[], string]>([
+    ["no --rollout-update", ["--rollout-side", "new"], TOGETHER],
+    ["no --rollout-side", ["--rollout-update", ID], TOGETHER],
+    [
+      "another side",
+      ["--rollout-side", "earlier", "--rollout-update", ID],
+      "--rollout-side must be new",
+    ],
+    ["an uppercase ID", asking(ID.toUpperCase()), "--rollout-update must be a lowercase UUID"],
+    ["an ID that is not a UUID", asking("latest"), "--rollout-update must be a lowercase UUID"],
+    ["an empty ID", asking(""), "--rollout-update must be a lowercase UUID"],
+    ["a repeated ID", [...asking("latest"), "--rollout-update", ID], TOGETHER],
+    ["a repeated side", [...asking(ID), "--rollout-side", "new"], TOGETHER],
+  ])("the rollout probe with %s is a usage error before any request", async (_, extra, message) => {
+    const result = await tide([...at(), ...extra]);
+    expect(result).toEqual(failure(PROBE_EXIT.usage, message));
+    expect(await tide([...at(), ...extra, "--json"])).toEqual(result);
     expect(requests).toBe(0);
   });
 
