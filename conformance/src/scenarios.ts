@@ -1,6 +1,6 @@
 // What each scenario does on an installed build, and what it requires the app and the recorder to show.
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -24,12 +24,12 @@ import {
 
 import type { App, Build } from "./app.ts";
 import type { Device, Report } from "./device.ts";
-import type { ExpoVersion, Platform, Run, Scenario } from "./options.ts";
+import type { ExpoVersion, Platform, Scenario } from "./options.ts";
 import type { Identity, Recorded, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
 import { exportUpdate, materialise } from "./app.ts";
 import { SCENARIOS } from "./options.ts";
-import { tamperPatch, withStack } from "./stack.ts";
+import { tamperPatch } from "./stack.ts";
 import { chainAuthority, tideCli } from "./tide-cli.ts";
 
 // The seed's own runtime keeps it out of every tested runtime's patch bases.
@@ -60,14 +60,10 @@ export interface Builds extends Target {
   chained(): Promise<Chained>;
 }
 
-/** How a run reaches one platform's device and builds its app. */
-export interface Driver {
-  /** Returns the run's device, reaching the stack's Tide at 127.0.0.1, a line naming it, and its app builder. */
-  open(stack: Stack): Promise<{
-    device: Device;
-    about: string;
-    build: (app: App, marker: string) => Promise<Build>;
-  }>;
+/** A run's device, which reaches the stack's Tide at 127.0.0.1, and its app builder. */
+export interface Opened {
+  readonly device: Device;
+  build(app: App, marker: string): Promise<Build>;
 }
 
 /** What the checks read: the store, and the identity, channel, runtime and platform the app has. */
@@ -287,45 +283,6 @@ export async function runScenarios(
   }
 }
 
-/**
- * Builds each version's app and runs the scenarios on one device, with a stack per version; prints one line per
- * version and scenario through `out`, and returns 1 if any failed or did not run, or a stack did not close cleanly.
- */
-export async function conform(
-  run: Run,
-  driver: Driver,
-  out: (line: string) => void,
-  say: (line: string) => void,
-): Promise<number> {
-  const names = plan(run.scenarios);
-  let failed = false;
-  for (const version of run.versions) {
-    const report = (name: Scenario, outcome: Outcome) => {
-      const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
-      const result = outcome.pass ? "pass" : "fail";
-      out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
-      if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
-      if (!outcome.pass) failed = true;
-    };
-    try {
-      await withStack(async (stack) => {
-        let builds: Builds;
-        try {
-          builds = await prepare(stack, version, run.platform, driver, say);
-        } catch (e) {
-          for (const name of names) report(name, { pass: false, why: `not run: ${message(e)}` });
-          return;
-        }
-        await runScenarios(names, (name, running) => STEPS[name].run(builds, running), report);
-      });
-    } catch (e) {
-      say(`expo-updates ${version}: ${message(e)}`);
-      failed = true;
-    }
-  }
-  return failed ? 1 : 0;
-}
-
 /** Each launch runs `u` and accepts the signed no-update reply. */
 export async function checkNoUpdate(s: Served, u: Update, traces: readonly Trace[]): Promise<void> {
   await compare(
@@ -444,22 +401,22 @@ export async function checkRollback(
   );
 }
 
-/** Opens the device, builds the direct app and publishes the seed, without which the bucket serves no reply. */
+/** Empties the bucket, builds the direct app and publishes the seed, without which the bucket serves no reply. */
 export async function prepare(
   stack: Stack,
+  opened: Opened,
   version: ExpoVersion,
   platform: Platform,
-  driver: Driver,
   say: (line: string) => void,
 ): Promise<Builds> {
-  const { device, about, build } = await driver.open(stack);
-  say(`using ${about}`);
+  rmSync(stack.storeDir, { recursive: true, force: true });
+  mkdirSync(stack.storeDir); // Throws once a signal has removed the stack.
   const target = async (identity: Identity, name: string): Promise<Target> => {
     const app = materialise(stack, version, platform, identity);
     say(`building the expo-updates ${version} ${name} release ${platform} app`);
     const marker = `${name}-${version}-${randomUUID().slice(0, 8)}`;
     const cli = tideCli(stack, identity);
-    return { stack, device, cli, app, build: await build(app, marker) };
+    return { stack, device: opened.device, cli, app, build: await opened.build(app, marker) };
   };
   const direct = await target(stack.identity, "embedded");
   const from = await exportUpdate(stack, direct.cli, direct.app, "seed", SEED_RUNTIME);

@@ -16,7 +16,7 @@ import {
 
 import type { Report } from "../src/device.ts";
 import type { Platform, Scenario } from "../src/options.ts";
-import type { Driver, Outcome, Served, Trace, Update } from "../src/scenarios.ts";
+import type { Outcome, Served, Trace, Update } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import { SCENARIOS } from "../src/options.ts";
 import {
@@ -26,13 +26,12 @@ import {
   checkNoUpdate,
   checkPatch,
   checkRollback,
-  conform,
   plan,
   runScenarios,
 } from "../src/scenarios.ts";
 import { tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
-import { ANDROID, MAIN, fakeDriver, fixtureExport, hexOf, sha256Hex } from "./harness.ts";
+import { ANDROID, MAIN, fixtureExport, hexOf, sha256Hex } from "./harness.ts";
 
 const EMBEDDED_ID = "6f1b0c2e-4d3a-4b5c-9e8f-7a6b5c4d3e2f";
 const UNSIGNED = `got ${NO_UPDATE_KEY}, which is not signed for keyid conformance`;
@@ -584,42 +583,5 @@ describe("selection", () => {
       ["chain-rollback", { pass: true, saw: "ran chain-rollback" }],
       ["leaf-rotation", { pass: true, saw: "ran leaf-rotation" }],
     ]);
-  });
-});
-
-describe("a run", () => {
-  test("goes on to the next version after a stack fails to close, reports the failure and returns 1", async () => {
-    const fake = fakeDriver("android");
-    let opened = 0;
-    const driver: Driver = {
-      open(stack) {
-        if (++opened === 1) {
-          stack.onClose(() => Promise.reject(new Error("adb reverse --remove failed")));
-        }
-        return fake.open(stack);
-      },
-    };
-    const lines: string[] = [];
-    const said: string[] = [];
-    const code = await conform(
-      {
-        platform: "android",
-        versions: ["55", "58"],
-        scenarios: ["embedded"],
-        avd: undefined,
-        simulator: undefined,
-      },
-      driver,
-      (line) => lines.push(line),
-      (line) => said.push(line),
-    );
-    expect(lines.map((line) => line.split(" ran ")[0])).toEqual(
-      ["55", "58"].map((v) => `android expo-updates ${v} embedded: pass: both launches`),
-    );
-    expect(said).toContain(
-      "expo-updates 55: the stack did not close cleanly: Error: adb reverse --remove failed",
-    );
-    expect(said.filter((line) => line.startsWith("expo-updates"))).toHaveLength(1);
-    expect(code).toBe(1);
   });
 });

@@ -1,7 +1,7 @@
 // Drives the Tide CLI as an operator's CI would, against a stack's store and the stack's identities only.
 import { generateKeyPair } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -125,8 +125,7 @@ export function tideCli(stack: Stack, identity: Identity = stack.identity): Tide
  * key of its own under them and returns the chain-mode identity that signs with it: the keyid and root stay the same.
  */
 export async function chainAuthority(stack: Stack): Promise<() => Promise<Identity>> {
-  const dir = join(stack.dir, "chain");
-  await mkdir(dir, { mode: 0o700 });
+  const dir = await mkdtemp(join(stack.dir, "chain-"));
   const file = (name: string) => join(dir, name);
   const certify = async (name: string, signer: string, days: number, args: readonly string[]) => {
     await writeKey(file(name));

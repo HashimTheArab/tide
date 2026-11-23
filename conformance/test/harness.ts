@@ -24,8 +24,8 @@ import { contentKey, sha256Base64Url } from "@tide-ota/protocol";
 
 import type { App, Build } from "../src/app.ts";
 import type { Device } from "../src/device.ts";
-import type { Platform } from "../src/options.ts";
-import type { Builds, Driver } from "../src/scenarios.ts";
+import type { ExpoVersion, Platform } from "../src/options.ts";
+import type { Builds } from "../src/scenarios.ts";
 import type { Stack } from "../src/stack.ts";
 import type { FakeBuild } from "./fake-app.ts";
 import { EXPORT_FILE, encodeProjectExport } from "../../packages/cli/src/publish-export.ts";
@@ -78,18 +78,16 @@ function fakeDevice(stack: Stack, platform: Platform): Promise<Device> {
   return iosDevice(stack, { xcrun, simulator: undefined });
 }
 
-/** Returns a driver over a fake device whose exports run without Expo; `keyid` replaces the one its builds send. */
-export const fakeDriver = (platform: Platform, keyid?: string): Driver => ({
-  async open(stack) {
-    const device = await fakeDevice(stack, platform);
-    const build = (app: App, marker: string) => Promise.resolve(fakeBuild(app, marker, keyid));
-    return { device, about: "", build };
-  },
-});
-
-/** Prepares a fake device's builds of the 58 app; `keyid` replaces the one they send. */
-export const fakeBuilds = (stack: Stack, platform: Platform, keyid?: string): Promise<Builds> =>
-  prepare(stack, "58", platform, fakeDriver(platform, keyid), () => undefined);
+/** Prepares `version`'s builds on a fake device of their own; `keyid` replaces the one they send. */
+export async function fakeBuilds(
+  stack: Stack,
+  platform: Platform,
+  { keyid, version = "58" }: { keyid?: string; version?: ExpoVersion } = {},
+): Promise<Builds> {
+  const device = await fakeDevice(stack, platform);
+  const build = (app: App, marker: string) => Promise.resolve(fakeBuild(app, marker, keyid));
+  return prepare(stack, { device, build }, version, platform, () => undefined);
+}
 
 function fakeBuild(app: App, marker: string, keyid?: string): Build {
   const file = (name: string, content: string | Uint8Array) => {

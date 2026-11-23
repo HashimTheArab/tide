@@ -195,6 +195,32 @@ esac
     expect(result.tmpEntries).toEqual([]);
   });
 
+  test("every version runs when the device cleanup fails, which is said and exits 1", async () => {
+    const fake = fakeSdk({ running: { "emulator-5554": {} } });
+    const bin = join(fake.sdk, "bin");
+    mkdirSync(bin);
+    const script = (path: string, text: string) => writeFileSync(path, text, { mode: 0o755 });
+    script(join(bin, "npm"), "#!/bin/sh\nexit 1\n");
+    const adb = join(fake.sdk, "platform-tools", "adb");
+    const [shebang, ...rest] = readFileSync(adb, "utf8").split("\n");
+    const fails = `case "$*" in *"reverse --remove"*) echo "no such reverse" >&2; exit 1;; esac`;
+    script(adb, [shebang, fails, ...rest].join("\n"));
+    const result = await conformance(["--platform", "android", "--scenario", "embedded"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      ANDROID_HOME: fake.sdk,
+    });
+    expect(result.stdout).toBe(
+      ["55", "58"]
+        .map((v) => `android expo-updates ${v} embedded: fail: not run: npm ci exited 1:\n`)
+        .join(""),
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(
+      /^conformance: the stack did not close cleanly: .*reverse --remove .*no such reverse/m,
+    );
+    expect(result.tmpEntries).toEqual([]);
+  });
+
   test("a version whose Xcode build fails prints a line per scenario, the next still builds, and the booted simulator stays booted", async () => {
     const fake = fakeXcrun([{ udid: "A1", name: "iPhone", state: "Booted" }]);
     const bin = join(fake.dir, "bin");

@@ -35,10 +35,20 @@ describe.each(["android", "ios"] as const)("the identity and chain steps on %s",
   });
 });
 
+test("each version of a run joins its own identities to an emptied bucket", async () => {
+  await withStack(async (stack) => {
+    for (const version of ["55", "58"] as const) {
+      const builds = await fakeBuilds(stack, "android", { version });
+      const { saw } = await STEPS.identities.run(builds, undefined);
+      expect(saw).toContain("across keyid conformance-chain joining");
+    }
+  });
+});
+
 test("the steps fail when the chained build sends the direct one's keyid", async () => {
   await withStack(async (stack) => {
     const sent = `sig, keyid="conformance", alg="rsa-v1_5-sha256"`;
-    expect(await outcomes(await fakeBuilds(stack, "android", "conformance"))).toEqual([
+    expect(await outcomes(await fakeBuilds(stack, "android", { keyid: "conformance" }))).toEqual([
       `identities: a /manifest request expected ${sent}, not keyid conformance-chain`,
       ...CHAIN_STEPS.map((name) => `${name}: not run: identities failed`),
     ]);

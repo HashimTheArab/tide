@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import type { Run } from "./options.ts";
-import type { Driver } from "./scenarios.ts";
+import type { ExpoVersion, Run, Scenario } from "./options.ts";
+import type { Builds, Opened, Outcome } from "./scenarios.ts";
+import type { Stack } from "./stack.ts";
 import { androidDevice } from "./android.ts";
 import { buildAndroid, buildIos } from "./app.ts";
 import { iosDevice } from "./ios.ts";
 import { USAGE, UsageError, parseRun } from "./options.ts";
-import { conform, message } from "./scenarios.ts";
+import { STEPS, message, plan, prepare, runScenarios } from "./scenarios.ts";
+import { withStack } from "./stack.ts";
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
 const say = (line: string) => process.stderr.write(`conformance: ${line}\n`);
@@ -25,17 +27,23 @@ async function main(args: readonly string[]): Promise<number> {
     return 0;
   }
   try {
-    if (run.platform === "ios") return await conform(run, ios(run), out, say);
+    if (run.platform === "ios") return await conform(run, ios(run));
     const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
     if (sdk === undefined || sdk === "") {
       say("set ANDROID_HOME to the Android SDK");
       return 1;
     }
-    return await conform(run, android(run, sdk), out, say);
+    return await conform(run, android(run, sdk));
   } catch (e) {
     say(message(e));
     return 1;
   }
+}
+
+/** How a run reaches one platform's device and builds its app. */
+interface Driver {
+  /** Returns the run's device and app builder, and a line naming the device. */
+  open(stack: Stack): Promise<Opened & { about: string }>;
 }
 
 const android = (run: Run, sdk: string): Driver => ({
@@ -64,5 +72,51 @@ const ios = (run: Run): Driver => ({
     };
   },
 });
+
+/**
+ * Builds each version's app and runs the scenarios on one device, printing one line per version and scenario;
+ * returns 1 if any failed or did not run.
+ */
+async function conform(run: Run, driver: Driver): Promise<number> {
+  const names = plan(run.scenarios);
+  const failed: string[] = [];
+  const report = (version: ExpoVersion, name: Scenario, outcome: Outcome) => {
+    const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
+    const result = outcome.pass ? "pass" : "fail";
+    out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
+    if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
+    if (!outcome.pass) failed.push(`${version} ${name}`);
+  };
+  const notRun = (versions: readonly ExpoVersion[], e: unknown) => {
+    for (const version of versions) {
+      for (const name of names)
+        report(version, name, { pass: false, why: `not run: ${message(e)}` });
+    }
+  };
+  await withStack(async (stack) => {
+    let opened;
+    try {
+      opened = await driver.open(stack);
+    } catch (e) {
+      return notRun(run.versions, e);
+    }
+    say(`using ${opened.about}`);
+    for (const version of run.versions) {
+      let builds: Builds;
+      try {
+        builds = await prepare(stack, opened, version, run.platform, say);
+      } catch (e) {
+        notRun([version], e);
+        continue;
+      }
+      await runScenarios(
+        names,
+        (name, running) => STEPS[name].run(builds, running),
+        (name, outcome) => report(version, name, outcome),
+      );
+    }
+  });
+  return failed.length > 0 ? 1 : 0;
+}
 
 process.exitCode = await main(process.argv.slice(2));

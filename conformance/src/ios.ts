@@ -79,8 +79,12 @@ export async function iosDevice(stack: Stack, options: IosOptions): Promise<IosD
         if (!(e instanceof Error && e.message.includes("current state: Shutdown"))) errors.push(e);
       }
     }
-    if (errors.length > 0)
-      throw new AggregateError(errors, `simulator ${sim.name} did not clean up`);
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        `simulator ${sim.name} did not clean up: ${errors.join("; ")}`,
+      );
+    }
   });
   let booted = false;
   if (sim.state !== "Booted") {
