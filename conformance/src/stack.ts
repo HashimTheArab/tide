@@ -82,7 +82,9 @@ async function startStack(): Promise<Stack> {
           errors.push(e);
         }
       }
-      if (errors.length > 0) throw new AggregateError(errors, "the stack did not close cleanly");
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `the stack did not close cleanly: ${errors.join("; ")}`);
+      }
     })());
   try {
     const storeDir = join(dir, "store");
@@ -142,11 +144,13 @@ async function startStack(): Promise<Stack> {
 
 /**
  * Runs `body` with a fresh stack and closes it on return, on throw, and on SIGINT or SIGTERM, after which the process
- * exits with 128 plus the signal number.
+ * exits with 128 plus the signal number, and this never settles.
  */
 export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<T> {
   const starting = startStack();
+  let exiting = false;
   const onSignal = (signal: NodeJS.Signals) => {
+    exiting = true;
     void starting
       .then((s) => s.close())
       .catch(() => undefined)
@@ -162,6 +166,8 @@ export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<
       await stack.close();
     }
   } finally {
+    // Never returns to a caller that could start another stack before the exit.
+    if (exiting) await new Promise(() => undefined);
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }

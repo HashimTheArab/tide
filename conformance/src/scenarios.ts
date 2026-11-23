@@ -24,12 +24,12 @@ import {
 
 import type { App, Build } from "./app.ts";
 import type { Device, Report } from "./device.ts";
-import type { ExpoVersion, Platform, Scenario } from "./options.ts";
+import type { ExpoVersion, Platform, Run, Scenario } from "./options.ts";
 import type { Identity, Recorded, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
 import { exportUpdate, materialise } from "./app.ts";
 import { SCENARIOS } from "./options.ts";
-import { tamperPatch } from "./stack.ts";
+import { tamperPatch, withStack } from "./stack.ts";
 import { chainAuthority, tideCli } from "./tide-cli.ts";
 
 // The seed's own runtime keeps it out of every tested runtime's patch bases.
@@ -285,6 +285,45 @@ export async function runScenarios(
       done(name, { pass: false, why: message(e) });
     }
   }
+}
+
+/**
+ * Builds each version's app and runs the scenarios on one device, with a stack per version; prints one line per
+ * version and scenario through `out`, and returns 1 if any failed or did not run, or a stack did not close cleanly.
+ */
+export async function conform(
+  run: Run,
+  driver: Driver,
+  out: (line: string) => void,
+  say: (line: string) => void,
+): Promise<number> {
+  const names = plan(run.scenarios);
+  let failed = false;
+  for (const version of run.versions) {
+    const report = (name: Scenario, outcome: Outcome) => {
+      const [first, ...rest] = (outcome.pass ? outcome.saw : outcome.why).split("\n");
+      const result = outcome.pass ? "pass" : "fail";
+      out(`${run.platform} expo-updates ${version} ${name}: ${result}: ${first}`);
+      if (rest.length > 0) say(`${version} ${name}:\n${rest.join("\n")}`);
+      if (!outcome.pass) failed = true;
+    };
+    try {
+      await withStack(async (stack) => {
+        let builds: Builds;
+        try {
+          builds = await prepare(stack, version, run.platform, driver, say);
+        } catch (e) {
+          for (const name of names) report(name, { pass: false, why: `not run: ${message(e)}` });
+          return;
+        }
+        await runScenarios(names, (name, running) => STEPS[name].run(builds, running), report);
+      });
+    } catch (e) {
+      say(`expo-updates ${version}: ${message(e)}`);
+      failed = true;
+    }
+  }
+  return failed ? 1 : 0;
 }
 
 /** Each launch runs `u` and accepts the signed no-update reply. */

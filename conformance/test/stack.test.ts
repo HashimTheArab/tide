@@ -5,8 +5,10 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -109,9 +111,15 @@ function get(url: string, headers: Record<string, string> = {}) {
   });
 }
 
-/** Starts a Node child running `script`; `line()` resolves its next stdout line. It is killed when the test ends. */
-function child(script: string) {
-  const proc = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "inherit"] });
+/**
+ * Starts a Node child running `script`, whose temp dir is `tmp`; `line()` resolves its next stdout line. It is killed
+ * when the test ends.
+ */
+function child(script: string, tmp: string) {
+  const proc = spawn(process.execPath, [script], {
+    env: { PATH: process.env.PATH ?? "", TMPDIR: tmp },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
   onTestFinished(() => {
     proc.kill("SIGKILL");
   });
@@ -512,13 +520,16 @@ describe("the harness stack shuts down", () => {
   test.each([
     ["SIGINT", 130],
     ["SIGTERM", 143],
-  ] as const)("on %s, exiting %i", async (signal, code) => {
-    const held = child(HOLD);
+  ] as const)("on %s, exiting %i before another stack starts", async (signal, code) => {
+    const tmp = mkdtempSync(join(tmpdir(), "tide-conformance-test-"));
+    onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+    const held = child(HOLD, tmp);
     const seen = JSON.parse(await held.line()) as { dir: string; url: string };
     expect(existsSync(seen.dir)).toBe(true);
     expect((await fetch(`${seen.url}/hc`)).status).toBe(200);
     held.proc.kill(signal);
     expect(await held.exited).toEqual([code, null]);
     await expectClosed(seen);
+    expect(readdirSync(tmp)).toEqual([]);
   });
 });

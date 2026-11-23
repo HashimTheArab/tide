@@ -78,17 +78,18 @@ function fakeDevice(stack: Stack, platform: Platform): Promise<Device> {
   return iosDevice(stack, { xcrun, simulator: undefined });
 }
 
-/** Prepares a fake device's builds of the 58 app, whose exports run without Expo; `keyid` replaces the one they send. */
-export function fakeBuilds(stack: Stack, platform: Platform, keyid?: string): Promise<Builds> {
-  const driver: Driver = {
-    async open() {
-      const device = await fakeDevice(stack, platform);
-      const build = (app: App, marker: string) => Promise.resolve(fakeBuild(app, marker, keyid));
-      return { device, about: "", build };
-    },
-  };
-  return prepare(stack, "58", platform, driver, () => undefined);
-}
+/** Returns a driver over a fake device whose exports run without Expo; `keyid` replaces the one its builds send. */
+export const fakeDriver = (platform: Platform, keyid?: string): Driver => ({
+  async open(stack) {
+    const device = await fakeDevice(stack, platform);
+    const build = (app: App, marker: string) => Promise.resolve(fakeBuild(app, marker, keyid));
+    return { device, about: "", build };
+  },
+});
+
+/** Prepares a fake device's builds of the 58 app; `keyid` replaces the one they send. */
+export const fakeBuilds = (stack: Stack, platform: Platform, keyid?: string): Promise<Builds> =>
+  prepare(stack, "58", platform, fakeDriver(platform, keyid), () => undefined);
 
 function fakeBuild(app: App, marker: string, keyid?: string): Build {
   const file = (name: string, content: string | Uint8Array) => {
