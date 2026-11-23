@@ -32,7 +32,7 @@ AI agents write most of the code.
 | `packages/server` | Hono app. `src/core/` is runtime-free; `src/workers.ts` and `src/node.ts` are the only entry points; `Dockerfile` builds the Node image |
 | `packages/protocol` | Manifest, multipart, signature and patch contract, shared by server and CLI |
 | `packages/cli` | `export` (the only command that runs project code), `publish --from` (`--rollout`), `rollout`, `register-build`, `rollback`, `republish`, `status`, `storage`, `probe`, `certificate` (P4 onward) |
-| `conformance` | `pnpm conformance`: stock `expo-updates` release apps against a local Tide (Node entry, disk store) with a signing identity generated per run; not part of the gate. `apps/shared` is the one app source; `apps/sdk-<n>` pin each version with an npm lockfile outside the pnpm workspace |
+| `conformance` | `pnpm conformance`: stock `expo-updates` release apps against a local Tide (Node entry, disk store) with signing identities generated per run; not part of the gate. `apps/shared` is the one app source; `apps/sdk-<n>` pin each version with an npm lockfile outside the pnpm workspace |
 | `examples/operator` | A minimal operator Worker re-exporting `@tide-ota/server/workers`; dry-run built and tested in the gate |
 | `docs/` | Design, roadmap, testing standard, delivery loop and decision records; index in `docs/README.md` |
 | `scripts/gate.mjs` | The one gate CI and the delivery loop run |
@@ -60,6 +60,7 @@ AI agents write most of the code.
 - **Editing generated files.** `worker-configuration.d.ts` comes from `pnpm -F @tide-ota/server types`; the gate fails
   when it is stale.
 - **Committing secrets.** Never commit `.env`, keys or credentials.
+- **Attribution trailers.** Commit messages carry no `Co-Authored-By` line for an AI tool.
 - **Formatting by hand.** Run `pnpm format:fix`; oxfmt orders imports.
 
 ## Where things are decided

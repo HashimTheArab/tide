@@ -20,6 +20,11 @@ export const SCENARIOS = {
   "patch-embedded": "an update patches from the embedded bundle",
   "patch-delta":
     "an update compiled against the embedded bundle patches from an OTA update and the embedded one",
+  identities:
+    "a chained build joins the bucket under its own keyid, root and runtime; each build takes only its own updates",
+  "chain-patch": "the chained build patches from its running OTA update",
+  "chain-rollback": "a rollback directive returns the chained build to its embedded update",
+  "leaf-rotation": "the chained build, not rebuilt, takes an update a new leaf key signs",
 } as const;
 export type Scenario = keyof typeof SCENARIOS;
 
@@ -31,7 +36,8 @@ const list = (table: Readonly<Record<string, string>>) =>
 export const USAGE = `usage: pnpm conformance --platform <${PLATFORMS.join("|")}> [--expo <version>]... [--scenario <name>]...
                         [--avd <name>] [--simulator <name|udid>]
 
-Runs stock expo-updates release apps against a local Tide. Every version and scenario runs unless named.
+Runs stock expo-updates release apps against a local Tide. Every version and scenario runs unless named; each version
+has a bucket of its own.
 
 Android uses the running emulator (ANDROID_SERIAL picks one of several), or boots the AVD --avd names (the first
 listed by default) read-only and shuts it down at the end. ANDROID_HOME must name the Android SDK.

@@ -14,21 +14,22 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ExpoVersion, Platform } from "./options.ts";
-import type { Stack } from "./stack.ts";
+import type { Identity, Stack } from "./stack.ts";
 import type { TideCli } from "./tide-cli.ts";
 import { hostEnv, tail } from "./stack.ts";
 
 const APPS = fileURLToPath(new URL("../apps/", import.meta.url));
 const CERTIFICATE = "keys/certificate.pem";
 
-/** One version's app for one platform, materialised in a stack's temp dir. */
+/** One version's app for one platform and signing identity, materialised in a stack's temp dir. */
 export interface App {
   readonly version: ExpoVersion;
   readonly platform: Platform;
+  readonly identity: Identity; // What its builds trust.
   readonly dir: string;
-  readonly appId: string; // The Android package and the iOS bundle identifier.
-  readonly channel: string; // One per version, so versions share a stack without sharing a pointer.
-  readonly runtimeVersion: string; // One per version: bases and patches are scoped by runtime, and each SDK is its own.
+  readonly appId: string; // The Android package and the iOS bundle identifier; one per version and identity.
+  readonly channel: string; // One per version, shared by its identities.
+  readonly runtimeVersion: string; // One per version and identity, as one runtime has one signing identity.
 }
 
 /** A release build and what `register-build` reads from it. */
@@ -41,22 +42,30 @@ export interface Build {
   readonly assetsDir: string; // Holds the embedded assets with the bytes Metro wrote.
 }
 
-/** Copies the version's app into the stack's dir and writes its config for the stack's Tide and identity. */
-export function materialise(stack: Stack, version: ExpoVersion, platform: Platform): App {
-  const dir = join(stack.dir, `app-${version}`);
+/** Copies the version's app into the stack's dir and writes its config for the stack's Tide and `identity`. */
+export function materialise(
+  stack: Stack,
+  version: ExpoVersion,
+  platform: Platform,
+  identity: Identity = stack.identity,
+): App {
+  const chained = identity.chainFile !== undefined;
+  const name = chained ? `${version}chained` : version;
+  const dir = join(stack.dir, `app-${name}`);
   cpSync(join(APPS, "shared"), dir, { recursive: true, errorOnExist: true, force: false });
   for (const file of ["package.json", "package-lock.json"]) {
     copyFileSync(join(APPS, `sdk-${version}`, file), join(dir, file));
   }
   mkdirSync(join(dir, "keys"));
-  copyFileSync(stack.identity.certificateFile, join(dir, CERTIFICATE));
+  copyFileSync(identity.certificateFile, join(dir, CERTIFICATE));
   const app = {
     version,
     platform,
+    identity,
     dir,
-    appId: `dev.tide.conformance.sdk${version}`,
+    appId: `dev.tide.conformance.sdk${name}`,
     channel: `expo-${version}`,
-    runtimeVersion: `1.0.0-sdk${version}`,
+    runtimeVersion: `1.0.0-sdk${name}`,
   };
   const config = {
     expo: {
@@ -66,7 +75,7 @@ export function materialise(stack: Stack, version: ExpoVersion, platform: Platfo
       runtimeVersion: app.runtimeVersion,
       android: { package: app.appId },
       ios: { bundleIdentifier: app.appId },
-      plugins: ["./cleartext.js"],
+      plugins: ["./cleartext.js", ...(chained ? ["./certificate-chain.js"] : [])],
       updates: {
         url: `${stack.serverUrl}/manifest`,
         requestHeaders: { "expo-channel-name": app.channel },
@@ -74,7 +83,9 @@ export function materialise(stack: Stack, version: ExpoVersion, platform: Platfo
         checkAutomatically: "NEVER",
         enableBsdiffPatchSupport: true, // Off by default on 55.
         codeSigningCertificate: `./${CERTIFICATE}`,
-        codeSigningMetadata: { keyid: stack.identity.keyId, alg: "rsa-v1_5-sha256" },
+        codeSigningMetadata: { keyid: identity.keyId, alg: "rsa-v1_5-sha256" },
+        // Expo ignores it: `tide export` records it, and the plugin writes the native opt-in.
+        ...(chained && { codeSigningIncludeManifestResponseCertificateChain: true }),
       },
     },
   };

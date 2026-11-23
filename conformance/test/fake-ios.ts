@@ -1,5 +1,5 @@
 // Stands in for `xcrun simctl` over a state file in argv[2], the fake's dir. Every call is appended to calls.log;
-// `launch` appends the lines in app.log to log.txt, which `spawn <udid> log stream` follows after printing a header.
+// `launch` appends what the app logs to log.txt, which `spawn <udid> log stream` follows after printing a header.
 // A log stream that SIGTERM ends writes stream.ended; the simulator named "NoLog" cannot stream, "NoBoot" cannot
 // boot, and the bundle ID "NoUninstall" cannot be uninstalled. A FIFO named hold-<command> holds that command, with its PID in <command>.pid, before it reads or changes
 // state, until the test closes the FIFO.
@@ -12,6 +12,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+
+import { installApp, launchApp } from "./fake-app.ts";
 
 interface Simulator {
   udid: string;
@@ -82,7 +84,7 @@ if (tool !== "simctl") {
 } else if (sim.state !== "Booted") {
   fail(`Unable to ${command} in current state: ${sim.state}`, 149);
 } else if (command === "install") {
-  installed.push(readFileSync(rest[0] ?? "", "utf8").trim());
+  installed.push(installApp(dir, rest[0] ?? ""));
   write(state);
 } else if (command === "uninstall" && rest[0] === "NoUninstall") {
   fail("Failed to uninstall the requested application", 2);
@@ -97,7 +99,7 @@ if (tool !== "simctl") {
     state.running.push(`${udid} ${id}`);
     write(state);
     process.stdout.write(`${id}: ${process.pid}\n`);
-    appendFileSync(file("log.txt"), readFileSync(file("app.log"), "utf8"));
+    await launchApp(dir, id, file("log.txt"));
   }
 } else if (command === "terminate") {
   const key = `${udid} ${rest[0]}`;
