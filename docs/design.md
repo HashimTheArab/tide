@@ -911,9 +911,9 @@ unchanged, and a throw or rejection is logged by error name only, never with the
 
 **Node.** The Node entry records nothing unless `TIDE_ANALYTICS` is `stdout`; unset or empty is off, and any other value
 exits 1 at startup. Stdout must be a pipe or a socket, as under a container runtime without a TTY, or startup exits 1 too:
-Node writes to a file or a terminal synchronously, so a slow one would hold every reply. To keep the lines in a file, pipe
-them to a process that writes it. Each point is then one line of JSON on stdout, the only lines that start with `{` (the
-entry's own are `tide listening on port <port>` and `tide closing`; errors go to stderr):
+Node writes to a file or a terminal synchronously, so a slow one would hold every reply. On Windows, where Node writes to a
+pipe synchronously as well, startup always exits 1. To keep the lines in a file, pipe them to a process that writes it. Each
+point is then one line of JSON on stdout, the only lines that start with `{` (the entry's own are `tide listening on port <port>` and `tide closing`; errors go to stderr):
 
 ```json
 {"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002","none"],"doubles":[1]}

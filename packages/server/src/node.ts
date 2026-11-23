@@ -68,7 +68,10 @@ function analyticsFromEnv(
   const value = env.TIDE_ANALYTICS ?? "";
   if (value === "") return undefined;
   if (value !== "stdout") throw new Error("TIDE_ANALYTICS must be stdout, or unset");
-  // Node writes to anything else, such as a file or a terminal, synchronously: a slow one would hold every reply.
+  // Node writes to a pipe on Windows, or to a file or a terminal, synchronously: a slow one would hold every reply.
+  if (process.platform === "win32") {
+    throw new Error("TIDE_ANALYTICS=stdout is not supported on Windows");
+  }
   const destination = fstatSync(1);
   if (!destination.isFIFO() && !destination.isSocket()) {
     throw new Error("TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket");

@@ -245,9 +245,11 @@ describe("the node entry's analytics lines", () => {
     ["a file", () => join(tempRoot(), "out.log")],
     ["a device", () => "/dev/null"],
   ])("stdout that is %s exits 1 before listening", async (_, path) => {
+    // A port in use, so that an entry that goes on to listen exits too, with another error.
+    const PORT = new URL(await serveDisk(tempRoot())).port;
     const out = openSync(path(), "w");
     const child = spawn(process.execPath, [ENTRY], {
-      env: { TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: "stdout", PORT: "0" },
+      env: { TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: "stdout", PORT },
       stdio: ["ignore", out, "pipe"],
     });
     onTestFinished(() => void child.kill("SIGKILL"));
@@ -256,6 +258,22 @@ describe("the node entry's analytics lines", () => {
     child.stderr!.setEncoding("utf8").on("data", (s: string) => (stderr += s));
     expect(await once(child, "close")).toEqual([1, null]);
     expect(stderr).toBe("tide: TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket\n");
+  });
+
+  // Node writes to a pipe synchronously on Windows.
+  test("a pipe on Windows exits 1 before listening", async () => {
+    const entry = runEntry({
+      TIDE_DISK_DIR: tempRoot(),
+      TIDE_ANALYTICS: "stdout",
+      NODE_OPTIONS:
+        "--import=data:text/javascript,Object.defineProperty(process,'platform',{value:'win32'})",
+    });
+    expect(await Promise.race([entry.exited, entry.listening])).toEqual({
+      code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "tide: TIDE_ANALYTICS=stdout is not supported on Windows\n",
+    });
   });
 
   test("a closed reader changes no reply and SIGTERM still exits 0", async () => {

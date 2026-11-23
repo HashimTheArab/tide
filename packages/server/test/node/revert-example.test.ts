@@ -25,7 +25,6 @@ const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 const TEXT = read("docs/examples/revert-rollouts.yml");
 
 interface Step {
-  name?: string;
   uses?: string;
   run?: string;
   env?: Record<string, string>;
@@ -46,7 +45,6 @@ interface Workflow {
 const workflow = parse(TEXT) as Workflow;
 const job = workflow.jobs.revert!;
 const step = job.steps.at(-1)!;
-const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
 
 describe("the job", () => {
   test("is one job in the writers' group, whose runs queue and are never cancelled", () => {
@@ -86,47 +84,13 @@ describe("the job", () => {
   });
 });
 
-// A queued run or a rerun carries its own commit's thresholds and CLI version.
-describe("the head check", () => {
-  const dir = mkdtempSync(join(tmpdir(), "tide-head-"));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  const head = job.steps[0]!;
-
-  test.each([
-    ["the commit is the head of main", "a".repeat(40), 0, 0],
-    ["main has moved on", "b".repeat(40), 0, 1],
-    ["the API fails", "a".repeat(40), 1, 1],
-    ["the API answers nothing", "", 0, 1],
-  ])("is the first step: %s", (_, sha, gh, code) => {
-    expect(head.name).toBe("Still the head of main");
-    expect(head.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
-    writeFileSync(
-      join(dir, "gh"),
-      '#!/bin/sh\nprintf "%s " "$@" > "$CALLS"\nprintf "%s\\n" "$SHA"\nexit "$CODE"\n',
-      { mode: 0o755 },
-    );
-    const { status } = spawnSync(BASH, ["--noprofile", "--norc", "-ec", head.run!], {
-      env: {
-        PATH: `${dir}:${process.env.PATH}`,
-        GITHUB_REPOSITORY: "o/app",
-        GITHUB_SHA: "a".repeat(40),
-        CALLS: join(dir, "calls"),
-        SHA: sha,
-        CODE: String(gh),
-      },
-    });
-    expect(status).toBe(code);
-    expect(readFileSync(join(dir, "calls"), "utf8")).toBe(
-      "api repos/o/app/git/ref/heads/main --jq .object.sha ",
-    );
-  });
-});
-
 // The step's script runs as `shell: bash` does, over the document the real tide status prints, with fakes of the
-// commands that would reach Cloudflare and write the bucket.
+// commands that would reach Cloudflare or GitHub or write the bucket.
 describe("the revert script", () => {
+  const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
+  const SHA = "a".repeat(40);
   const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // The rollout fixtures' new update.
-  // Each call takes its command's next exit code, or 99 when none is left; builtins only, so it starts fast.
+  // Each call takes its command's next exit code, or 99 when none is left, and output; builtins only, so it starts fast.
   const FAKE = `#!/bin/sh
 for arg in "$@"; do printf '<%s>' "$arg"; done >> "$HOME/calls"
 echo >> "$HOME/calls"
@@ -135,7 +99,7 @@ while [ -e "$HOME/$1.$n.done" ]; do n=$((n + 1)); done
 : > "$HOME/$1.$n.done"
 code=99
 if [ -e "$HOME/$1.$n" ]; then read -r code < "$HOME/$1.$n"; fi
-if [ "$1" = status ] && read -r document < "$HOME/status.json"; then printf '%s\\n' "$document"; fi
+if [ -e "$HOME/$1.$n.out" ] && read -r line < "$HOME/$1.$n.out"; then printf '%s\\n' "$line"; fi
 exit "$code"
 `;
   const work = mkdtempSync(join(tmpdir(), "tide-revert-"));
@@ -148,6 +112,7 @@ exit "$code"
     mkdirSync(bin);
     for (const [name, text] of [
       ["tide", FAKE],
+      ["gh", FAKE],
       ["sleep", '#!/bin/sh\nprintf "<sleep><%s>\\n" "$1" >> "$HOME/calls"\n'],
     ] as const) {
       writeFileSync(join(bin, name), text);
@@ -185,7 +150,9 @@ exit "$code"
     channel?: string;
     runtime?: string;
     document?: string;
-    status?: number; // Exit codes, in call order.
+    heads?: string[]; // What gh prints, in call order.
+    gh?: number[]; // Exit codes, in call order.
+    status?: number;
     stats?: number[];
     rollout?: number[];
   }
@@ -193,8 +160,11 @@ exit "$code"
   async function runScript(scenario: Scenario) {
     const dir = join(work, `run-${runs++}`);
     mkdirSync(join(dir, "work"), { recursive: true });
-    writeFileSync(join(dir, "status.json"), scenario.document ?? document);
+    writeFileSync(join(dir, "status.0.out"), scenario.document ?? document);
+    const heads = scenario.heads ?? [SHA, SHA, SHA];
+    for (const [n, head] of heads.entries()) writeFileSync(join(dir, `api.${n}.out`), `${head}\n`);
     const codes = {
+      api: scenario.gh ?? heads.map(() => 0),
       status: [scenario.status ?? 0],
       stats: scenario.stats,
       rollout: scenario.rollout,
@@ -214,6 +184,8 @@ exit "$code"
           ...step.env,
           CHANNEL: scenario.channel ?? "both",
           RUNTIME_VERSION: scenario.runtime ?? "1.0.0",
+          GITHUB_REPOSITORY: "o/app",
+          GITHUB_SHA: SHA,
           PATH: `${bin}:${process.env.PATH}`,
           HOME: dir,
         },
@@ -230,6 +202,7 @@ exit "$code"
     return { code, calls, stdout, left: readdirSync(join(dir, "work")) };
   }
 
+  const HEAD = "<api><repos/o/app/git/ref/heads/main><--jq><.object.sha>";
   const STATUS = "<status><--json>";
   const STATS = `<stats><--update><${NEW_ID}><--max-failed-share><5><--min-checks><500>`;
   const revert = (platform: string, channel = "both") =>
@@ -237,28 +210,29 @@ exit "$code"
   const SLEEP = "<sleep><30>";
   const warning = (platform: string) =>
     `::warning::Reverted the ${platform} rollout: too many checks list its update as failed\n`;
+  const STALE = "::error::main has moved on from this commit, or its head could not be read\n";
 
   test.each<[string, Scenario, number, string[], string?]>([
-    ["no verdict is bad", { stats: [0, 0] }, 0, [STATUS, STATS, STATS]],
+    ["no verdict is bad", { stats: [0, 0] }, 0, [HEAD, STATUS, STATS, STATS]],
     [
       "one platform's update is bad",
       { stats: [0, 10], rollout: [0] },
       0,
-      [STATUS, STATS, STATS, revert("android")],
+      [HEAD, STATUS, STATS, STATS, HEAD, revert("android")],
       warning("android"),
     ],
     [
       "both are bad",
       { stats: [10, 10], rollout: [0, 0] },
       0,
-      [STATUS, STATS, revert("ios"), STATS, revert("android")],
+      [HEAD, STATUS, STATS, HEAD, revert("ios"), STATS, HEAD, revert("android")],
       warning("ios") + warning("android"),
     ],
     [
       "one is bad and the other has no verdict",
       { stats: [4, 10], rollout: [0] },
       1,
-      [STATUS, STATS, STATS, revert("android")],
+      [HEAD, STATUS, STATS, STATS, HEAD, revert("android")],
       warning("android"),
     ],
     [
@@ -266,8 +240,10 @@ exit "$code"
       { channel: "low", stats: [10], rollout: [1, 1, 0] },
       0,
       [
+        HEAD,
         STATUS,
         STATS,
+        HEAD,
         revert("ios", "low"),
         SLEEP,
         revert("ios", "low"),
@@ -280,29 +256,60 @@ exit "$code"
       "a revert is refused",
       { channel: "high", stats: [10], rollout: [2] },
       1,
-      [STATUS, STATS, revert("ios", "high")],
+      [HEAD, STATUS, STATS, HEAD, revert("ios", "high")],
     ],
     [
       "a revert keeps exiting 1",
       { channel: "low", stats: [10], rollout: [1, 1, 1, 1, 1] },
       1,
       [
+        HEAD,
         STATUS,
         STATS,
+        HEAD,
         ...Array<string[]>(5)
           .fill([revert("ios", "low"), SLEEP])
           .flat(),
       ],
     ],
-    ["the rollout is at 0%", { channel: "reverted" }, 0, [STATUS]],
-    ["the rollout is at 100%", { channel: "complete" }, 0, [STATUS]],
-    ["the pointer holds no rollout", { channel: "plain" }, 0, [STATUS]],
-    ["the channel has no pointer", { channel: "none" }, 0, [STATUS]],
-    ["the runtime has no pointer", { runtime: "2.0.0" }, 0, [STATUS]],
-    ["status fails after printing its document", { status: 1 }, 1, [STATUS]],
-    ["status fails with nothing printed", { status: 2, document: "" }, 2, [STATUS]],
-    ["status prints nothing", { document: "" }, 4, [STATUS]],
-    ["status prints another schema", { document: '{"schema":2,"pointers":[]}\n' }, 1, [STATUS]],
+    ["the rollout is at 0%", { channel: "reverted" }, 0, [HEAD, STATUS]],
+    ["the rollout is at 100%", { channel: "complete" }, 0, [HEAD, STATUS]],
+    ["the pointer holds no rollout", { channel: "plain" }, 0, [HEAD, STATUS]],
+    ["the channel has no pointer", { channel: "none" }, 0, [HEAD, STATUS]],
+    ["the runtime has no pointer", { runtime: "2.0.0" }, 0, [HEAD, STATUS]],
+    ["status fails after printing its document", { status: 1 }, 1, [HEAD, STATUS]],
+    ["status fails with nothing printed", { status: 2, document: "" }, 2, [HEAD, STATUS]],
+    ["status prints nothing", { document: "" }, 4, [HEAD, STATUS]],
+    ["main has moved on", { heads: ["b".repeat(40)] }, 1, [HEAD], STALE],
+    ["gh fails", { gh: [1] }, 1, [HEAD], STALE],
+    ["gh prints nothing", { heads: [""] }, 1, [HEAD], STALE],
+    [
+      "main moves on before a revert",
+      { stats: [10], heads: [SHA, "b".repeat(40)] },
+      1,
+      [HEAD, STATUS, STATS, HEAD],
+      STALE,
+    ],
+    [
+      "gh fails before a revert",
+      { stats: [10], gh: [0, 1] },
+      1,
+      [HEAD, STATUS, STATS, HEAD],
+      STALE,
+    ],
+    [
+      "main moves on between two reverts",
+      { stats: [10, 10], rollout: [0], heads: [SHA, SHA, "b".repeat(40)] },
+      1,
+      [HEAD, STATUS, STATS, HEAD, revert("ios"), STATS, HEAD],
+      warning("ios") + STALE,
+    ],
+    [
+      "status prints another schema",
+      { document: '{"schema":2,"pointers":[]}\n' },
+      1,
+      [HEAD, STATUS],
+    ],
   ])("%s", async (_, scenario, code, calls, stdout = "") => {
     const result = await runScript(scenario);
     expect(result.calls).toEqual(calls);
@@ -315,7 +322,7 @@ exit "$code"
     "stats exits %i: the job fails and nothing is reverted",
     async (code) => {
       const result = await runScript({ channel: "low", stats: [code], rollout: [0] });
-      expect(result.calls).toEqual([STATUS, STATS]);
+      expect(result.calls).toEqual([HEAD, STATUS, STATS]);
       expect(result.code).toBe(1);
     },
   );
@@ -332,7 +339,7 @@ exit "$code"
       document: `${JSON.stringify(status)}\n`,
       stats: [0],
     });
-    expect(result.calls).toEqual([STATUS, STATS.replace(NEW_ID, hostile)]);
+    expect(result.calls).toEqual([HEAD, STATUS, STATS.replace(NEW_ID, hostile)]);
     expect([result.code, result.left]).toEqual([0, []]);
   });
 });

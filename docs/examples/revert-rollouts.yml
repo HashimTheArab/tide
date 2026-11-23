@@ -25,13 +25,6 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      # A queued run or a rerun must not revert by an older commit's thresholds or CLI.
-      - name: Still the head of main
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          test "$head" = "$GITHUB_SHA"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"
@@ -56,6 +49,8 @@ jobs:
           RUNTIME_VERSION: "1.0.0"
           MAX_FAILED_SHARE: "5"
           MIN_CHECKS: "500"
+          # For the head check only.
+          GH_TOKEN: ${{ github.token }}
           # Bucket read and write, for tide status and tide rollout.
           TIDE_S3_ENDPOINT: ${{ vars.TIDE_S3_ENDPOINT }}
           TIDE_S3_REGION: ${{ vars.TIDE_S3_REGION }}
@@ -72,6 +67,18 @@ jobs:
           TIDE_ANALYTICS_DATASET: ${{ vars.TIDE_ANALYTICS_DATASET }}
         run: |
           set -euo pipefail
+
+          # A queued run, a rerun, or one that main has overtaken must not revert by an older commit's thresholds or CLI.
+          check_head() {
+            local head
+            if ! head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" ||
+              [ "$head" != "$GITHUB_SHA" ]; then
+              echo "::error::main has moved on from this commit, or its head could not be read"
+              exit 1
+            fi
+          }
+
+          check_head
           # A failed status, or another schema, ends the job here.
           status="$(tide status --json)"
           jq -e '.schema == 1' <<< "$status" > /dev/null
@@ -102,6 +109,7 @@ jobs:
             case "$verdict" in
               0) ;;
               10) # Only a bad update exits with this.
+                check_head
                 if revert "$platform"; then
                   echo "::warning::Reverted the $platform rollout: too many checks list its update as failed"
                 else
