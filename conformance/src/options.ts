@@ -40,7 +40,8 @@ Runs stock expo-updates release apps against a local Tide. Every version and sce
 has a bucket of its own.
 
 Android uses the running emulator (ANDROID_SERIAL picks one of several), or boots the AVD --avd names (the first
-listed by default) read-only and shuts it down at the end. ANDROID_HOME must name the Android SDK.
+listed by default) read-only and shuts it down at the end. Apps it installs are removed. ANDROID_HOME must name the
+Android SDK.
 
 iOS uses the booted simulator, or the one --simulator names, and builds with Xcode and CocoaPods. A simulator it
 boots (the first listed by default) is shut down at the end; apps it installs are removed. It never creates or erases

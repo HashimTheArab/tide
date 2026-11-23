@@ -17,7 +17,7 @@ import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo, Socket } from "node:net";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 
 import {
   baseKey,
@@ -33,7 +33,7 @@ import {
 
 import type { Recorded, Stack } from "../src/stack.ts";
 import { EXPORT_FILE } from "../../packages/cli/src/publish-export.ts";
-import { recorder, tamperPatch, withStack } from "../src/stack.ts";
+import { hostEnv, recorder, tamperPatch, withStack } from "../src/stack.ts";
 import { tideCli } from "../src/tide-cli.ts";
 import {
   ANDROID,
@@ -154,6 +154,19 @@ async function expectClosed({ dir, url }: { dir: string; url: string }) {
   expect(existsSync(dir)).toBe(false);
   await expect(fetch(`${url}/hc`)).rejects.toThrow("fetch failed");
 }
+
+test.each([
+  "CLOUDFLARE_API_TOKEN",
+  "CF_API_KEY",
+  "NPM_TOKEN",
+  "AWS_SESSION_TOKEN",
+  "TIDE_SIGNING_KEY",
+])("hostEnv drops %s", (name) => {
+  vi.stubEnv(name, "x");
+  onTestFinished(() => void vi.unstubAllEnvs());
+  expect(hostEnv()).not.toHaveProperty(name);
+  expect(hostEnv()).toHaveProperty("PATH");
+});
 
 describe("the harness stack", () => {
   test("tide export writes the project's export, signed for the run's identity, inside the stack", async () => {
