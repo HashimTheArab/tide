@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { fstatSync, statSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -68,6 +68,11 @@ function analyticsFromEnv(
   const value = env.TIDE_ANALYTICS ?? "";
   if (value === "") return undefined;
   if (value !== "stdout") throw new Error("TIDE_ANALYTICS must be stdout, or unset");
+  // Node writes to anything else, such as a file or a terminal, synchronously: a slow one would hold every reply.
+  const destination = fstatSync(1);
+  if (!destination.isFIFO() && !destination.isSocket()) {
+    throw new Error("TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket");
+  }
   const { stdout } = process;
   // An unhandled error event, such as a closed reader's EPIPE, would end the process.
   stdout.on("error", () => undefined);

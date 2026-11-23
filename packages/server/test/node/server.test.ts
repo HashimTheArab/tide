@@ -1,5 +1,14 @@
+import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -17,7 +26,7 @@ import { diskStore, startServer, storeFromEnv } from "../../src/node.ts";
 import { analyticsCases, faultySink } from "../shared/analytics-cases.ts";
 import { CLIENT_LOW, fixture } from "../shared/fixtures.ts";
 import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
-import { runEntry } from "./entry.ts";
+import { ENTRY, runEntry } from "./entry.ts";
 
 const HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
 const KEY = `assets/${contentKey(HASH)}`;
@@ -229,6 +238,24 @@ describe("the node entry's analytics lines", () => {
       stdout: "",
       stderr: "tide: TIDE_ANALYTICS must be stdout, or unset\n",
     });
+  });
+
+  // Node writes to these synchronously, so a slow one would hold replies.
+  test.each([
+    ["a file", () => join(tempRoot(), "out.log")],
+    ["a device", () => "/dev/null"],
+  ])("stdout that is %s exits 1 before listening", async (_, path) => {
+    const out = openSync(path(), "w");
+    const child = spawn(process.execPath, [ENTRY], {
+      env: { TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: "stdout", PORT: "0" },
+      stdio: ["ignore", out, "pipe"],
+    });
+    onTestFinished(() => void child.kill("SIGKILL"));
+    closeSync(out);
+    let stderr = "";
+    child.stderr!.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+    expect(await once(child, "close")).toEqual([1, null]);
+    expect(stderr).toBe("tide: TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket\n");
   });
 
   test("a closed reader changes no reply and SIGTERM still exits 0", async () => {

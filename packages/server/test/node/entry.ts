@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 import { onTestFinished } from "vitest";
 
-const ENTRY = fileURLToPath(new URL("../../src/node.ts", import.meta.url));
+export const ENTRY = fileURLToPath(new URL("../../src/node.ts", import.meta.url));
 
 /** Runs the Node entry with only `env` and PORT=0; the process is killed when the test finishes. */
 export function runEntry(env: Record<string, string>): {

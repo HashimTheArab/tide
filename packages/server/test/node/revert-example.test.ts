@@ -25,6 +25,7 @@ const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 const TEXT = read("docs/examples/revert-rollouts.yml");
 
 interface Step {
+  name?: string;
   uses?: string;
   run?: string;
   env?: Record<string, string>;
@@ -36,6 +37,7 @@ interface Workflow {
     string,
     {
       concurrency: unknown;
+      environment: string;
       env?: Record<string, string>;
       steps: Step[];
     }
@@ -44,6 +46,7 @@ interface Workflow {
 const workflow = parse(TEXT) as Workflow;
 const job = workflow.jobs.revert!;
 const step = job.steps.at(-1)!;
+const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
 
 describe("the job", () => {
   test("is one job in the writers' group, whose runs queue and are never cancelled", () => {
@@ -66,6 +69,11 @@ describe("the job", () => {
     }
   });
 
+  // docs/deploy.md puts required reviewers on production, which would hold each scheduled run.
+  test("has an environment of its own", () => {
+    expect(job.environment).toBe("tide-revert");
+  });
+
   test("gives secrets to the last step only, and a signing key to none", () => {
     expect([workflow.env, job.env]).toEqual([undefined, undefined]);
     expect(JSON.stringify(job.steps.slice(0, -1))).not.toContain("secrets.");
@@ -78,10 +86,45 @@ describe("the job", () => {
   });
 });
 
+// A queued run or a rerun carries its own commit's thresholds and CLI version.
+describe("the head check", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tide-head-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const head = job.steps[0]!;
+
+  test.each([
+    ["the commit is the head of main", "a".repeat(40), 0, 0],
+    ["main has moved on", "b".repeat(40), 0, 1],
+    ["the API fails", "a".repeat(40), 1, 1],
+    ["the API answers nothing", "", 0, 1],
+  ])("is the first step: %s", (_, sha, gh, code) => {
+    expect(head.name).toBe("Still the head of main");
+    expect(head.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
+    writeFileSync(
+      join(dir, "gh"),
+      '#!/bin/sh\nprintf "%s " "$@" > "$CALLS"\nprintf "%s\\n" "$SHA"\nexit "$CODE"\n',
+      { mode: 0o755 },
+    );
+    const { status } = spawnSync(BASH, ["--noprofile", "--norc", "-ec", head.run!], {
+      env: {
+        PATH: `${dir}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: "o/app",
+        GITHUB_SHA: "a".repeat(40),
+        CALLS: join(dir, "calls"),
+        SHA: sha,
+        CODE: String(gh),
+      },
+    });
+    expect(status).toBe(code);
+    expect(readFileSync(join(dir, "calls"), "utf8")).toBe(
+      "api repos/o/app/git/ref/heads/main --jq .object.sha ",
+    );
+  });
+});
+
 // The step's script runs as `shell: bash` does, over the document the real tide status prints, with fakes of the
 // commands that would reach Cloudflare and write the bucket.
 describe("the revert script", () => {
-  const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
   const NEW_ID = "3b1d7c52-9e4a-4f08-a6c3-71d2e5b98f14"; // The rollout fixtures' new update.
   // Each call takes its command's next exit code, or 99 when none is left; builtins only, so it starts fast.
   const FAKE = `#!/bin/sh

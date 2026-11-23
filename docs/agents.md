@@ -100,4 +100,6 @@ so run it once by hand on your account before a job acts on it.
 [examples/revert-rollouts.yml](examples/revert-rollouts.yml) is a job for an operator's repository: for each active
 rollout of one channel and runtime version it runs the verdict, and reverts that platform's rollout only on exit 10.
 It reads status, decides and reverts in one job of the writers' concurrency group, so no other writer can change a
-rollout in between. It gets no signing key. Tide's own repository never runs it.
+rollout in between. A run whose commit is no longer the head of `main` fails before it reads anything. Give it its own
+GitHub environment: limited to `main`, without required reviewers, and holding only the bucket credentials, the build
+pins and the stats token. It gets no signing key. Tide's own repository never runs it.

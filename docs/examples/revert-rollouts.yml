@@ -16,14 +16,22 @@ jobs:
   revert:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # The environment that holds the writers' secrets. Required reviewers on it would hold every scheduled run.
-    environment: production
+    # This job's own environment: limited to main, holding only the values below. No required reviewers, which would
+    # hold every scheduled run; keep those on the environment that holds the signing key.
+    environment: tide-revert
     # The group every writer for this bucket shares.
     concurrency:
       group: tide-publish
       cancel-in-progress: false
       queue: max
     steps:
+      # A queued run or a rerun must not revert by an older commit's thresholds or CLI.
+      - name: Still the head of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "$head" = "$GITHUB_SHA"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"

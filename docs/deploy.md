@@ -417,7 +417,7 @@ docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_
 | `TIDE_DISK_DIR` | A bucket directory, for a single host |
 | `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID`, `TIDE_S3_SECRET_ACCESS_KEY` | An S3-compatible bucket; all five, and read-only credentials with `s3:GetObject` and `s3:ListBucket` (without ListBucket a missing key is a 403, which Tide answers with 503) |
 | `TIDE_APP_ID` | Optional; as for the Worker |
-| `TIDE_ANALYTICS` | Optional; `stdout` writes each update check as one JSON line; any other value but empty exits 1 |
+| `TIDE_ANALYTICS` | Optional; `stdout` writes each update check as one JSON line, so stdout must be a pipe or a socket (no `docker run -t`); any other value but empty exits 1 |
 
 Exactly one store is configured; otherwise the container exits 1 naming what is wrong. The image holds no
 configuration or credential: pass them at run time, from the orchestrator's secret store.
