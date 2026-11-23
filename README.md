@@ -173,18 +173,22 @@ tide register-build --platform android --runtime-version 1.0.0 \
 | `tide status` | Lists what each channel serves right now |
 | `tide storage` | Lists files nothing references any more; deletes nothing |
 | `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Checks a live server the way an installed app would |
+| `tide probe ... --rollout-side new --rollout-update <updateId>` | Checks the update a rollout is sending out |
 | `tide publish --from <dir> --channel <name> --rollout <percent>` | Sends a new update to a share of devices |
 | `tide rollout <percent>\|complete\|revert --channel <name> --runtime-version <version>` | Raises a rollout's share, sends it to every device, or stops it |
 | `tide rollback --embedded --channel <name> --runtime-version <version>` | Sends apps back to the bundle inside the store build |
 | `tide rollback --to <updateId>` | Serves an earlier update again |
 | `tide republish <updateId>... [--channel <name>] [--runtime-version <version>]` | Serves stored updates again, optionally on another channel or runtime |
 
+Every command above takes `--json`, as in `tide status --json`, and then prints one JSON document for scripts to read;
+so does a plain `tide publish --json`. [docs/design.md](docs/design.md#json-output) lists the fields.
+
 `tide probe` needs no secrets and no bucket access. It identifies builds by `TIDE_BUILD_KEYID` and the certificate
 they embed, given as exactly one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD_CERTIFICATE`, plus
 `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN` set to `true` for builds that embed a CA root. It then checks a live server end
 to end: it verifies the reply's signature under that certificate, or under the served chain's leaf, and compares the
 served bundle's hash with the signed manifest. On Workers, every update check that reaches a reply also records one
-Analytics Engine data point; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
+Analytics Engine data point, a probe's included; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
 and exit codes.
 
 ## Security model

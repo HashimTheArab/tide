@@ -375,7 +375,7 @@ empty counts as unset). A configuration error exits before any request.
   lock. Network filesystems are not supported.
 - **Clock.** The bucket's time is S3's `Date` header, or the local clock on disk.
 
-`tide status` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
+`tide status [--json]` prints one line per pointer (`<channel> <runtime> <platform> <kind> <updateId|-> <createdAt|commitTime>`,
 read from the stored signed part without re-serialising it) and whether `reply/no-update` is present, unreadable or
 missing. A rollout prints `<channel> <runtime> <platform> rollout <percent> new <updateId> <createdAt> earlier <kind>
 <updateId|-> <createdAt|commitTime>`, or `earlier none`, with both sides checked. A version-3 `reply/no-update` prints
@@ -449,7 +449,8 @@ bytes are unchanged.
 
 `tide publish --from <dir> --channel <name> [--rollout <percent>] [--add-identity]` publishes one update per platform
 the export names (`--rollout`: Staged rollouts; `--add-identity`: Keys, One signing identity per runtime). Exit 0 means every pointer was written, 2 that the publish was refused before any write, 1 that it failed after writes began. stdout has
-one line per pointer written: `<key> <updateId> <createdAt>`.
+one line per pointer written: `<key> <updateId> <createdAt>`. Every writer but `register-build` takes `--json`
+(JSON output).
 
 **Configuration.** `TIDE_SERVER_URL` (the Tide server) and `TIDE_ASSET_URL` (the bucket's public domain) are each an
 absolute `https:` URL with no credentials, query or fragment, or `http:` to a loopback IP literal; a trailing `/`
@@ -580,9 +581,10 @@ not: `<key> <new updateId> <percent>`. Exit codes as publish: 0, 2 refused befor
   URLs and `expoClient`), once both its sides verify, and prints that target's stored line; at another percentage it
   refuses. So a rerun after a partial write, or after a committed PUT whose response was lost, writes only the
   targets left.
-- **Probe.** `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side.
+- **Probe.** `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side. With `--rollout-side new
+  --rollout-update <updateId>` it checks the new one (`tide probe`).
 
-`tide storage` reports, read-only, every object under `assets/`, `bundles/` and `updates/` that nothing
+`tide storage [--json]` reports, read-only, every object under `assets/`, `bundles/` and `updates/` that nothing
 references, one `<name> <bytes>` row each in byte order, then `<n> unreferenced objects, <total> bytes`. Referenced
 means named by:
 
@@ -635,6 +637,40 @@ before it ships. Exit codes as publish; stdout `bases/<id> bundles/<64 hex>`.
 identity check, and storage is cheap (about 2 GB for 100 updates of a 10 MB bundle on two platforms). Deleting from an
 object store safely while writes can land late would need machinery Tide does not want; if storage ever matters,
 deletion gets its own design.
+
+### JSON output
+
+`status`, `storage`, `probe`, `publish`, `rollout`, `rollback` and `republish` take `--json`: stdout is then one JSON
+document on one line, and stderr and the exit code are what they are without it. Every character outside printable
+ASCII is written `\uXXXX`, so no stored byte reaches a terminal raw.
+
+`schema` numbers each command's document on its own (the four writers share one); every one is 1. It changes when a
+field is removed, renamed, moved, or changes type or meaning, or a listed set of values gains a member. A field added
+at the end of its object does not change it, so readers ignore fields they do not know. Every field below is always
+present, in this order; `null` means it does not apply.
+
+| Document | Fields |
+| --- | --- |
+| `status` | `schema`, `pointers`, `noUpdate`, `unreadable` |
+| one of `pointers` | `key`, `channel`, `runtimeVersion`, `platform`, then a side's fields, or `kind` (`rollout`), `percent`, `new` (a side), `earlier` (a side, or `null` for none) |
+| a side | `kind` (`manifest` or `rollBackToEmbedded`), `updateId` (`null` for a directive), `time` (`createdAt` or `commitTime`), `keyid` (the one its signature names) |
+| `noUpdate` | `state` (`present`, `missing` or `unreadable`), `version` (1, 3 or `null`), `entries` (one `{"keyid"}` per entry, in keyid order) |
+| one of `unreadable` | `key` (`null` for a name outside the key grammar), `reason` (stderr's) |
+| `storage` | `schema`, `unreferenced`, `count`, `totalBytes` |
+| one of `unreferenced` | `name`, `isKey` (false for a name outside the key grammar), `size` |
+| `probe` | `schema`, `failure` (`null`, or the class under `tide probe`), `rolloutSide` (`new` with `--rollout-side new`, else `null`), `directive`, `updateId`, `launchAssetHash` (all `null` on a failure) |
+| the writers | `schema`, `complete`, `pointers` |
+| one of a writer's `pointers` | `key`, `updateId` (`null` for a directive), then `time`, or for `rollout` `percent` |
+
+- **Sizes.** `size` and `totalBytes` are decimal strings, exact at any size; a JSON number past 2^53 is not.
+- **Keyids.** A pointer's keyid is its own; nothing names one for the bucket
+  ([0003](decisions/0003-one-identity-per-runtime.md)).
+- **Nothing printed.** Exit 2 of any command, and a failed `storage` scan, leave stdout empty. `status` prints its
+  document with exit 1 when a record is unreadable, and `probe` on every failure but 2.
+- **Writers.** `pointers` holds exactly the pointer writes this run made and the bucket acknowledged, in write order,
+  so a target already as asked is not listed, nor is one whose write lost its race or has an unknown outcome.
+  `complete` is true only with exit 0. A run that fails, or crashes, after sending any write prints its document with
+  `complete` false; one that fails before sending any prints nothing. Each attempt of a retry loop prints its own.
 
 ### `tide certificate`
 
@@ -843,7 +879,8 @@ waiting period, `schedule-key-deletion --pending-window-in-days 30`, and give th
 
 Every `/manifest` request that reaches the reply decision (each 200 and 503) writes one Workers Analytics Engine
 data point through the `ANALYTICS` binding (dataset `tide_manifest` in `wrangler.jsonc`). A 400 or 406 is answered
-before that decision and writes none. The Node entry has no sink and records nothing.
+before that decision and writes none. The Node entry has no sink and records nothing. A `tide probe` whose `/manifest`
+request gets a 200 or 503 is a check like any other, with no update IDs; `blob7` holds the side it was assigned.
 
 | Field | Holds |
 | --- | --- |
@@ -876,6 +913,7 @@ signing key, so it can run from any monitor:
 
 ```
 tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios|android [--app-id <id>]
+  [--rollout-side new --rollout-update <updateId>] [--json]
 ```
 
 `--server-url` is the base before `/manifest` (`https:`, or `http:` to a loopback IP literal). The pins are the
@@ -895,6 +933,14 @@ manifest's signed `runtimeVersion` must be the one requested, and no `expo-manif
 from the signed `metadata` key it names, since a client launches neither. Its `launchAsset.url` is then fetched
 wherever it points and its SHA-256 compared with `launchAsset.hash`; other assets are not fetched. `/manifest` has 10 s and the launch asset 60 s, each covering the body.
 
+**A rollout's new side.** `--rollout-side new --rollout-update <updateId>`, given together and once each, sends an
+`EAS-Client-ID` in bucket 0 of that update's rollout: the first of a fixed sequence that `rolloutBucket` puts there, so
+the same one each run. Bucket 0 is on the new side at every percentage from 0.01, and on the earlier one at 0. The probe
+has no bucket access, so the operator gives the ID, a lowercase UUID as `tide status` prints it. Exit 0 then means the
+server served that client that update. Anything else it served, a directive or another update, is exit 9: a rollout
+reverted or replaced, or no pointer (exit 4 when `reply/no-update` is missing too, as the server answers 503). A
+complete rollout and a plain pointer to the update answer alike, so both pass; `tide status` tells them apart.
+
 | Exit | Meaning |
 | --- | --- |
 | 0 | Passed; stdout names the directive, or the update ID and the launch asset hash checked |
@@ -905,7 +951,8 @@ wherever it points and its SHA-256 compared with `launchAsset.hash`; other asset
 | 6 | Signature: missing, malformed, another keyid, or not verifying under the pinned certificate; in chain mode, no `certificate_chain` part, a chain that fails the client's rules, or no verify under the served leaf |
 | 7 | The launch asset answered 404 |
 | 8 | The launch asset's SHA-256 differs from the manifest's hash |
-| 9 | The signed manifest is for another runtime version than `--runtime-version`, or its metadata fails the reply's filters |
+| 9 | The signed manifest is for another runtime version than `--runtime-version`, its metadata fails the reply's filters, or the reply is not the `--rollout-update` update |
 
+`--json` names 3 to 9 `unreachable`, `status`, `unparseable`, `signature`, `bundleMissing`, `bundleHash` and `mismatch`.
 Exit 1 is left to an uncaught error, so it always means a bug. Messages are fixed text naming the failure and at
 most a status; no header value, key or response body is printed.
