@@ -60,9 +60,9 @@ test("the docs check requires the CLI README to name every command, tide certifi
   expect(missing.stderr).toContain("packages/cli/README.md: does not name tide certificate");
 });
 
-test("the README names every build pin tide probe requires", () => {
-  const pins = variables(section(DESIGN, "### `tide probe`"));
-  expect(pins.size).toBeGreaterThan(0);
+test.each(["probe", "stats"])("the README names every variable tide %s reads", (command) => {
+  const names = variables(section(DESIGN, `### \`tide ${command}\``));
+  expect(names.size).toBeGreaterThan(0);
   const operations = section(README, "## Operations");
-  for (const pin of pins) expect(operations).toContain(`\`${pin}\``);
+  for (const name of names) expect(operations).toContain(`\`${name}\``);
 });
