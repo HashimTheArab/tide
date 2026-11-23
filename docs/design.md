@@ -763,12 +763,13 @@ identity check, before any write, reads only:
    says to restore it ([deploy.md](deploy.md#adding-a-signing-identity)).
 3. In chain mode, this keyid's replies without the binding refuse as lost (Chain mode).
 
-Then every writer, and `register-build`, refuses a target runtime and platform that another keyid's pointer holds on
-any channel, a rollout's either side included, judging the targets as it read them and listing `reply/` once for the
-rest; an unreadable pointer of a target's runtime and platform refuses too, as its owner is unknown. Pointers of other
-runtimes are never read. The check reads; it does not fence: a write landing after the listing, or from a writer that
-skipped the check, is not seen, and the operator rule (a new runtimeVersion per identity, one concurrency group) is
-what prevents it. `tide rollout` writes no new runtime and copies only its target's bodies, each checked.
+Then `publish`, `republish`, `rollback` and `register-build` refuse a target runtime and platform that another
+keyid's pointer holds on any channel, a rollout's either side included, judging the targets as it read them and
+listing `reply/` once for the rest; an unreadable pointer of a target's runtime and platform refuses too, as its
+owner is unknown. Pointers of other runtimes are never read. The check reads; it does not fence: a write landing
+after the listing, or from a writer that skipped the check, is not seen, and the operator rule (a new runtimeVersion
+per identity, one concurrency group) is what prevents it. `tide rollout` writes no new runtime and copies only its
+target's bodies, each checked.
 
 A direct keyid is its keyid plus its key, as in a single-identity bucket; a client accepts any certificate of the
 same key. Chain-mode keyids keep their root binding (Chain mode).

@@ -328,20 +328,21 @@ old identity's update it already holds.
    that first publish exits 0: until then the bucket may not serve its identity.
 5. **Keep the old identity's writer job** for the old runtime while its builds are installed.
 
-- **The runtime check.** Every writer and `register-build` refuses a runtime and platform that another keyid's
-  pointer holds on any channel, so a build that reused one is caught before it ships. It reads; it does not fence: a
-  delayed write from another job can still land after its listing. One concurrency group and a new runtimeVersion
-  per identity are the rule.
+- **The runtime check.** `publish`, `republish`, `rollback` and `register-build` refuse a runtime and platform that
+  another keyid's pointer holds on any channel, so a build that reused one is caught before it ships. It reads; it
+  does not fence: a delayed write from another job can still land after its listing. One concurrency group and a new
+  runtimeVersion per identity are the rule.
 - **Cached replies.** A private cache can outlive an app upgrade. If the app's `requestHeaders` allow stale responses
   (`max-stale`), the build that moves to the new identity must also send `cache-control: no-cache`.
 - **No rollback.** Once `reply/no-update` is version 3, never roll a server or a writer's CLI pin back below the
   release that reads it: an older server answers 503 wherever a request needs it, and an older CLI refuses to write.
 - **Recovery of a lost `reply/no-update`.** No writer can sign another identity's entry, so a lost version-3 record is
-  restored, never recreated. Turn on object versioning, or keep a backup of `reply/no-update` after each identity's
-  first publish.
+  restored, never recreated. Copy `reply/no-update` out of the bucket after every run that writes it, exit 1
+  included: an `--add-identity` run, and in chain mode a run that renews the served chain. An S3 store's object
+  versioning does this; R2 has none.
   - When pointers of another keyid exist, every writer refuses, naming one, and says to restore it. Restore the last
-    `reply/no-update` object, every keyid's entry, from object versioning or the backup; the writers then run as
-    before.
+    `reply/no-update` object, every keyid's entry; the writers then run as before. A copy older than a chain renewal
+    serves the replaced chain until that identity's next run renews it.
   - When the new identity's first publish converted `reply/no-update` but stopped before its first pointer, the
     pointers look like a bucket that never converted, and the old identity's next write would recreate version 1
     without the new entry. If you know the conversion landed (that publish exited 1 after writing `reply/no-update`),

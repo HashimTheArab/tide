@@ -761,8 +761,10 @@ describe("recovery of a lost reply/no-update", () => {
     s3.objects.delete(NO_UPDATE_KEY);
 
     s3.objects.set(NO_UPDATE_KEY, saved);
-    expect(await publishAs(s, B(), dir, ["--add-identity"])).toMatchObject({ code: 0, err: [] });
+    // A writes first, while every pointer is its own: the write that would drop B's entry.
     expect(await publishAs(s, A(), exportOf(A(), "1.0.0"))).toMatchObject({ code: 0, err: [] });
+    expect(stored(s, NO_UPDATE_KEY)).toEqual(saved);
+    expect(await publishAs(s, B(), dir, ["--add-identity"])).toMatchObject({ code: 0, err: [] });
     expect(stored(s, NO_UPDATE_KEY)).toEqual(saved);
     const now = await views(s);
     expect(now["b 2.0.0 ios"]).toEqual(pointerWire(s, B_IOS));

@@ -13,9 +13,11 @@ updated: 2026-11-23
 - **Version 3 only at `reply/no-update`.** Every runtime shares it, so it holds one entry per keyid, picked by the
   request's `expo-expect-signature` keyid. Only `tide publish --add-identity` converts a version-1 record, by a
   conditional write before any pointer, keeping the existing reply byte for byte.
-- **A read-time guard.** Every writer and `register-build` refuses, before any write, a target runtime and platform
-  that another keyid's pointer holds on any channel. It catches an operator's mistake; it does not fence late or
-  concurrent writes, which the one concurrency group and the operator rule prevent.
+- **A read-time guard.** `publish`, `republish`, `rollback` and `register-build` refuse, before any write, a target
+  runtime and platform that another keyid's pointer holds on any channel. `tide rollout` checks only the pointers it
+  moves, whose sides must be its own identity's, so a revert never waits on another identity. The guard catches an
+  operator's mistake; it does not fence late or concurrent writes, which the one concurrency group and the operator
+  rule prevent.
 - **No direct-mode certificate binding.** A direct keyid is its keyid plus its key, as in a single-identity bucket.
   This supersedes design.md's "One certificate per keyid" for direct mode. Chain-mode root bindings stay, and a direct
   writer refuses a keyid that a root binding holds.
