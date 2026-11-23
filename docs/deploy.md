@@ -348,6 +348,9 @@ old identity's update it already holds.
     without the new entry. If you know the conversion landed (that publish exited 1 after writing `reply/no-update`),
     restore that version-3 object before any writer runs again. If version 1 was recreated anyway, no build of the
     new identity is in the field yet; its next publish is refused until it runs with `--add-identity` again.
+  - With no copy left and pointers of several keyids: stop every writer, delete the pointers of every keyid but one,
+    publish under that one, then publish under each other with `--add-identity`. Until its publish lands, an identity
+    whose pointers were deleted gets replies its builds reject, so they stay on what they run.
 
 ## Routine deploys
 

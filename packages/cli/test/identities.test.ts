@@ -749,6 +749,20 @@ describe("recovery of a lost reply/no-update", () => {
     expect(now["b none"]).toEqual(entryWire(s, "b"));
   });
 
+  test("with no copy left, dropping B's pointers lets A recreate version 1 and B add itself again", async () => {
+    const s = store();
+    await twoIdentities(s);
+    for (const key of [NO_UPDATE_KEY, B_IOS, B_ANDROID]) s3.objects.delete(key);
+    expect(await publishAs(s, A(), exportOf(A(), "1.0.0"))).toMatchObject({ code: 0, err: [] });
+    const added = await publishAs(s, B(), exportOf(B(), "2.0.0"), ["--add-identity"]);
+    expect(added).toMatchObject({ code: 0, err: [] });
+    const now = await views(s);
+    expect(now["main none"]).toEqual(entryWire(s, "main"));
+    expect(now["main 1.0.0 ios"]).toEqual(pointerWire(s, IOS));
+    expect(now["b none"]).toEqual(entryWire(s, "b"));
+    expect(now["b 2.0.0 ios"]).toEqual(pointerWire(s, B_IOS));
+  });
+
   // B converted but its first pointer never landed, so the pointers alone look like a bucket that never converted.
   test("restoring the converted record keeps B's entry when B's first pointer never landed", async () => {
     const s = store();
