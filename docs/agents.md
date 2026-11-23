@@ -18,20 +18,18 @@ fields and exit codes stay in [design.md](design.md); this page only points at t
 - **One writer at a time.** `publish`, `rollout`, `rollback`, `republish` and `register-build` run only as CI jobs in
   the bucket's one concurrency group ([Publishing](deploy.md#publishing)), never from a laptop beside it. Start that
   job rather than the command. `status`, `storage`, `probe` and `stats` write nothing and can run at any time.
-- **Branch on exit codes and `--json`,** never on text. Check `schema` before reading a document
-  ([JSON output](design.md#json-output)).
+- **Branch on exit codes and [JSON output](design.md#json-output),** never on text. Check `schema` before reading a
+  document.
 
 ## Credentials
 
-| Command | Needs | Never needs |
-| --- | --- | --- |
-| `tide probe` | The [build pins](design.md#keys) | Bucket, signing key |
-| `tide stats` | A Cloudflare token that can only read analytics ([variables](design.md#tide-stats)) | Bucket, build pins, signing key |
-| `tide status`, `tide storage` | The bucket, read-only ([credentials](design.md#bucket-configuration)) | Build pins, signing key |
-| `tide rollout`, `tide register-build` | The bucket, read and write, and the build pins | Signing key: they sign nothing |
-| `tide publish`, `tide rollback`, `tide republish` | The bucket, read and write, the build pins and the signing key | |
-| `tide export` | Nothing: it runs the app's code, so give it no credential | All of them |
-| `tide certificate` | The signing key alone | Bucket, build pins |
+| Command | Needs |
+| --- | --- |
+| `tide probe` | The [build pins](design.md#keys): no bucket, no signing key |
+| `tide stats` | A Cloudflare token that can only read analytics ([variables](design.md#tide-stats)): no bucket, no signing key |
+| `tide status`, `tide storage` | The bucket, read-only ([credentials](design.md#bucket-configuration)) |
+| `tide rollout`, `tide register-build` | The bucket, read and write, and the build pins. They sign nothing, so they get no signing key |
+| `tide publish`, `tide rollback`, `tide republish` | The bucket, read and write, the build pins and the signing key |
 
 Give a job only its row.
 
@@ -46,18 +44,19 @@ Each pointer's `kind` is `manifest`, `rollBackToEmbedded` or `rollout`. A rollou
 
 ## Is the server right?
 
-`tide probe` asks as an installed build would, and checks the signature and the bundle. With `--rollout-side new
---rollout-update <updateId>` it checks the update a rollout is sending out, as `tide status` names it; without them
-it gets what a device outside the rollout gets:
+`tide probe` asks as an installed build would, and checks the signature and the bundle. Alone it gets what a device
+outside a rollout gets; with a rollout's new update, as `tide status` names it, it checks that update:
 
 ```sh
 tide probe --server-url https://updates.example.com --channel main --runtime-version 1.0.0 --platform ios
+tide probe --server-url https://updates.example.com --channel main --runtime-version 1.0.0 --platform ios \
+  --rollout-side new --rollout-update "$UPDATE_ID"
 ```
 
 ## Is an update failing?
 
-- **Workers.** With no `--update`, `tide stats` counts checks per running update, per failed update and per rollout
-  side. With `--update` and both thresholds it gives a verdict, and exits 10 only for a bad update:
+- **Workers.** Alone, `tide stats` counts checks per running update, per failed update and per rollout side. With an
+  update and both thresholds it gives a verdict, and exits 10 only for a bad update:
 
   ```sh
   tide stats --update "$UPDATE_ID" --max-failed-share 5 --min-checks 500
@@ -85,15 +84,15 @@ so run it once by hand on your account before a job acts on it.
   it. Rollback does move them, with a newer signed reply.
 - **A device that failed an update has already fallen back** to the update it ran before, or the embedded one, so a
   crash at launch usually needs only a revert. Use rollback when the update runs but does the wrong thing.
-- Both act per channel and runtime version; `--platform` narrows `tide rollout` and `tide rollback --embedded`.
-  Details: [staged rollouts and rollback](design.md#bucket-configuration).
+- Both act per channel and runtime version; `tide rollout revert --platform` and `tide rollback --embedded --platform`
+  narrow them. Details: [staged rollouts and rollback](design.md#bucket-configuration).
 
 ## Exit codes
 
 - `tide probe`: [its table](design.md#tide-probe). `tide stats`: [its table](design.md#tide-stats). Revert on 10
   alone: any other non-zero code is a question that got no answer, not a bad update.
 - `tide status`: 1 means it could not read a record, so do not act on what it listed.
-- Writers: 0 done, 2 refused with nothing written, 1 stopped after writing began. Retry 1 in place, in the same job
+- Writers: [publish's codes](design.md#bucket-configuration). Retry 1 in place, in the same job
   ([Recovery](deploy.md#publishing)).
 
 ## Reverting on a schedule

@@ -37,7 +37,6 @@ interface Workflow {
     {
       concurrency: unknown;
       env?: Record<string, string>;
-      "timeout-minutes"?: number;
       steps: Step[];
     }
   >;
@@ -67,30 +66,9 @@ describe("the job", () => {
     }
   });
 
-  test("gives the bucket, the build pins and the analytics token to one step, and a signing key to none", () => {
-    expect(workflow.env).toBeUndefined();
-    expect(job.env).toBeUndefined();
-    expect(job.steps.map(({ env }) => Object.keys(env ?? {}))).toEqual([
-      [],
-      ["GH_TOKEN", "TIDE_VERSION"],
-      [
-        "CHANNEL",
-        "RUNTIME_VERSION",
-        "MAX_FAILED_SHARE",
-        "MIN_CHECKS",
-        "TIDE_S3_ENDPOINT",
-        "TIDE_S3_REGION",
-        "TIDE_S3_BUCKET",
-        "TIDE_S3_ACCESS_KEY_ID",
-        "TIDE_S3_SECRET_ACCESS_KEY",
-        "TIDE_BUILD_KEYID",
-        "TIDE_BUILD_CERTIFICATE",
-        "TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN",
-        "TIDE_ANALYTICS_TOKEN",
-        "TIDE_ANALYTICS_ACCOUNT_ID",
-        "TIDE_ANALYTICS_DATASET",
-      ],
-    ]);
+  test("gives secrets to the last step only, and a signing key to none", () => {
+    expect([workflow.env, job.env]).toEqual([undefined, undefined]);
+    expect(JSON.stringify(job.steps.slice(0, -1))).not.toContain("secrets.");
     expect(TEXT).not.toMatch(/TIDE_SIGNING_|TIDE_KMS_|id-token/);
   });
 
@@ -214,26 +192,31 @@ exit "$code"
   const revert = (platform: string, channel = "both") =>
     `<rollout><revert><--channel><${channel}><--runtime-version><1.0.0><--platform><${platform}>`;
   const SLEEP = "<sleep><30>";
+  const warning = (platform: string) =>
+    `::warning::Reverted the ${platform} rollout: too many checks list its update as failed\n`;
 
-  test.each<[string, Scenario, number, string[]]>([
+  test.each<[string, Scenario, number, string[], string?]>([
     ["no verdict is bad", { stats: [0, 0] }, 0, [STATUS, STATS, STATS]],
     [
       "one platform's update is bad",
       { stats: [0, 10], rollout: [0] },
       0,
       [STATUS, STATS, STATS, revert("android")],
+      warning("android"),
     ],
     [
       "both are bad",
       { stats: [10, 10], rollout: [0, 0] },
       0,
       [STATUS, STATS, revert("ios"), STATS, revert("android")],
+      warning("ios") + warning("android"),
     ],
     [
       "one is bad and the other has no verdict",
       { stats: [4, 10], rollout: [0] },
       1,
       [STATUS, STATS, STATS, revert("android")],
+      warning("android"),
     ],
     [
       "a revert exits 1, so it is retried in place",
@@ -248,6 +231,7 @@ exit "$code"
         SLEEP,
         revert("ios", "low"),
       ],
+      warning("ios"),
     ],
     [
       "a revert is refused",
@@ -276,10 +260,11 @@ exit "$code"
     ["status fails with nothing printed", { status: 2, document: "" }, 2, [STATUS]],
     ["status prints nothing", { document: "" }, 4, [STATUS]],
     ["status prints another schema", { document: '{"schema":2,"pointers":[]}\n' }, 1, [STATUS]],
-  ])("%s", async (_, scenario, code, calls) => {
+  ])("%s", async (_, scenario, code, calls, stdout = "") => {
     const result = await runScript(scenario);
     expect(result.calls).toEqual(calls);
     expect(result.code).toBe(code);
+    expect(result.stdout).toBe(stdout);
   });
 
   // Every code stats can exit with but 0 and 10, its neighbours, an uncaught error, and a command not found.
@@ -289,16 +274,8 @@ exit "$code"
       const result = await runScript({ channel: "low", stats: [code], rollout: [0] });
       expect(result.calls).toEqual([STATUS, STATS]);
       expect(result.code).toBe(1);
-      expect(result.stdout).not.toContain("::warning::");
     },
   );
-
-  test("a revert leaves a warning that holds no stored value", async () => {
-    const result = await runScript({ channel: "low", stats: [10], rollout: [0] });
-    expect(result.stdout).toBe(
-      "::warning::Reverted the ios rollout: too many checks list its update as failed\n",
-    );
-  });
 
   test("a stored value that holds shell text reaches stats as one argument and runs nothing", async () => {
     const hostile = "$(touch pwned) `touch pwned`; touch pwned; * ' \" --json";

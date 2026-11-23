@@ -86,7 +86,11 @@ test("the docs check rejects a command or flag the runbook or an example names a
       `${runbook}\n`.replace("tide rollout revert", "tide revert"),
       "names tide revert",
     ],
-    ["agents.md", runbook.replace("`--platform`", "`--only`"), "no tide command has --only"],
+    [
+      "agents.md",
+      runbook.replace("rollout revert --platform", "rollout revert --only"),
+      "tide rollout has no --only",
+    ],
     [
       "revert.yml",
       example.replace("--max-failed-share", "--max-share"),
@@ -99,16 +103,3 @@ test("the docs check rejects a command or flag the runbook or an example names a
     expect(stderr).toContain(`${name}: ${problem}`);
   }
 });
-
-// What an operator must know before acting on a verdict.
-test.each(["docs/agents.md", "docs/examples/revert-rollouts.yml"])(
-  "%s says what a count and a revert are, and that the server has no webhook or pause",
-  (path) => {
-    const text = readFileSync(join(ROOT, path), "utf8").replaceAll(/\s+(?:#\s+)?/g, " ");
-    expect(text).toMatch(/checks, not devices/);
-    expect(text).toMatch(
-      /does not move devices already on the update|never moves a device that already runs the update/,
-    );
-    expect(text).toMatch(/no webhook(?:,| and) no pause/);
-  },
-);

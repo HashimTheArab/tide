@@ -914,7 +914,7 @@ exits 1 at startup. Each point is then one line of JSON on stdout, the only line
 `tide listening on port <port>` and `tide closing`; errors go to stderr):
 
 ```json
-{"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","","","","none"],"doubles":[0]}
+{"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002","none"],"doubles":[1]}
 ```
 
 `indexes[0]` is `index1`, `blobs[0]` to `blobs[6]` are `blob1` to `blob7` and `doubles[0]` is `double1`, exactly as in the

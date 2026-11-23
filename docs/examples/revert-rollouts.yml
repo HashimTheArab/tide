@@ -1,13 +1,7 @@
 # Example only: copy into the operator repository that publishes. Tide's own repository never runs it. See docs/agents.md.
-#
-# Stops a rollout whose new update too many checks list as failed. The server has no webhook and no pause, so this job
-# asks on a schedule.
-# - tide stats reads Analytics Engine, so this is for Workers only. It counts checks, not devices, and the IDs come from
-#   clients: a verdict is a signal, not proof.
-# - tide rollout revert stops the update for devices that have not taken it. It does not move devices already on the
-#   update; tide rollback does.
-# - Status, stats and revert run in this one job, inside the writers' concurrency group, so no other writer can change a
-#   rollout between its verdict and its revert.
+# Status, stats and revert run in this one job, inside the writers' concurrency group, so no other writer can change a
+# rollout between its verdict and its revert. tide stats, for Workers only, counts checks, not devices; tide rollout
+# revert does not move devices already on the update. The server has no webhook and no pause, so this job polls.
 name: Revert bad rollouts
 
 on:

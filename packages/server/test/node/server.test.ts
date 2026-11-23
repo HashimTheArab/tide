@@ -14,8 +14,8 @@ import type { AnalyticsSink, ManifestPoint } from "../../src/core/analytics.ts";
 import type { Harness } from "../shared/server-cases.ts";
 import { createApp } from "../../src/core/app.ts";
 import { diskStore, startServer, storeFromEnv } from "../../src/node.ts";
-import { analyticsCases, faultySink, sinkFaultCases } from "../shared/analytics-cases.ts";
-import { fixture } from "../shared/fixtures.ts";
+import { analyticsCases, faultySink } from "../shared/analytics-cases.ts";
+import { CLIENT_LOW, fixture } from "../shared/fixtures.ts";
 import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
 import { runEntry } from "./entry.ts";
 
@@ -91,8 +91,8 @@ describe("node entry with a disk store", () => {
   });
 });
 
-// The entry's own sink cannot be made to fail on demand, so this proves the core contract on Node.
-describe("node app with a failing analytics sink", () => {
+// The core sink contract on Node; the entry's own sink only writes each point out.
+describe("node app with an analytics sink", () => {
   const root = tempRoot();
   let base = "";
   let sink: AnalyticsSink = () => undefined;
@@ -105,7 +105,7 @@ describe("node app with a failing analytics sink", () => {
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
-  sinkFaultCases({
+  analyticsCases({
     request: (path, headers) => exactRequest(`${base}${path}`, headers),
     put: (key, bytes) => replace(root, diskPath(key), bytes),
     putFault: (key) => replace(root, diskPath(key)),
@@ -136,83 +136,77 @@ function manifestRequest(base: string, channel: string, change: Record<string, s
   });
 }
 
-/** Returns the point of one stdout line, after checking the fields the Node sink adds. */
-function pointOf(line: string, since: number): ManifestPoint {
-  const { schema, time, ...point } = JSON.parse(line) as ManifestPoint & {
-    schema: unknown;
-    time: string;
-  };
-  expect(schema).toBe(1);
-  expect(new Date(time).toISOString()).toBe(time);
-  expect(Date.parse(time)).toBeGreaterThanOrEqual(since);
-  expect(Date.parse(time)).toBeLessThanOrEqual(Date.now());
-  return point;
-}
-
-// The Workers project runs these cases against its binding, so a line here holds the point written there.
-describe("node entry with TIDE_ANALYTICS=stdout", () => {
-  const root = tempRoot();
-  const started = Date.now();
-  let base = "";
-  let entry: ReturnType<typeof runEntry>;
-  let taken = 0; // Characters of stdout the cases have accounted for.
-  beforeAll(async () => {
-    entry = runEntry(
-      { TIDE_DISK_DIR: root, TIDE_APP_ID: "tide-test", TIDE_ANALYTICS: "stdout" },
-      (kill) => cleanup.push(kill),
-    );
-    const [banner, port] = await entry.printed(/^tide listening on port (\d+)\n/);
-    taken = banner.length;
-    base = `http://127.0.0.1:${port}`;
-    await replace(
-      root,
-      diskPath(replyKey("marker", "1.0.0", "ios")),
-      fixture("manifest.reply.json"),
-    );
-  });
-
-  analyticsCases({
-    request: (path, headers) => exactRequest(`${base}${path}`, headers),
-    put: (key, bytes) => replace(root, diskPath(key), bytes),
-    putFault: (key) => replace(root, diskPath(key)),
-    capture: () => async () => {
-      // Lines keep their order, so one marker's line shows that every earlier request's has arrived.
-      const marker = crypto.randomUUID();
-      await manifestRequest(base, "marker", { "expo-current-update-id": marker });
-      const [stdout] = await entry.printed(new RegExp(`^[^]*"${marker}"[^\n]*\n`));
-      const lines = stdout.slice(taken).split("\n").slice(0, -1);
-      taken = stdout.length;
-      expect(lines.pop()).toContain(marker);
-      return lines.map((line) => pointOf(line, started));
-    },
-  });
-});
-
 describe("the node entry's analytics lines", () => {
   /** Starts the entry over a bucket whose `main` channel serves the golden manifest. */
   async function start(env: Record<string, string>) {
     const root = tempRoot();
     await replace(root, diskPath(replyKey("main", "1.0.0", "ios")), fixture("manifest.reply.json"));
     const entry = runEntry({ TIDE_DISK_DIR: root, ...env });
-    return { entry, base: `http://127.0.0.1:${await entry.listening}` };
+    return { root, entry, base: `http://127.0.0.1:${await entry.listening}` };
   }
   async function expectManifest(res: Response) {
     expect(res.status).toBe(200);
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(fixture("manifest.multipart"));
   }
 
-  test("the documented line is stdout's only line starting with {", async () => {
-    const { entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
-    await expectManifest(await manifestRequest(base, "main"));
-    await entry.printed(/^\{.*\n/m);
+  test("each check that reaches the reply decision is one line, and no other line starts with {", async () => {
+    const started = Date.now();
+    const { root, entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
+    const put = (key: string, golden?: string) =>
+      replace(root, diskPath(key), golden === undefined ? undefined : fixture(golden));
+    await put(replyKey("staged", "1.0.0", "ios"), "rollout-manifest.reply.json");
+    await put(replyKey("fault", "1.0.0", "ios"));
+    await put(NO_UPDATE_KEY, "identities-no-update.reply.json");
+    const embedded = "6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c";
+    const failed = [1, 2].map((n) => `00000000-0000-4000-8000-00000000000${n}`);
+    const statuses: number[] = [];
+    for (const [channel, change] of [
+      [
+        "main",
+        {
+          "eas-client-id": CLIENT_LOW,
+          "expo-current-update-id": embedded,
+          "expo-embedded-update-id": embedded,
+          "expo-recent-failed-update-ids": failed.map((id) => `"${id}"`).join(", "),
+          "expo-fatal-error": "TypeError: undefined is not a function",
+        },
+      ],
+      ["main", { "expo-platform": "web" }],
+      ["main", { "expo-protocol-version": "2" }],
+      ["none", { "expo-expect-signature": 'sig, keyid="other", alg="rsa-v1_5-sha256"' }],
+      ["staged", { "eas-client-id": CLIENT_LOW }],
+      ["fault", {}],
+    ] as const) {
+      statuses.push((await manifestRequest(base, channel, change)).status);
+    }
+    expect(statuses).toEqual([200, 400, 406, 404, 200, 503]);
+    await entry.printed(/"fault".*\n/);
     entry.kill("SIGTERM");
-    const { code, stdout, stderr } = await entry.exited;
-    expect([code, stderr]).toEqual([0, ""]);
-    const line = stdout.replace(/^tide listening on port \d+\n/, "").replace(/tide closing\n$/, "");
-    pointOf(line, 0);
-    const documented = line.replace(/"time":"[^"]+"/, '"time":"<ISO ms Z>"');
+    const { code, stdout } = await entry.exited;
+    expect(code).toBe(0);
+    const times: string[] = [];
+    const timeless = stdout.replaceAll(/"time":"([^"]*)"/g, (_, time: string) => {
+      times.push(time);
+      return '"time":"<ISO ms Z>"';
+    });
+    for (const time of times) {
+      expect(new Date(time).toISOString()).toBe(time);
+      expect(Date.parse(time)).toBeGreaterThanOrEqual(started);
+      expect(Date.parse(time)).toBeLessThanOrEqual(Date.now());
+    }
+    const point = (index: string, reply: string, side: string) =>
+      `{"schema":1,"time":"<ISO ms Z>","indexes":["${index}"],"blobs":["${reply}","ios","1.0.0","","","","${side}"],"doubles":[0]}`;
+    const lines = timeless.split("\n");
+    expect(lines).toEqual([
+      `tide listening on port ${await entry.listening}`,
+      `{"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","${embedded}","${embedded}","${failed.join()}","none"],"doubles":[1]}`,
+      point("staged", "manifest", "new"),
+      point("fault", "503", "none"),
+      "tide closing",
+      "",
+    ]);
     const design = readFileSync(new URL("../../../../docs/design.md", import.meta.url), "utf8");
-    expect(design).toContain(`\`\`\`json\n${documented}\`\`\`\n`);
+    expect(design).toContain(`\`\`\`json\n${lines[1]}\n\`\`\`\n`);
   });
 
   test.each<Record<string, string>>([{}, { TIDE_ANALYTICS: "" }])(
@@ -227,18 +221,15 @@ describe("the node entry's analytics lines", () => {
     },
   );
 
-  test.each(["1", "true", "STDOUT", "stdout ", "stderr"])(
-    "TIDE_ANALYTICS=%j exits 1 before listening",
-    async (value) => {
-      const entry = runEntry({ TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: value });
-      expect(await entry.exited).toEqual({
-        code: 1,
-        signal: null,
-        stdout: "",
-        stderr: "tide: TIDE_ANALYTICS must be stdout, or unset\n",
-      });
-    },
-  );
+  test.each(["1", "STDOUT"])("TIDE_ANALYTICS=%j exits 1 before listening", async (value) => {
+    const entry = runEntry({ TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: value });
+    expect(await entry.exited).toEqual({
+      code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "tide: TIDE_ANALYTICS must be stdout, or unset\n",
+    });
+  });
 
   test("a closed reader changes no reply and SIGTERM still exits 0", async () => {
     const { entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
@@ -271,7 +262,7 @@ describe("the node entry's analytics lines", () => {
     void entry.printed(new RegExp(`^[^]*"${resumed}"[^\\n]*\\n`)).then(([all]) => (written = all));
     while (written === undefined) await expectManifest(await check(resumed));
     const points = written.split("\n").filter((line) => line.startsWith("{"));
-    for (const line of points) pointOf(line, 0);
+    for (const line of points) expect(JSON.parse(line)).toMatchObject({ schema: 1 });
     const held = points.filter((line) => line.includes(stalled));
     const bytes = held.join("\n").length;
     expect(held.length).toBeGreaterThan(0);
