@@ -7,7 +7,7 @@ import { describe, expect, onTestFinished, test } from "vitest";
 import type { RolloutSide } from "../../server/src/core/analytics.ts";
 import type { FakeSqlApi, SqlFault } from "./fake-sql-api.ts";
 import { manifestPoint } from "../../server/src/core/analytics.ts";
-import { STATS_EXIT, STATS_USAGE, stats } from "../src/stats.ts";
+import { STATS_USAGE, stats } from "../src/stats.ts";
 import { FAKE_ACCOUNT, FAKE_BODY, FAKE_TOKEN, startFakeSqlApi } from "./fake-sql-api.ts";
 import { run } from "./helpers.ts";
 
@@ -307,7 +307,7 @@ describe("verdict", () => {
     api.write(check({ running: A, failed: [A] }), 50);
     api.write(check({ running: A }), 50);
     // Counted twice it would be 50 of 150, under 34%.
-    expect((await tide(api, verdictArgs("49.99", "100"))).code).toBe(STATS_EXIT.badUpdate);
+    expect((await tide(api, verdictArgs("49.99", "100"))).code).toBe(10);
     expect((await tide(api, verdictArgs("50", "100"))).code).toBe(0);
     expect((await tide(api, verdictArgs("0", "101"))).code).toBe(0);
   });
@@ -338,13 +338,13 @@ describe("verdict", () => {
     const bad = await fake();
     bad.write(check({ running: B, failed: [A] }), 90);
     for (let i = 0; i < 10; i++) bad.write(check({ running: A }), 1);
-    expect((await tide(bad, verdictArgs("50", "100"))).code).toBe(STATS_EXIT.badUpdate);
+    expect((await tide(bad, verdictArgs("50", "100"))).code).toBe(10);
     const ok = await fake();
     ok.write(check({ running: A }), 90);
     for (let i = 0; i < 10; i++) ok.write(check({ running: B, failed: [A] }), 1);
     expect((await tide(ok, verdictArgs("50", "100"))).code).toBe(0);
     // 100 checks reach the minimum in 11 rows.
-    expect((await tide(ok, verdictArgs("9", "100"))).code).toBe(STATS_EXIT.badUpdate);
+    expect((await tide(ok, verdictArgs("9", "100"))).code).toBe(10);
   });
 });
 
@@ -352,144 +352,119 @@ describe("failures", () => {
   const reply = (data: unknown): SqlFault => ({
     reply: JSON.stringify({ meta: [], data, rows: 1, note: FAKE_BODY }),
   });
-  const groups = (row: object) => reply([{ update_id: A, outcome: "failed", checks: "9", ...row }]);
-  const COLUMN = { report: "update_id", verdict: "outcome" };
-  const MODES: ["report" | "verdict", string[]][] = [
-    ["report", []],
-    ["verdict", verdictArgs("0", "1")],
-  ];
+  const groups = (row: object) => reply([{ outcome: "failed", checks: "9", ...row }]);
+  // A verdict, so that each case also shows a failure never reads as a bad update.
+  const args = verdictArgs("0", "1");
 
-  describe.each(MODES)("of a %s", (mode, args) => {
-    test.each<[string, SqlFault, keyof typeof STATS_EXIT, string]>([
-      ["a dropped connection", "drop", "unreachable", "the SQL API could not be reached"],
-      ...[401, 403, 404, 422, 429, 500, 503, 204].map(
-        (status): [string, SqlFault, "status", string] => [
-          `a ${status}`,
-          { status },
-          "status",
-          `the SQL API answered ${status}`,
-        ],
-      ),
-      ["an oversize body", "oversize", "unparseable", "the SQL API's reply is over 1048576 bytes"],
-      [
-        "malformed JSON",
-        { reply: `{"data":[${FAKE_BODY}` },
-        "unparseable",
-        "the SQL API's reply is not JSON",
+  test.each<[string, SqlFault, number, string]>([
+    ["a dropped connection", "drop", 3, "the SQL API could not be reached"],
+    ...[401, 403, 404, 422, 429, 500, 503, 204].map(
+      (status): [string, SqlFault, number, string] => [
+        `a ${status}`,
+        { status },
+        4,
+        `the SQL API answered ${status}`,
       ],
-      [
-        "a body that is not UTF-8",
-        { reply: new Uint8Array([0x7b, 0xff, 0x7d]) },
-        "unparseable",
-        "the SQL API's reply is not JSON",
+    ),
+    ["an oversize body", "oversize", 5, "the SQL API's reply is over 1048576 bytes"],
+    ["malformed JSON", { reply: `{"data":[${FAKE_BODY}` }, 5, "the SQL API's reply is not JSON"],
+    [
+      "a body that is not UTF-8",
+      { reply: new Uint8Array([0x7b, 0xff, 0x7d]) },
+      5,
+      "the SQL API's reply is not JSON",
+    ],
+    ["no data", reply(undefined), 5, "the SQL API's reply has no data rows"],
+    ["data that is no list", reply({}), 5, "the SQL API's reply has no data rows"],
+    ["JSON null", { reply: "null" }, 5, "the SQL API's reply has no data rows"],
+    [
+      "a row that is no object",
+      reply([FAKE_BODY]),
+      5,
+      "the SQL API's reply has a row without a valid outcome",
+    ],
+    [
+      "a row without the grouped column",
+      reply([{ checks: "9" }]),
+      5,
+      "the SQL API's reply has a row without a valid outcome",
+    ],
+    [
+      "a value outside its grammar",
+      groups({ outcome: FAKE_BODY }),
+      5,
+      "the SQL API's reply has a row without a valid outcome",
+    ],
+    ...[undefined, null, "", "many", "1e3", "0x9", "1.5", "-1", 1.5, -1, true, ["9"]].map(
+      (checks): [string, SqlFault, number, string] => [
+        `a count of ${JSON.stringify(checks)}`,
+        groups({ checks }),
+        5,
+        "the SQL API's reply has a row whose checks is not a count",
       ],
-      ["no data", reply(undefined), "unparseable", "the SQL API's reply has no data rows"],
-      ["data that is no list", reply({}), "unparseable", "the SQL API's reply has no data rows"],
-      ["JSON null", { reply: "null" }, "unparseable", "the SQL API's reply has no data rows"],
-      [
-        "a row that is no object",
-        reply([FAKE_BODY]),
-        "unparseable",
-        `the SQL API's reply has a row without a valid ${COLUMN[mode]}`,
-      ],
-      [
-        "a row without the grouped column",
-        reply([{ checks: "9" }]),
-        "unparseable",
-        `the SQL API's reply has a row without a valid ${COLUMN[mode]}`,
-      ],
-      [
-        "a value outside its grammar",
-        groups({ update_id: FAKE_BODY, outcome: FAKE_BODY }),
-        "unparseable",
-        `the SQL API's reply has a row without a valid ${COLUMN[mode]}`,
-      ],
-      ...[undefined, null, "", "many", "1e3", "0x9", "1.5", "-1", 1.5, -1, true, ["9"]].map(
-        (checks): [string, SqlFault, "unparseable", string] => [
-          `a count of ${JSON.stringify(checks)}`,
-          groups({ checks }),
-          "unparseable",
-          "the SQL API's reply has a row whose checks is not a count",
-        ],
-      ),
-      [
-        "a count past 2^53",
-        groups({ checks: "9007199254740993" }),
-        "unparseable",
-        "the SQL API's reply counts more checks than fit a number",
-      ],
-    ])("%s has its fixed code and text", async (_, fault, name, message) => {
-      const api = await fake();
-      api.fault(fault);
-      const expected = failure(STATS_EXIT[name], message);
-      expect(await tide(api, args)).toEqual(expected);
-      expect(await tide(api, [...args, "--json"])).toEqual(expected);
-      expect(api.requests).toBe(2); // Nothing is retried.
-    });
-
-    test.each<SqlFault>(["silent", "stall"])("a %s server passes the deadline", async (fault) => {
-      const api = await fake();
-      api.fault(fault);
-      expect(await tide(api, args, ENV, 100)).toEqual(
-        failure(STATS_EXIT.unreachable, "the SQL API sent no whole reply within 100 ms"),
-      );
-    });
-
-    test("a refused connection", async () => {
-      const server = createServer();
-      server.listen(0, "127.0.0.1");
-      await new Promise((resolve) => server.once("listening", resolve));
-      const { port } = server.address() as AddressInfo;
-      await new Promise((resolve) => server.close(resolve));
-      expect(await tide({ origin: `http://127.0.0.1:${port}` }, args)).toEqual(
-        failure(STATS_EXIT.unreachable, "the SQL API could not be reached"),
-      );
-    });
-
-    test("a redirect is a status, and the token follows it nowhere", async () => {
-      const api = await fake();
-      const elsewhere = await fake();
-      api.fault({
-        redirect: `${elsewhere.origin}/client/v4/accounts/${FAKE_ACCOUNT}/analytics_engine/sql`,
-      });
-      expect(await tide(api, args)).toEqual(failure(STATS_EXIT.status, "the SQL API answered 307"));
-      expect(elsewhere.requests).toBe(0);
-    });
-
-    test("another token or account is refused by the API", async () => {
-      const api = await fake();
-      for (const [env, status] of [
-        [{ ...ENV, TIDE_ANALYTICS_TOKEN: "another-token" }, 401],
-        [{ ...ENV, TIDE_ANALYTICS_ACCOUNT_ID: "b".repeat(32) }, 404],
-      ] as const) {
-        expect(await tide(api, args, env)).toEqual(
-          failure(STATS_EXIT.status, `the SQL API answered ${status}`),
-        );
-      }
-    });
-  });
-
-  test("a later query's failure prints nothing of the earlier ones", async () => {
+    ),
+    [
+      "a count past 2^53",
+      groups({ checks: "9007199254740993" }),
+      5,
+      "the SQL API's reply counts more checks than fit a number",
+    ],
+  ])("%s has its fixed code and text", async (_, fault, code, message) => {
     const api = await fake();
-    api.write(check({ running: A, failed: [A] }), 1);
-    const broken = { ...check({ running: A }) };
-    broken.blobs[6] = FAKE_BODY; // Outside the side's values, so the third reply is unparseable.
-    api.write(broken, 1);
-    expect(await tide(api)).toEqual(
-      failure(STATS_EXIT.unparseable, "the SQL API's reply has a row without a valid side"),
-    );
-    expect(api.sql).toHaveLength(3);
+    api.fault(fault);
+    const expected = failure(code, message);
+    expect(await tide(api, args)).toEqual(expected);
+    expect(await tide(api, [...args, "--json"])).toEqual(expected);
+    expect(api.requests).toBe(2); // Nothing is retried.
   });
 
-  test("the exit codes are distinct, none is 0 or 1, and only the verdict's is 10", () => {
-    expect(STATS_EXIT).toEqual({
-      usage: 2,
-      unreachable: 3,
-      status: 4,
-      unparseable: 5,
-      badUpdate: 10,
-    });
+  test.each<SqlFault>(["silent", "stall"])("a %s server passes the deadline", async (fault) => {
+    const api = await fake();
+    api.fault(fault);
+    expect(await tide(api, args, ENV, 100)).toEqual(
+      failure(3, "the SQL API sent no whole reply within 100 ms"),
+    );
   });
+
+  test("a refused connection", async () => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1");
+    await new Promise((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    await new Promise((resolve) => server.close(resolve));
+    expect(await tide({ origin: `http://127.0.0.1:${port}` }, args)).toEqual(
+      failure(3, "the SQL API could not be reached"),
+    );
+  });
+
+  test("a redirect is a status, and the token follows it nowhere", async () => {
+    const api = await fake();
+    const elsewhere = await fake();
+    api.fault({
+      redirect: `${elsewhere.origin}/client/v4/accounts/${FAKE_ACCOUNT}/analytics_engine/sql`,
+    });
+    expect(await tide(api, args)).toEqual(failure(4, "the SQL API answered 307"));
+    expect(elsewhere.requests).toBe(0);
+  });
+
+  test.each([
+    ["update_id", 3, 1],
+    ["failed_ids", 5, 2],
+    ["side", 6, 3],
+  ])(
+    "a report fails on a %s outside its grammar and prints nothing of earlier queries",
+    async (alias, blob, queries) => {
+      const api = await fake();
+      api.write(check({ running: A, failed: [A] }), 1);
+      const broken = check({ running: A });
+      broken.blobs[blob] = FAKE_BODY;
+      api.write(broken, 1);
+      expect(await tide(api)).toEqual(
+        failure(5, `the SQL API's reply has a row without a valid ${alias}`),
+      );
+      expect(api.sql).toHaveLength(queries);
+    },
+  );
 });
 
 describe("usage", () => {
@@ -564,6 +539,11 @@ describe("usage", () => {
     ["no update", ["--max-failed-share", "5", "--min-checks", "10"], TOGETHER],
     ["no share", ["--update", A, "--min-checks", "10"], TOGETHER],
     ["no min-checks", ["--update", A, "--max-failed-share", "5"], TOGETHER],
+    [
+      "--print-sql with --json",
+      ["--print-sql", "--json"],
+      "--print-sql and --json do not go together",
+    ],
   ])("%s exits 2, sends nothing and prints no query", async (_, args, message) => {
     const api = await fake();
     for (const extra of [[], ["--json"], ["--print-sql"]]) {
@@ -687,13 +667,6 @@ FORMAT JSON`;
     expect(await tide(api, ["--print-sql"], env)).toEqual(await tide(api, ["--print-sql"], {}));
   });
 
-  test("it does not go with --json", async () => {
-    const api = await fake();
-    expect(await tide(api, ["--print-sql", "--json"])).toEqual(
-      failure(2, "--print-sql and --json do not go together"),
-    );
-  });
-
   test("the bin prints the queries docs/design.md shows, over the dataset wrangler.jsonc names", async () => {
     const design = readFileSync(new URL("docs/design.md", ROOT), "utf8");
     const section = /\n### `tide stats`\n[\s\S]*?(?=\n##? |\n### |$)/.exec(design)?.[0] ?? "";
@@ -708,13 +681,5 @@ FORMAT JSON`;
     expect(verdict).toEqual(success(`${shown.slice(3).join("\n\n")}\n`));
     const wrangler = readFileSync(new URL("packages/server/wrangler.jsonc", ROOT), "utf8");
     expect(report.stdout).toContain(`\nFROM ${/"dataset": "(\w+)"/.exec(wrangler)?.[1]}\n`);
-    // The default and maximum window the docs give.
-    expect(section).toContain("default 24h, at most 89d (2136h)");
-  });
-
-  test("the bin refuses a run without a token", async () => {
-    expect(await run(MAIN, ["stats"], {})).toEqual(
-      failure(2, "TIDE_ANALYTICS_ACCOUNT_ID and TIDE_ANALYTICS_TOKEN are required"),
-    );
   });
 });

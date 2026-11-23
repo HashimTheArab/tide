@@ -103,6 +103,22 @@ export function urlBase(value: string): string | undefined {
   return url.href.replace(/\/$/, "");
 }
 
+/** Returns what is wrong with a target, under the name of its flag, or undefined. */
+export function targetProblem(
+  channel: string,
+  runtime: string,
+  platform: string,
+): string | undefined {
+  try {
+    replyKey(channel, runtime, platform);
+    return undefined;
+  } catch (e) {
+    if (!(e instanceof ProtocolError)) throw e;
+    const flag = e.field === "runtimeVersion" ? "runtime-version" : e.field;
+    return `--${flag} ${e.message.slice(e.field.length + 1)}`;
+  }
+}
+
 /** Returns the record bytes: one JSON object, keys in a fixed order, no trailing newline, at most 2 MiB. */
 export function encodeRecord(record: ReleaseRecord): Uint8Array<ArrayBuffer> {
   const r = record;

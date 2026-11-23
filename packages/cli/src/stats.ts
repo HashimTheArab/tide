@@ -1,17 +1,19 @@
 import { parseArgs } from "node:util";
 
-import { ProtocolError, UUID, readLimited, replyKey } from "@tide-ota/protocol";
+import { UUID, readLimited } from "@tide-ota/protocol";
 
 import type { Env } from "./keys.ts";
 import { jsonDocument } from "./json.ts";
 import { member, read } from "./keys.ts";
+import { PROBE_EXIT } from "./probe.ts";
+import { targetProblem } from "./publish-record.ts";
 
-/** Exit codes; a failure takes probe's code for its class, and no other Tide command exits with `badUpdate`'s. */
-export const STATS_EXIT = {
-  usage: 2,
-  unreachable: 3,
-  status: 4,
-  unparseable: 5,
+/** Exit codes; no other Tide command exits with `badUpdate`'s. */
+const STATS_EXIT = {
+  usage: PROBE_EXIT.usage,
+  unreachable: PROBE_EXIT.unreachable,
+  status: PROBE_EXIT.status,
+  unparseable: PROBE_EXIT.unparseable,
   badUpdate: 10,
 } as const;
 
@@ -57,12 +59,7 @@ class StatsFailure extends Error {
   }
 }
 
-/** Counts checks, weighted, per value of one expression. */
-interface Query {
-  readonly sql: string;
-  readonly alias: string;
-  readonly values: RegExp; // What a group's value may be.
-}
+const usage = (message: string) => new StatsFailure("usage", message);
 
 interface Threshold {
   readonly updateId: string;
@@ -81,17 +78,18 @@ interface Counts {
   readonly counts: readonly Count[];
 }
 
-type Select = (value: string, alias: string, values: RegExp, condition?: string) => Query;
+/** Counts checks per value of one SQL expression; `values` is what a group's value may be. */
+type CountChecks = (
+  value: string,
+  alias: string,
+  values: RegExp,
+  condition?: string,
+) => Promise<Counts>;
 
 interface Result {
-  readonly document: object;
+  readonly document: object; // Only the mode's own fields.
   readonly lines: readonly string[];
   readonly bad: boolean;
-}
-
-interface Plan {
-  readonly queries: readonly Query[]; // Those `run` asks, in order.
-  readonly run: (ask: (query: Query) => Promise<Counts>) => Promise<Result>;
 }
 
 /**
@@ -106,17 +104,45 @@ export async function stats(
   options: { readonly origin?: string; readonly timeoutMs?: number } = {},
 ): Promise<number> {
   try {
-    const { hours, plan, api, json } = configure(args, env);
+    const { hours, dataset, filters, threshold, api, json } = configure(args, env);
+    const printed: string[] = [];
+    const count: CountChecks = async (value, alias, values, condition) => {
+      const sql = `SELECT ${value} AS ${alias}, SUM(_sample_interval) AS checks
+FROM ${dataset}
+WHERE ${[...filters, ...(condition === undefined ? [] : [condition])].join("\n  AND ")}
+GROUP BY ${alias}
+ORDER BY checks DESC, ${alias}
+LIMIT ${MAX_ROWS + 1}
+FORMAT JSON`;
+      if (api === undefined) {
+        printed.push(sql);
+        return { truncated: false, counts: [] };
+      }
+      const url = `${options.origin ?? "https://api.cloudflare.com"}${api.path}`;
+      const body = await send(url, api.token, sql, options.timeoutMs ?? TIMEOUT_MS);
+      return countsOf(body, alias, values);
+    };
+    const { document, lines, bad } = await (threshold === undefined
+      ? report(count)
+      : verdict(count, threshold));
+    // Nothing is printed until every query has an answer.
     if (api === undefined) {
-      io.out(plan.queries.map((q) => q.sql).join("\n\n"));
+      io.out(printed.join("\n\n"));
       return 0;
     }
-    const url = `${options.origin ?? "https://api.cloudflare.com"}${api.path}`;
-    const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
-    // Nothing is printed until every query has an answer.
-    const { document, lines, bad } = await plan.run((q) => send(url, api.token, q, timeoutMs));
-    if (json) io.out(jsonDocument({ schema: SCHEMA, windowHours: hours, ...document }));
-    else for (const line of [`checks, not devices, last ${hours} h:`, ...lines]) io.out(line);
+    if (json) {
+      io.out(
+        jsonDocument({
+          schema: SCHEMA,
+          windowHours: hours,
+          currentUpdates: null,
+          failedUpdates: null,
+          rolloutSides: null,
+          verdict: null,
+          ...document,
+        }),
+      );
+    } else for (const line of [`checks, not devices, last ${hours} h:`, ...lines]) io.out(line);
     return bad ? STATS_EXIT.badUpdate : 0;
   } catch (e) {
     if (!(e instanceof StatsFailure)) throw e;
@@ -126,37 +152,26 @@ export async function stats(
 }
 
 /** Checks per current update, per failed update and per rollout side. */
-function reportPlan(select: Select): Plan {
-  const queries = {
-    current: select("blob4", "update_id", UPDATE_ID),
-    failed: select("blob6", "failed_ids", FAILED_IDS, "blob6 != ''"),
-    side: select("blob7", "side", SIDE),
-  };
+async function report(count: CountChecks): Promise<Result> {
+  const current = await count("blob4", "update_id", UPDATE_ID);
+  const failed = perFailedId(await count("blob6", "failed_ids", FAILED_IDS, "blob6 != ''"));
+  const side = await count("blob7", "side", SIDE);
+  const named = (field: string, { truncated, counts }: Counts) => ({
+    truncated,
+    counts: counts.map(({ name, checks }) => ({ [field]: name, checks })),
+  });
   return {
-    queries: Object.values(queries),
-    run: async (ask) => {
-      const current = await ask(queries.current);
-      const failed = perFailedId(await ask(queries.failed));
-      const side = await ask(queries.side);
-      const named = (field: string, { truncated, counts }: Counts) => ({
-        truncated,
-        counts: counts.map(({ name, checks }) => ({ [field]: name, checks })),
-      });
-      return {
-        document: {
-          currentUpdates: named("updateId", current),
-          failedUpdates: named("updateId", failed),
-          rolloutSides: named("side", side),
-          verdict: null,
-        },
-        lines: [
-          ...section("current update", current, "lower counts are left out"),
-          ...section("failed update", failed, "every count is a lower bound"),
-          ...section("rollout side", side, "lower counts are left out"),
-        ],
-        bad: false,
-      };
+    document: {
+      currentUpdates: named("updateId", current),
+      failedUpdates: named("updateId", failed),
+      rolloutSides: named("side", side),
     },
+    lines: [
+      ...section("current update", current, "lower counts are left out"),
+      ...section("failed update", failed, "every count is a lower bound"),
+      ...section("rollout side", side, "lower counts are left out"),
+    ],
+    bad: false,
   };
 }
 
@@ -184,48 +199,40 @@ function section(label: string, { truncated, counts }: Counts, missing: string):
 }
 
 /** Whether too large a share of the checks that run the update, or list it as failed, list it as failed. */
-function verdictPlan(select: Select, threshold: Threshold): Plan {
-  const { updateId, maxFailedShare, minChecks } = threshold;
+async function verdict(
+  count: CountChecks,
+  { updateId, maxFailedShare, minChecks }: Threshold,
+): Promise<Result> {
   const listed = `position('${updateId}' IN blob6) > 0`;
   // One group per check, so a check that both runs and lists the update counts once.
-  const query = select(
+  const { counts } = await count(
     `if(${listed}, 'failed', 'running')`,
     "outcome",
     OUTCOME,
     `(blob4 = '${updateId}' OR ${listed})`,
   );
+  const sum = (rows: readonly Count[]) => rows.reduce((n, row) => n + row.checks, 0);
+  const checks = sum(counts);
+  const failedChecks = sum(counts.filter((row) => row.name === "failed"));
+  // Exact: hundredths of a percent and bigint products.
+  const over =
+    BigInt(failedChecks) * 10_000n > BigInt(Math.round(maxFailedShare * 100)) * BigInt(checks);
+  const result = checks < minChecks ? "notEnoughChecks" : over ? "bad" : "ok";
+  const reason = {
+    notEnoughChecks: `not enough checks, fewer than ${minChecks}`,
+    bad: `bad, over ${maxFailedShare}%`,
+    ok: `ok, not over ${maxFailedShare}%`,
+  }[result];
   return {
-    queries: [query],
-    run: async (ask) => {
-      const { counts } = await ask(query);
-      const sum = (rows: readonly Count[]) => rows.reduce((n, row) => n + row.checks, 0);
-      const checks = sum(counts);
-      const failedChecks = sum(counts.filter((row) => row.name === "failed"));
-      // Exact: hundredths of a percent and bigint products.
-      const over =
-        BigInt(failedChecks) * 10_000n > BigInt(Math.round(maxFailedShare * 100)) * BigInt(checks);
-      const result = checks < minChecks ? "notEnoughChecks" : over ? "bad" : "ok";
-      const reason = {
-        notEnoughChecks: `not enough checks, fewer than ${minChecks}`,
-        bad: `bad, over ${maxFailedShare}%`,
-        ok: `ok, not over ${maxFailedShare}%`,
-      }[result];
-      return {
-        document: {
-          currentUpdates: null,
-          failedUpdates: null,
-          rolloutSides: null,
-          verdict: { ...threshold, result, failedChecks, checks },
-        },
-        lines: [`update ${updateId} failed in ${failedChecks} of ${checks}: ${reason}`],
-        bad: result === "bad",
-      };
+    document: {
+      verdict: { updateId, maxFailedShare, minChecks, result, failedChecks, checks },
     },
+    lines: [`update ${updateId} failed in ${failedChecks} of ${checks}: ${reason}`],
+    bad: result === "bad",
   };
 }
 
 function configure(args: readonly string[], env: Env) {
-  const usage = (message: string) => new StatsFailure("usage", message);
   let values;
   try {
     ({ values } = parseArgs({
@@ -255,16 +262,8 @@ function configure(args: readonly string[], env: Env) {
   }
   const { channel, platform } = values;
   const runtime = values["runtime-version"];
-  if (platform !== undefined && platform !== "ios" && platform !== "android") {
-    throw usage("--platform must be ios or android");
-  }
-  try {
-    replyKey(channel ?? "any", runtime ?? "any", platform ?? "ios");
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    const flag = e.field === "channel" ? "--channel" : "--runtime-version";
-    throw usage(`${flag} ${e.message.slice(e.field.length + 1)}`);
-  }
+  const problem = targetProblem(channel ?? "any", runtime ?? "any", platform ?? "ios");
+  if (problem !== undefined) throw usage(problem);
   const threshold = thresholdOf(values.update, values["max-failed-share"], values["min-checks"]);
   const printSql = values["print-sql"] ?? false;
   const json = values.json ?? false;
@@ -274,26 +273,16 @@ function configure(args: readonly string[], env: Env) {
     throw usage(`${DATASET} must be 1 to 64 letters, digits and _, not starting with a digit`);
   }
 
-  const filters = [
-    `timestamp > NOW() - INTERVAL '${hours}' HOUR`,
-    ...(channel === undefined ? [] : [`index1 = '${channel}'`]),
-    ...(runtime === undefined ? [] : [`blob3 = '${runtime}'`]),
-    ...(platform === undefined ? [] : [`blob2 = '${platform}'`]),
-  ];
-  const select: Select = (value, alias, grammar, condition) => ({
-    sql: `SELECT ${value} AS ${alias}, SUM(_sample_interval) AS checks
-FROM ${dataset}
-WHERE ${[...filters, ...(condition === undefined ? [] : [condition])].join("\n  AND ")}
-GROUP BY ${alias}
-ORDER BY checks DESC, ${alias}
-LIMIT ${MAX_ROWS + 1}
-FORMAT JSON`,
-    alias,
-    values: grammar,
-  });
   return {
     hours,
-    plan: threshold === undefined ? reportPlan(select) : verdictPlan(select, threshold),
+    dataset,
+    filters: [
+      `timestamp > NOW() - INTERVAL '${hours}' HOUR`,
+      ...(channel === undefined ? [] : [`index1 = '${channel}'`]),
+      ...(runtime === undefined ? [] : [`blob3 = '${runtime}'`]),
+      ...(platform === undefined ? [] : [`blob2 = '${platform}'`]),
+    ],
+    threshold,
     api: printSql ? undefined : apiOf(env),
     json,
   };
@@ -305,7 +294,6 @@ function thresholdOf(
   share: string | undefined,
   minChecks: string | undefined,
 ): Threshold | undefined {
-  const usage = (message: string) => new StatsFailure("usage", message);
   if (updateId === undefined && share === undefined && minChecks === undefined) return undefined;
   if (updateId === undefined || share === undefined || minChecks === undefined) {
     throw usage("--update, --max-failed-share and --min-checks go together");
@@ -325,19 +313,19 @@ function apiOf(env: Env): { readonly path: string; readonly token: string } {
   const account = read(env, ACCOUNT);
   const token = read(env, TOKEN);
   if (account === undefined || token === undefined) {
-    throw new StatsFailure("usage", `${ACCOUNT} and ${TOKEN} are required`);
+    throw usage(`${ACCOUNT} and ${TOKEN} are required`);
   }
   if (!ACCOUNT_ID.test(account)) {
-    throw new StatsFailure("usage", `${ACCOUNT} must be 32 lowercase hex digits`);
+    throw usage(`${ACCOUNT} must be 32 lowercase hex digits`);
   }
   if (!BEARER.test(token)) {
-    throw new StatsFailure("usage", `${TOKEN} must be printable ASCII without whitespace`);
+    throw usage(`${TOKEN} must be printable ASCII without whitespace`);
   }
   return { path: `/client/v4/accounts/${account}/analytics_engine/sql`, token };
 }
 
-/** Sends one query under a deadline that covers its reply's body, and returns the groups it counts. */
-async function send(url: string, token: string, query: Query, timeoutMs: number): Promise<Counts> {
+/** Sends one query under a deadline that covers its reply's body, and returns that body. */
+async function send(url: string, token: string, sql: string, timeoutMs: number) {
   const signal = AbortSignal.timeout(timeoutMs);
   const unreachable = () =>
     new StatsFailure(
@@ -351,7 +339,7 @@ async function send(url: string, token: string, query: Query, timeoutMs: number)
     res = await fetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
-      body: query.sql,
+      body: sql,
       redirect: "manual", // A 3xx is then a status, and the token follows it nowhere.
       signal,
     });
@@ -372,11 +360,11 @@ async function send(url: string, token: string, query: Query, timeoutMs: number)
   if (body === undefined) {
     throw new StatsFailure("unparseable", `the SQL API's reply is over ${MAX_REPLY_BYTES} bytes`);
   }
-  return countsOf(body, query);
+  return body;
 }
 
-/** Reads a `FORMAT JSON` reply to `query`, which asks for one row more than is kept. */
-function countsOf(body: Uint8Array, { alias, values }: Query): Counts {
+/** Reads a `FORMAT JSON` reply to a query that asks for one row more than is kept. */
+function countsOf(body: Uint8Array, alias: string, values: RegExp): Counts {
   const unparseable = (problem: string) =>
     new StatsFailure("unparseable", `the SQL API's reply ${problem}`);
   let data: unknown;
