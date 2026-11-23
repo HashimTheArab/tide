@@ -8,7 +8,7 @@ import {
   sha256Base64Url,
 } from "@tide-ota/protocol";
 
-import type { Bucket } from "./bucket.ts";
+import type { Bucket, ListEntry } from "./bucket.ts";
 import type { Platform } from "./publish-record.ts";
 import { MAX_BSDIFF_INPUT, makeBsdiff } from "./bsdiff.ts";
 import { writing } from "./pointer.ts";
@@ -45,7 +45,7 @@ export async function preparePatches(
   bucket: Bucket,
   targets: readonly PatchTarget[],
   bases: readonly PatchBase[],
-  stored: ReadonlyMap<string, number>,
+  stored: ReadonlyMap<string, ListEntry["size"]>,
 ): Promise<Patches> {
   const patches: Patches = new Map();
   for (const t of targets) {

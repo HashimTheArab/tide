@@ -26,9 +26,9 @@ export function prng(seed: number): () => number {
 
 export const utf8 = (s: string) => new Uint8Array(new TextEncoder().encode(s));
 
-/** Returns a fresh directory, removed when the test finishes. */
-export function tempRoot(): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "tide-cli-")));
+/** Returns a fresh directory under `parent`, removed when the test finishes. */
+export function tempRoot(parent = tmpdir()): string {
+  const root = realpathSync(mkdtempSync(join(parent, "tide-cli-")));
   onTestFinished(() => {
     rmSync(root, { recursive: true, force: true });
   });

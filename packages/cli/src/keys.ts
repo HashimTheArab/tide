@@ -120,9 +120,10 @@ export async function openWriter(
     readonly now?: () => number;
     readonly app?: App;
     readonly addIdentity?: boolean;
+    readonly watch?: (bucket: Bucket) => Bucket; // Wraps the bucket every read and write goes through.
   } = {},
 ): Promise<Writer> {
-  const { now = Date.now, app } = options;
+  const { now = Date.now, app, watch = (b) => b } = options;
   const at = now();
   const identity = await buildIdentity(env, at);
   if (app !== undefined) await checkApp(app, identity, at);
@@ -131,7 +132,7 @@ export async function openWriter(
   const source = signingKey(env, options.kmsTimeoutMs ?? 30_000);
   const signer = verifying({ keyId: identity.keyId, sign: source.sign }, identity, leaf);
   await signer.sign(PROBE);
-  const bucket = bucketFromEnv(env);
+  const bucket = watch(bucketFromEnv(env));
   const { noUpdate, bound } = await checkBucket(bucket, identity, options.addIdentity === true);
   return {
     signer,

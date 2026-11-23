@@ -301,10 +301,11 @@ export function diskBucket(root: string, options: DiskOptions = {}): Bucket {
   }
 
   /** Returns the bytes at `path` without following a link: 0 for anything but a regular file. */
-  function sizeOf(path: string): number {
+  function sizeOf(path: string): number | bigint {
     try {
-      const st = lstatSync(join(root, path));
-      return st.isFile() ? st.size : 0;
+      const st = lstatSync(join(root, path), { bigint: true });
+      if (!st.isFile()) return 0;
+      return st.size > Number.MAX_SAFE_INTEGER ? st.size : Number(st.size);
     } catch (e) {
       throw fail(`failed: ${code(e)}`);
     }

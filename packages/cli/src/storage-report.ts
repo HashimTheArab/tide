@@ -2,6 +2,7 @@ import { CONTENT_KEY, LEGACY_MAP_KEY, contentKey } from "@tide-ota/protocol";
 
 import type { Bucket, ListEntry } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { jsonDocument } from "./json.ts";
 import { member } from "./keys.ts";
 import {
   BASE_PREFIX,
@@ -11,19 +12,21 @@ import {
   readReleaseRecord,
 } from "./publish-record.ts";
 
+const SCHEMA = 1;
 const REPORTED = ["assets/", "bundles/", RECORD_PREFIX] as const;
 const MAX_MAP_BYTES = 64 * 1024 * 1024;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
  * Prints every object under `assets/`, `bundles/` and `updates/` that no release record, base record or legacy map
- * entry names, as `<name> <bytes>`, then the count and total. Returns 1 with nothing on stdout when a listing or read
- * fails, since a partial scan could report a referenced object.
+ * entry names, as `<name> <bytes>`, then the count and total, or with `json` one document of them. Returns 1 with
+ * nothing on stdout when a listing or read fails, since a partial scan could report a referenced object.
  */
 export async function storage(
   bucket: Pick<Bucket, "get" | "list">,
   out: (line: string) => void,
   err: (line: string) => void,
+  json = false,
 ): Promise<0 | 1> {
   let unreferenced;
   try {
@@ -33,10 +36,29 @@ export async function storage(
     err(`tide: ${e.message}`);
     return 1;
   }
+  if (json) {
+    // Decimal strings: a JSON number past 2^53 is not exact in most readers.
+    const total = unreferenced.reduce((n, e) => n + BigInt(e.size), 0n);
+    const objects = unreferenced.map((e) => ({
+      name: "key" in e ? e.key : e.unknown,
+      isKey: "key" in e,
+      size: String(e.size),
+    }));
+    out(
+      jsonDocument({
+        schema: SCHEMA,
+        unreferenced: objects,
+        count: objects.length,
+        totalBytes: String(total),
+      }),
+    );
+    return 0;
+  }
   let total = 0n;
   for (const e of unreferenced) {
-    out(`${"key" in e ? e.key : quoted(e.unknown)} ${e.size}`);
-    total += BigInt(e.size);
+    const size = Number(e.size);
+    out(`${"key" in e ? e.key : jsonDocument(e.unknown)} ${size}`);
+    total += BigInt(size);
   }
   out(`${unreferenced.length} unreferenced objects, ${total} bytes`);
   return 0;
@@ -114,10 +136,3 @@ async function legacyKeys(bucket: Pick<Bucket, "get">): Promise<string[]> {
   }
   return keys as string[];
 }
-
-/** A name outside the key grammar as a JSON string of printable ASCII, so no stored byte reaches a terminal raw. */
-const quoted = (name: string) =>
-  JSON.stringify(name).replace(
-    /[^\x20-\x7e]/g,
-    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );

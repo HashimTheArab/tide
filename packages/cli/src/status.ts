@@ -11,7 +11,9 @@ import {
 
 import type { Bucket } from "./bucket.ts";
 import { BucketError } from "./bucket.ts";
+import { jsonDocument } from "./json.ts";
 
+const SCHEMA = 1;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
@@ -32,7 +34,7 @@ export interface Side {
 export interface Entry {
   readonly reply: StoredReply | Rollout;
   readonly time: string | undefined; // Undefined only for `reply/no-update`.
-  readonly sides: readonly Side[];
+  readonly sides: readonly [Side, ...Side[]];
 }
 
 /** A readable `reply/no-update`: its version and its entries by the keyid each is signed under, in keyid order. */
@@ -41,43 +43,61 @@ export interface NoUpdateRecord {
   readonly entries: ReadonlyMap<string, Entry>;
 }
 
+/** A stored reply as reported; its fields are null when it has none, as a directive has no update ID. */
+interface ReportedSide {
+  readonly kind: StoredReply["kind"];
+  readonly updateId: string | null;
+  readonly time: string | null;
+  readonly keyid: string;
+}
+
+/** A readable pointer as reported: a reply's own fields, or a rollout's percentage and sides. */
+type ReportedPointer = {
+  readonly key: string;
+  readonly channel: string | undefined;
+  readonly runtimeVersion: string | undefined;
+  readonly platform: string | undefined;
+} & (
+  | ReportedSide
+  | {
+      readonly kind: "rollout";
+      readonly percent: number;
+      readonly new: ReportedSide;
+      readonly earlier: ReportedSide | null;
+    }
+);
+
 /**
  * Prints one line per pointer under `reply/` and whether `reply/no-update` exists, per keyid when it is version 3,
- * reading each record's signed parts as stored. Returns 1 when any listed record is unreadable, else 0; a listing
- * failure rejects.
+ * reading each record's signed parts as stored, or with `json` one document of them. Returns 1 when any listed record
+ * is unreadable, else 0; a listing failure rejects.
  */
 export async function status(
   bucket: Bucket,
   out: (line: string) => void,
   err: (line: string) => void,
+  json = false,
 ): Promise<0 | 1> {
-  let unreadable = false;
-  let noUpdate = [`${NO_UPDATE_KEY}: missing`];
+  const reported: ReportedPointer[] = [];
+  const unreadable: { readonly key: string | null; readonly reason: string }[] = [];
+  let noUpdate: NoUpdateRecord | "missing" | "unreadable" = "missing";
   for (const entry of await bucket.list("reply/")) {
     if (!("key" in entry)) {
       // The name is stored data, so it is not printed.
-      err("reply/: unreadable: an object name outside the key grammar");
-      unreadable = true;
+      const reason = "an object name outside the key grammar";
+      err(`reply/: unreadable: ${reason}`);
+      unreadable.push({ key: null, reason });
       continue;
     }
     const { key } = entry;
     const fail = (reason: string) => {
       err(`${key}: unreadable: ${reason}`);
-      unreadable = true;
+      unreadable.push({ key, reason });
     };
     if (key === NO_UPDATE_KEY) {
       const record = (await readRecord(bucket, key, checkNoUpdate)) ?? "absent when read";
-      if (typeof record === "string") {
-        fail(record);
-        noUpdate = [`${NO_UPDATE_KEY}: unreadable`];
-      } else {
-        noUpdate =
-          record.version === 1
-            ? [`${NO_UPDATE_KEY}: present`]
-            : [...record.entries.keys()].map(
-                (k) => `${NO_UPDATE_KEY} keyid ${JSON.stringify(k)}: present`,
-              );
-      }
+      if (typeof record === "string") fail(record);
+      noUpdate = typeof record === "string" ? "unreadable" : record;
       continue;
     }
     const pointer = (await readRecord(bucket, key, checkPointer)) ?? "absent when read";
@@ -85,20 +105,62 @@ export async function status(
       fail(pointer);
       continue;
     }
-    const [, channel, runtime, platform] = key.split("/");
-    out(`${channel} ${runtime} ${platform} ${row(pointer)}`);
+    const reportable = pointerOf(key, pointer);
+    if (json) reported.push(reportable);
+    else out(row(reportable));
   }
-  for (const line of noUpdate) out(line);
-  return unreadable ? 1 : 0;
+  if (json) {
+    const record = typeof noUpdate === "string" ? undefined : noUpdate;
+    out(
+      jsonDocument({
+        schema: SCHEMA,
+        pointers: reported,
+        noUpdate: {
+          state: typeof noUpdate === "string" ? noUpdate : "present",
+          version: record?.version ?? null,
+          entries: [...(record?.entries.keys() ?? [])].map((keyid) => ({ keyid })),
+        },
+        unreadable,
+      }),
+    );
+  } else if (typeof noUpdate === "string") out(`${NO_UPDATE_KEY}: ${noUpdate}`);
+  else if (noUpdate.version === 1) out(`${NO_UPDATE_KEY}: present`);
+  else {
+    for (const keyid of noUpdate.entries.keys()) {
+      out(`${NO_UPDATE_KEY} keyid ${JSON.stringify(keyid)}: present`);
+    }
+  }
+  return unreadable.length > 0 ? 1 : 0;
 }
 
-/** A pointer's status columns after its key's: `<kind> <updateId|-> <time>`, or a rollout's percentage and sides. */
-function row({ reply, sides }: Entry): string {
-  const side = (s: Side | undefined) =>
-    s === undefined ? "none" : `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
-  const [first, earlier] = sides;
-  if (reply.kind !== "rollout") return side(first);
-  return `rollout ${reply.percent} new ${reply.new.updateId} ${first?.time} earlier ${side(earlier)}`;
+/** What `status` reports of the pointer `entry` at `key`. */
+function pointerOf(key: string, { reply, sides: [first, earlier] }: Entry): ReportedPointer {
+  const side = (s: Side): ReportedSide => ({
+    kind: s.kind,
+    updateId: s.updateId ?? null,
+    time: s.time ?? null,
+    keyid: s.keyId,
+  });
+  const [, channel, runtimeVersion, platform] = key.split("/");
+  const named = { key, channel, runtimeVersion, platform };
+  if (reply.kind !== "rollout") return { ...named, ...side(first) };
+  return {
+    ...named,
+    kind: "rollout",
+    percent: reply.percent,
+    new: side(first),
+    earlier: earlier === undefined ? null : side(earlier),
+  };
+}
+
+/** A pointer's status line: its key's columns, then `<kind> <updateId|-> <time>` or a rollout's percentage and sides. */
+function row(p: ReportedPointer): string {
+  const side = (s: ReportedSide) => `${s.kind} ${s.updateId ?? "-"} ${s.time}`;
+  const columns =
+    p.kind === "rollout"
+      ? `rollout ${p.percent} new ${p.new.updateId} ${p.new.time} earlier ${p.earlier === null ? "none" : side(p.earlier)}`
+      : side(p);
+  return `${p.channel} ${p.runtimeVersion} ${p.platform} ${columns}`;
 }
 
 /**
@@ -147,7 +209,7 @@ export function checkNoUpdate(key: string, bytes: Uint8Array): NoUpdateRecord | 
   if (decoded.kind !== "identities") {
     const side = checkSide(key, decoded);
     if (typeof side === "string") return side;
-    const entry = { reply: decoded, time: side.time, sides: [side] };
+    const entry: Entry = { reply: decoded, time: side.time, sides: [side] };
     return { version: 1, entries: new Map([[side.keyId, entry]]) };
   }
   const entries = new Map<string, Entry>();
