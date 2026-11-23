@@ -882,8 +882,8 @@ waiting period, `schedule-key-deletion --pending-window-in-days 30`, and give th
 
 Every `/manifest` request that reaches the reply decision (each 200 and 503) writes one Workers Analytics Engine
 data point through the `ANALYTICS` binding (dataset `tide_manifest` in `wrangler.jsonc`). A 400 or 406 is answered
-before that decision and writes none. The Node entry has no sink and records nothing. A `tide probe` whose `/manifest`
-request gets a 200 or 503 is a check like any other, with no update IDs; `blob7` holds the side it was assigned.
+before that decision and writes none. A `tide probe` whose `/manifest` request gets a 200 or 503 is a check like any
+other, with no update IDs; `blob7` holds the side it was assigned.
 
 | Field | Holds |
 | --- | --- |
@@ -908,6 +908,23 @@ index, 16 KB of blobs).
 
 The sink is never awaited: a sink that throws, rejects, or returns a promise that never settles leaves the reply
 unchanged, and a throw or rejection is logged by error name only, never with the point's values.
+
+**Node.** The Node entry records nothing unless `TIDE_ANALYTICS` is `stdout`; unset or empty is off, and any other value
+exits 1 at startup. Stdout must be a pipe or a socket, as under a container runtime without a TTY, or startup exits 1 too:
+Node writes to a file or a terminal synchronously, so a slow one would hold every reply. On Windows Node writes to a pipe
+synchronously as well, so `TIDE_ANALYTICS=stdout` always exits 1 there. To keep the lines in a file, pipe them to a process
+that writes it. Each point is then one line of JSON on stdout, the only lines that start with `{` (the entry's own are
+`tide listening on port <port>` and `tide closing`; errors go to stderr):
+
+```json
+{"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c","00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002","none"],"doubles":[1]}
+```
+
+`indexes[0]` is `index1`, `blobs[0]` to `blobs[6]` are `blob1` to `blob7` and `doubles[0]` is `double1`, exactly as in the
+table; only `schema` and `time` are added, since Analytics Engine stamps its own time. `schema` changes by the rule under
+JSON output. Nothing is sampled, but a line is never waited for: one whose reader has closed is lost, and while a stalled
+reader has filled Node's 64 KiB stdout buffer new points are dropped until it drains, so at most that and one line is
+held. Lines still buffered at exit are lost, and the last one can be cut.
 
 ### `tide probe`
 

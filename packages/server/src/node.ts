@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { fstatSync, statSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -9,6 +9,7 @@ import { serve } from "@hono/node-server";
 
 import { diskPath, storageFromEnv } from "@tide-ota/protocol";
 
+import type { AnalyticsSink } from "./core/analytics.ts";
 import type { Store } from "./core/store.ts";
 import { createApp } from "./core/app.ts";
 import { s3Store } from "./core/s3.ts";
@@ -58,14 +59,43 @@ export function storeFromEnv(env: Readonly<Record<string, string | undefined>>):
   return "disk" in storage ? diskStore(storage.disk) : s3Store(storage.s3);
 }
 
+const POINT_SCHEMA = 1;
+
+/** Returns the sink TIDE_ANALYTICS selects: `stdout`, or none when unset or empty. */
+function analyticsFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): AnalyticsSink | undefined {
+  const value = env.TIDE_ANALYTICS ?? "";
+  if (value === "") return undefined;
+  if (value !== "stdout") throw new Error("TIDE_ANALYTICS must be stdout, or unset");
+  // Node writes to a pipe on Windows, or to a file or a terminal, synchronously: a slow one would hold every reply.
+  if (process.platform === "win32") {
+    throw new Error("TIDE_ANALYTICS=stdout is not supported on Windows");
+  }
+  const destination = fstatSync(1);
+  if (!destination.isFIFO() && !destination.isSocket()) {
+    throw new Error("TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket");
+  }
+  const { stdout } = process;
+  // An unhandled error event, such as a closed reader's EPIPE, would end the process.
+  stdout.on("error", () => undefined);
+  return (point) => {
+    // A reader that has stalled; past the stream's buffer every write would be held in memory.
+    if (stdout.writableNeedDrain) return;
+    const time = new Date().toISOString();
+    stdout.write(`${JSON.stringify({ schema: POINT_SCHEMA, time, ...point })}\n`);
+  };
+}
+
 /** Starts the app on Node; port 0 picks a free port, and no `hostname` listens on every interface. */
 export function startServer(options: {
   port: number;
   hostname?: string;
   store: Store;
   appId?: string | undefined;
+  analytics?: AnalyticsSink | undefined;
 }): Promise<Server> {
-  const app = createApp(options.store, { appId: options.appId });
+  const app = createApp(options.store, { appId: options.appId, analytics: options.analytics });
   const { port, hostname } = options;
   return new Promise((resolve) => {
     // Without a createServer option, serve makes an HTTP/1.1 server.
@@ -78,8 +108,10 @@ export function startServer(options: {
 
 if (import.meta.main) {
   let store: Store;
+  let analytics: AnalyticsSink | undefined;
   try {
     store = storeFromEnv(process.env);
+    analytics = analyticsFromEnv(process.env);
   } catch (e) {
     console.error(`tide: ${(e as Error).message}`);
     process.exit(1);
@@ -88,6 +120,7 @@ if (import.meta.main) {
     port: Number(process.env.PORT ?? 8787),
     store,
     appId: process.env.TIDE_APP_ID,
+    analytics,
   });
   console.log(`tide listening on port ${(server.address() as AddressInfo).port}`);
   // As PID 1 in a container, Node would ignore SIGTERM; close lets in-flight replies finish before exiting.

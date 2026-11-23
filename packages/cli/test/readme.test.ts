@@ -66,3 +66,40 @@ test.each(["probe", "stats"])("the README names every variable tide %s reads", (
   const operations = section(README, "## Operations");
   for (const name of names) expect(operations).toContain(`\`${name}\``);
 });
+
+test("the docs check rejects a command or flag the runbook or an example names and the CLI lacks", () => {
+  const check = (name: string, text: string) => {
+    const path = join(tempRoot(), name);
+    writeFileSync(path, text);
+    const [readme, cli] = [join(ROOT, "README.md"), join(ROOT, "packages/cli/README.md")];
+    return spawnSync(process.execPath, [join(ROOT, "scripts/check-docs.mjs"), readme, cli, path], {
+      encoding: "utf8",
+    });
+  };
+  const runbook = readFileSync(join(ROOT, "docs/agents.md"), "utf8");
+  const example = readFileSync(join(ROOT, "docs/examples/revert-rollouts.yml"), "utf8");
+  expect(check("agents.md", runbook).status).toBe(0);
+  expect(check("revert.yml", example).status).toBe(0);
+  for (const [name, text, problem] of [
+    [
+      "agents.md",
+      `${runbook}\n`.replace("tide rollout revert", "tide revert"),
+      "names tide revert",
+    ],
+    [
+      "agents.md",
+      runbook.replace("rollout revert --platform", "rollout revert --only"),
+      "tide rollout has no --only",
+    ],
+    [
+      "revert.yml",
+      example.replace("--max-failed-share", "--max-share"),
+      "tide stats has no --max-share",
+    ],
+    ["revert.yml", example.replace("tide rollout revert", "tide pause"), "names tide pause"],
+  ] as const) {
+    const { status, stderr } = check(name, text);
+    expect(status).toBe(1);
+    expect(stderr).toContain(`${name}: ${problem}`);
+  }
+});

@@ -304,8 +304,9 @@ tide rollout complete --channel main --runtime-version 1.0.0
   `tide rollback --embedded`, or publish a fix.
 - `complete` and `revert` end a rollout. The next `tide publish --rollout` starts another over a complete one; over
   one in progress or reverted it refuses, so finish it or replace it with a plain publish, republish or rollback.
-- `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side, and `tide status` prints each
-  rollout's percentage and both sides.
+- Without `--rollout-side`, `tide probe` sends no `EAS-Client-ID`, so below 100% it checks the earlier side; with
+  `--rollout-side new --rollout-update <updateId>` it checks the new one. `tide status` prints each rollout's percentage
+  and both sides.
 
 ### Adding a signing identity
 
@@ -416,6 +417,7 @@ docker run --read-only -p 8787:8787 -v /srv/tide-bucket:/bucket:ro -e TIDE_DISK_
 | `TIDE_DISK_DIR` | A bucket directory, for a single host |
 | `TIDE_S3_ENDPOINT`, `TIDE_S3_REGION`, `TIDE_S3_BUCKET`, `TIDE_S3_ACCESS_KEY_ID`, `TIDE_S3_SECRET_ACCESS_KEY` | An S3-compatible bucket; all five, and read-only credentials with `s3:GetObject` and `s3:ListBucket` (without ListBucket a missing key is a 403, which Tide answers with 503) |
 | `TIDE_APP_ID` | Optional; as for the Worker |
+| `TIDE_ANALYTICS` | Optional; `stdout` writes each update check as one JSON line, so stdout must be a pipe or a socket (no `docker run -t`); any other value but empty exits 1 |
 
 Exactly one store is configured; otherwise the container exits 1 naming what is wrong. The image holds no
 configuration or credential: pass them at run time, from the orchestrator's secret store.
@@ -425,7 +427,8 @@ configuration or credential: pass them at run time, from the orchestrator's secr
 - `GET /hc` is the health check.
 - On `SIGTERM` or `SIGINT` it stops accepting connections, lets in-flight replies finish and exits 0. A client that
   stalls is cut off when the orchestrator's grace period ends.
-- Node records no analytics.
+- It records no analytics unless `TIDE_ANALYTICS=stdout`, which writes JSON lines among its log lines (`design.md`,
+  Observability); `tide stats` does not read them.
 - `TIDE_SERVER_URL` is the container's public origin. `TIDE_ASSET_URL` is the bucket's public domain (S3) or, on
   disk, a static origin such as `https://assets.example.com` where `https://assets.example.com/assets/<hex>` serves
   `TIDE_DISK_DIR/assets/<hex>` with each object's type. Tide adds `/assets/` itself, as in step 4 of Setting up an

@@ -1,4 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -14,9 +24,9 @@ import type { Harness } from "../shared/server-cases.ts";
 import { createApp } from "../../src/core/app.ts";
 import { diskStore, startServer, storeFromEnv } from "../../src/node.ts";
 import { analyticsCases, faultySink } from "../shared/analytics-cases.ts";
-import { fixture } from "../shared/fixtures.ts";
+import { CLIENT_LOW, fixture } from "../shared/fixtures.ts";
 import { bundleCases, manifestCases, serverCases } from "../shared/server-cases.ts";
-import { runEntry } from "./entry.ts";
+import { ENTRY, runEntry } from "./entry.ts";
 
 const HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
 const KEY = `assets/${contentKey(HASH)}`;
@@ -90,7 +100,7 @@ describe("node entry with a disk store", () => {
   });
 });
 
-// The Node entry records nothing; this proves the core sink contract on Node.
+// The core sink contract on Node; the entry's own sink only writes each point out.
 describe("node app with an analytics sink", () => {
   const root = tempRoot();
   let base = "";
@@ -120,6 +130,190 @@ describe("node app with an analytics sink", () => {
       });
       return () => points;
     },
+  });
+});
+
+/** Sends one stock iOS request for `channel` to the server at `base`. */
+function manifestRequest(base: string, channel: string, change: Record<string, string> = {}) {
+  return exactRequest(`${base}/manifest`, {
+    accept: "multipart/mixed",
+    "expo-protocol-version": "1",
+    "expo-platform": "ios",
+    "expo-runtime-version": "1.0.0",
+    "expo-channel-name": channel,
+    ...change,
+  });
+}
+
+describe("the node entry's analytics lines", () => {
+  /** Starts the entry over a bucket whose `main` channel serves the golden manifest. */
+  async function start(env: Record<string, string>) {
+    const root = tempRoot();
+    await replace(root, diskPath(replyKey("main", "1.0.0", "ios")), fixture("manifest.reply.json"));
+    const entry = runEntry({ TIDE_DISK_DIR: root, ...env });
+    return { root, entry, base: `http://127.0.0.1:${await entry.listening}` };
+  }
+  async function expectManifest(res: Response) {
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(fixture("manifest.multipart"));
+  }
+
+  test("each check that reaches the reply decision is one line, and no other line starts with {", async () => {
+    const started = Date.now();
+    const { root, entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
+    const put = (key: string, golden?: string) =>
+      replace(root, diskPath(key), golden === undefined ? undefined : fixture(golden));
+    await put(replyKey("staged", "1.0.0", "ios"), "rollout-manifest.reply.json");
+    await put(replyKey("fault", "1.0.0", "ios"));
+    await put(NO_UPDATE_KEY, "identities-no-update.reply.json");
+    const embedded = "6e0c1b9a-3f7d-4a2e-8b5c-9d1e2f3a4b5c";
+    const failed = [1, 2].map((n) => `00000000-0000-4000-8000-00000000000${n}`);
+    const statuses: number[] = [];
+    for (const [channel, change] of [
+      [
+        "main",
+        {
+          "eas-client-id": CLIENT_LOW,
+          "expo-current-update-id": embedded,
+          "expo-embedded-update-id": embedded,
+          "expo-recent-failed-update-ids": failed.map((id) => `"${id}"`).join(", "),
+          "expo-fatal-error": "TypeError: undefined is not a function",
+        },
+      ],
+      ["main", { "expo-platform": "web" }],
+      ["main", { "expo-protocol-version": "2" }],
+      ["none", { "expo-expect-signature": 'sig, keyid="other", alg="rsa-v1_5-sha256"' }],
+      ["staged", { "eas-client-id": CLIENT_LOW }],
+      ["fault", {}],
+    ] as const) {
+      statuses.push((await manifestRequest(base, channel, change)).status);
+    }
+    expect(statuses).toEqual([200, 400, 406, 404, 200, 503]);
+    await entry.printed(/"fault".*\n/);
+    entry.kill("SIGTERM");
+    const { code, stdout } = await entry.exited;
+    expect(code).toBe(0);
+    const times: string[] = [];
+    const timeless = stdout.replaceAll(/"time":"([^"]*)"/g, (_, time: string) => {
+      times.push(time);
+      return '"time":"<ISO ms Z>"';
+    });
+    for (const time of times) {
+      expect(new Date(time).toISOString()).toBe(time);
+      expect(Date.parse(time)).toBeGreaterThanOrEqual(started);
+      expect(Date.parse(time)).toBeLessThanOrEqual(Date.now());
+    }
+    const point = (index: string, reply: string, side: string) =>
+      `{"schema":1,"time":"<ISO ms Z>","indexes":["${index}"],"blobs":["${reply}","ios","1.0.0","","","","${side}"],"doubles":[0]}`;
+    const lines = timeless.split("\n");
+    expect(lines).toEqual([
+      `tide listening on port ${await entry.listening}`,
+      `{"schema":1,"time":"<ISO ms Z>","indexes":["main"],"blobs":["manifest","ios","1.0.0","${embedded}","${embedded}","${failed.join()}","none"],"doubles":[1]}`,
+      point("staged", "manifest", "new"),
+      point("fault", "503", "none"),
+      "tide closing",
+      "",
+    ]);
+    const design = readFileSync(new URL("../../../../docs/design.md", import.meta.url), "utf8");
+    expect(design).toContain(`\`\`\`json\n${lines[1]}\n\`\`\`\n`);
+  });
+
+  test.each<Record<string, string>>([{}, { TIDE_ANALYTICS: "" }])(
+    "with %j there are none",
+    async (env) => {
+      const { entry, base } = await start(env);
+      await expectManifest(await manifestRequest(base, "main"));
+      entry.kill("SIGTERM");
+      const { code, stdout } = await entry.exited;
+      expect(code).toBe(0);
+      expect(stdout).toMatch(/^tide listening on port \d+\ntide closing\n$/);
+    },
+  );
+
+  test.each(["1", "STDOUT"])("TIDE_ANALYTICS=%j exits 1 before listening", async (value) => {
+    const entry = runEntry({ TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: value });
+    expect(await entry.exited).toEqual({
+      code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "tide: TIDE_ANALYTICS must be stdout, or unset\n",
+    });
+  });
+
+  // Node writes to these synchronously, so a slow one would hold replies.
+  test.each([
+    ["a file", () => join(tempRoot(), "out.log")],
+    ["a device", () => "/dev/null"],
+  ])("stdout that is %s exits 1 before listening", async (_, path) => {
+    // A port in use, so that an entry that goes on to listen exits too, with another error.
+    const PORT = new URL(await serveDisk(tempRoot())).port;
+    const out = openSync(path(), "w");
+    const child = spawn(process.execPath, [ENTRY], {
+      env: { TIDE_DISK_DIR: tempRoot(), TIDE_ANALYTICS: "stdout", PORT },
+      stdio: ["ignore", out, "pipe"],
+    });
+    onTestFinished(() => void child.kill("SIGKILL"));
+    closeSync(out);
+    let stderr = "";
+    child.stderr!.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+    expect(await once(child, "close")).toEqual([1, null]);
+    expect(stderr).toBe("tide: TIDE_ANALYTICS=stdout needs stdout to be a pipe or a socket\n");
+  });
+
+  // Node writes to a pipe synchronously on Windows.
+  test("a pipe on Windows exits 1 before listening", async () => {
+    const entry = runEntry({
+      TIDE_DISK_DIR: tempRoot(),
+      TIDE_ANALYTICS: "stdout",
+      NODE_OPTIONS:
+        "--import=data:text/javascript,Object.defineProperty(process,'platform',{value:'win32'})",
+    });
+    expect(await Promise.race([entry.exited, entry.listening])).toEqual({
+      code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "tide: TIDE_ANALYTICS=stdout is not supported on Windows\n",
+    });
+  });
+
+  test("a closed reader changes no reply and SIGTERM still exits 0", async () => {
+    const { entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
+    const closed = once(entry.stdout, "close");
+    entry.stdout.destroy();
+    await closed;
+    for (let i = 0; i < 20; i++) await expectManifest(await manifestRequest(base, "main"));
+    entry.kill("SIGTERM");
+    expect(await entry.exited).toMatchObject({ code: 0, signal: null, stderr: "" });
+  });
+
+  test("a stalled reader changes no reply, holds a bounded number of points and is written to again", async () => {
+    const { entry, base } = await start({ TIDE_ANALYTICS: "stdout" });
+    const [stalled, resumed] = [crypto.randomUUID(), crypto.randomUUID()];
+    const failed = Array.from({ length: 5 }, () => `"${crypto.randomUUID()}"`).join(", ");
+    const check = (id: string) =>
+      manifestRequest(base, "main", {
+        "expo-current-update-id": id,
+        "expo-recent-failed-update-ids": failed,
+      });
+    entry.stdout.pause();
+    const requests = 4000;
+    for (let sent = 0; sent < requests; sent += 50) {
+      const replies = Array.from({ length: 50 }, () => check(stalled));
+      for (const reply of replies) await expectManifest(await reply);
+    }
+    entry.stdout.resume();
+    // Every line still held comes before the first one written after the reader resumed.
+    let written: string | undefined;
+    void entry.printed(new RegExp(`^[^]*"${resumed}"[^\\n]*\\n`)).then(([all]) => (written = all));
+    while (written === undefined) await expectManifest(await check(resumed));
+    const points = written.split("\n").filter((line) => line.startsWith("{"));
+    for (const line of points) expect(JSON.parse(line)).toMatchObject({ schema: 1 });
+    const held = points.filter((line) => line.includes(stalled));
+    const bytes = held.join("\n").length;
+    expect(held.length).toBeGreaterThan(0);
+    // The process's 64 KiB buffer, this reader's and the pipe's between them.
+    expect(bytes).toBeLessThan(512 * 1024);
+    expect((bytes / held.length) * requests).toBeGreaterThan(1024 * 1024);
   });
 });
 

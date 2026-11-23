@@ -1,0 +1,124 @@
+# Example only: copy into the operator repository that publishes. Tide's own repository never runs it. See docs/agents.md.
+# Status, stats and revert run in this one job, inside the writers' concurrency group, so no other writer can change a
+# rollout between its verdict and its revert. tide stats, for Workers only, counts checks, not devices; tide rollout
+# revert does not move devices already on the update. The server has no webhook and no pause, so this job polls.
+name: Revert bad rollouts
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # This job's own environment: limited to main, holding only the values below. No required reviewers, which would
+    # hold every scheduled run; keep those on the environment that holds the signing key.
+    environment: tide-revert
+    # The group every writer for this bucket shares.
+    concurrency:
+      group: tide-publish
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+      - name: Install the checked CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TIDE_VERSION: "<version>" # The exact version the publish workflow pins; 0.1.0 has no tide stats.
+        run: |
+          mkdir "$RUNNER_TEMP/tide-pkgs" && cd "$RUNNER_TEMP/tide-pkgs"
+          for p in cli protocol; do
+            npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@$TIDE_VERSION"
+            gh attestation verify "tide-ota-$p-$TIDE_VERSION.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+              --cert-identity "https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v$TIDE_VERSION"
+          done
+          npm install --prefix "$RUNNER_TEMP/tide" --offline --ignore-scripts --no-fund \
+            "./tide-ota-cli-$TIDE_VERSION.tgz" "./tide-ota-protocol-$TIDE_VERSION.tgz"
+          echo "$RUNNER_TEMP/tide/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Revert each bad rollout
+        shell: bash
+        env:
+          CHANNEL: main
+          RUNTIME_VERSION: "1.0.0"
+          MAX_FAILED_SHARE: "5"
+          MIN_CHECKS: "500"
+          # For the head check only.
+          GH_TOKEN: ${{ github.token }}
+          # Bucket read and write, for tide status and tide rollout.
+          TIDE_S3_ENDPOINT: ${{ vars.TIDE_S3_ENDPOINT }}
+          TIDE_S3_REGION: ${{ vars.TIDE_S3_REGION }}
+          TIDE_S3_BUCKET: ${{ vars.TIDE_S3_BUCKET }}
+          TIDE_S3_ACCESS_KEY_ID: ${{ secrets.TIDE_S3_ACCESS_KEY_ID }}
+          TIDE_S3_SECRET_ACCESS_KEY: ${{ secrets.TIDE_S3_SECRET_ACCESS_KEY }}
+          # The build pins, for tide rollout, which signs nothing: this job never gets a signing key.
+          TIDE_BUILD_KEYID: ${{ vars.TIDE_BUILD_KEYID }}
+          TIDE_BUILD_CERTIFICATE: ${{ vars.TIDE_BUILD_CERTIFICATE }}
+          TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN: ${{ vars.TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN }}
+          # A token with the one permission Account Analytics Read, for tide stats.
+          TIDE_ANALYTICS_TOKEN: ${{ secrets.TIDE_ANALYTICS_TOKEN }}
+          TIDE_ANALYTICS_ACCOUNT_ID: ${{ vars.TIDE_ANALYTICS_ACCOUNT_ID }}
+          TIDE_ANALYTICS_DATASET: ${{ vars.TIDE_ANALYTICS_DATASET }}
+        run: |
+          set -euo pipefail
+
+          # A queued run, a rerun, or one that main has overtaken must not revert by an older commit's thresholds or CLI.
+          check_head() {
+            local head
+            if ! head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" ||
+              [ "$head" != "$GITHUB_SHA" ]; then
+              echo "::error::main has moved on from this commit, or its head could not be read"
+              exit 1
+            fi
+          }
+
+          check_head
+          # A failed status, or another schema, ends the job here.
+          status="$(tide status --json)"
+          jq -e '.schema == 1' <<< "$status" > /dev/null
+          failed=0
+
+          # Exit 1 may have written, so a retry finishes it in place, with no other writer and no head check in between.
+          revert() {
+            local code
+            for attempt in 1 2 3 4 5; do
+              code=0
+              tide rollout revert --channel "$CHANNEL" --runtime-version "$RUNTIME_VERSION" --platform "$1" || code=$?
+              if [ "$code" -ne 1 ]; then return "$code"; fi
+              sleep 30
+            done
+            return 1
+          }
+
+          for platform in ios android; do
+            # A stored value: only ever a quoted variable.
+            update="$(jq -r --arg channel "$CHANNEL" --arg runtime "$RUNTIME_VERSION" --arg platform "$platform" '
+              .pointers[]
+              | select(.channel == $channel and .runtimeVersion == $runtime and .platform == $platform)
+              | select(.kind == "rollout" and .percent > 0 and .percent < 100)
+              | .new.updateId' <<< "$status")"
+            if [ -z "$update" ]; then continue; fi
+            verdict=0
+            tide stats --update "$update" --max-failed-share "$MAX_FAILED_SHARE" --min-checks "$MIN_CHECKS" || verdict=$?
+            case "$verdict" in
+              0) ;;
+              10) # Only a bad update exits with this.
+                check_head
+                if revert "$platform"; then
+                  echo "::warning::Reverted the $platform rollout: too many checks list its update as failed"
+                else
+                  failed=1
+                fi
+                ;;
+              *) # No verdict, so no revert.
+                failed=1
+                ;;
+            esac
+          done
+          exit "$failed"
