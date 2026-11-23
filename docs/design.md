@@ -640,8 +640,8 @@ deletion gets its own design.
 
 ### JSON output
 
-`status`, `storage`, `probe`, `publish`, `rollout`, `rollback` and `republish` take `--json`: stdout is then one JSON
-document on one line, and stderr and the exit code are what they are without it. Every character outside printable
+`status`, `storage`, `probe`, `stats`, `publish`, `rollout`, `rollback` and `republish` take `--json`: stdout is then one
+JSON document on one line, and stderr and the exit code are what they are without it. Every character outside printable
 ASCII is written `\uXXXX`, so no stored byte reaches a terminal raw.
 
 `schema` numbers each command's document on its own (the four writers share one); every one is 1. It changes when a
@@ -659,14 +659,17 @@ present, in this order; `null` means it does not apply.
 | `storage` | `schema`, `unreferenced`, `count`, `totalBytes` |
 | one of `unreferenced` | `name`, `isKey` (false for a name outside the key grammar), `size` |
 | `probe` | `schema`, `failure` (`null`, or the class under `tide probe`), `rolloutSide` (`new` with `--rollout-side new`, else `null`), `directive`, `updateId`, `launchAssetHash` (all `null` on a failure) |
+| `stats` | `schema`, `windowHours`, `currentUpdates`, `failedUpdates`, `rolloutSides`, `verdict` (a report's three groups or the verdict, the rest `null`) |
+| `currentUpdates`, `failedUpdates`, `rolloutSides` | `truncated`, `counts` (one `{"updateId", "checks"}`, or `{"side", "checks"}`, per line of text; the name is `null` where the line has `-`) |
+| `verdict` | `updateId`, `maxFailedShare`, `minChecks`, `result` (`ok`, `bad` or `notEnoughChecks`), `failedChecks`, `checks` |
 | the writers | `schema`, `complete`, `pointers` |
 | one of a writer's `pointers` | `key`, `updateId` (`null` for a directive), then `time`, or for `rollout` `percent` |
 
 - **Sizes.** `size` and `totalBytes` are decimal strings, since a JSON number past 2^53 is not exact.
 - **Keyids.** A pointer's keyid is its own; nothing names one for the bucket
   ([0003](decisions/0003-one-identity-per-runtime.md)).
-- **Nothing printed.** Exit 2 of any command, and a failed `storage` scan, leave stdout empty. `status` prints its
-  document with exit 1 when a record is unreadable, and `probe` on every failure but 2.
+- **Nothing printed.** Exit 2 of any command, a failed `storage` scan, and every `stats` exit but 0 and 10 leave stdout
+  empty. `status` prints its document with exit 1 when a record is unreadable, and `probe` on every failure but 2.
 - **Writers.** Exit 0 or 1 prints the document. `pointers` holds exactly the pointer writes this run made and the
   bucket acknowledged, in write order, so a target already as asked is not listed, nor is one whose write lost its race
   or has an unknown outcome. `complete` is true only with exit 0; a crash while writing prints it as false. Each attempt
@@ -956,3 +959,110 @@ complete rollout and a plain pointer to the update answer alike, so both pass; `
 `--json` names 3 to 9 `unreachable`, `status`, `unparseable`, `signature`, `bundleMissing`, `bundleHash` and `mismatch`.
 Exit 1 is left to an uncaught error, so it always means a bug. Messages are fixed text naming the failure and at
 most a status; no header value, key or response body is printed.
+
+### `tide stats`
+
+Reads those points back through Cloudflare's Analytics Engine SQL API, so it is Workers only: the Node server's checks
+are not in Analytics Engine.
+
+```
+tide stats [--window <n>h|<n>d] [--channel <name>] [--runtime-version <version>] [--platform ios|android]
+  [--update <updateId> --max-failed-share <percent> --min-checks <n>] [--print-sql] [--json]
+```
+
+| Variable | Holds |
+| --- | --- |
+| `TIDE_ANALYTICS_TOKEN` | A Cloudflare API token with the one permission Account Analytics Read |
+| `TIDE_ANALYTICS_ACCOUNT_ID` | The account's 32 hex digit ID |
+| `TIDE_ANALYTICS_DATASET` | The environment's dataset in its `wrangler.jsonc`, a plain SQL identifier; default `tide_manifest` |
+
+It reads no other variable, no bucket and no key. Each query is one `POST` to
+`https://api.cloudflare.com/client/v4/accounts/<account>/analytics_engine/sql`, which no flag or variable changes. A
+redirect is not followed, so the token goes nowhere else. A query has 30 s, body included, and a reply at most 1 MiB; none is
+retried. Messages are fixed text and at most a status: no token, header or reply is printed.
+
+`--window` is whole hours or days: default 24h, at most 89d (2136h), since Analytics Engine keeps points three months
+and the shortest three are 89 days. Every value is checked before it enters a query (the reply key grammar, a lowercase
+UUID, whole numbers, the identifier), and none may hold a quote, backslash or space.
+
+**Checks, not devices.** A check is one point: one `/manifest` request answered 200 or 503, probes included. A device
+checks many times, and a point holds no client ID, so no count is a number of devices. The update IDs are what
+clients sent, so anyone who can reach `/manifest` can add checks; read a verdict as a signal, not proof.
+
+**Weights.** Analytics Engine samples under load, and each stored row's `_sample_interval` is the number of points it
+stands for. Every count is `SUM(_sample_interval)`, never a number of rows, and is an estimate once points are sampled.
+
+Checks per update the client runs; `-` is a check that sent none, as a probe:
+
+```sql
+SELECT blob4 AS update_id, SUM(_sample_interval) AS checks
+FROM tide_manifest
+WHERE timestamp > NOW() - INTERVAL '24' HOUR
+GROUP BY update_id
+ORDER BY checks DESC, update_id
+LIMIT 1001
+FORMAT JSON
+```
+
+Checks per update the client lists as failed. SQL here has no array functions, so `blob6` is grouped as stored, and the CLI
+counts each list's checks once for every ID in it. A device that failed an update keeps listing it (a stock client lists at
+most 5), so one failure is counted again at each later check, also after the device moved on:
+
+```sql
+SELECT blob6 AS failed_ids, SUM(_sample_interval) AS checks
+FROM tide_manifest
+WHERE timestamp > NOW() - INTERVAL '24' HOUR
+  AND blob6 != ''
+GROUP BY failed_ids
+ORDER BY checks DESC, failed_ids
+LIMIT 1001
+FORMAT JSON
+```
+
+Checks per rollout side; `-` is a point of a 0.1.0 Worker, which recorded none:
+
+```sql
+SELECT blob7 AS side, SUM(_sample_interval) AS checks
+FROM tide_manifest
+WHERE timestamp > NOW() - INTERVAL '24' HOUR
+GROUP BY side
+ORDER BY checks DESC, side
+LIMIT 1001
+FORMAT JSON
+```
+
+Each query asks for 1,001 groups and reports 1,000, most checks first. When there are more, the text says `truncated` and
+`--json` sets it: updates with fewer checks are left out, and every count per failed ID is a lower bound.
+
+**Verdict.** `--update`, `--max-failed-share` (a percentage from 0 to 100 in steps of 0.01) and `--min-checks` go together,
+and one query replaces the reports. A check that lists the update as failed is in the first group and every other check
+that runs it is in the second, so a check that does both counts once. For
+`--update 00000000-0000-4000-8000-000000000001 --max-failed-share 5 --min-checks 500`:
+
+```sql
+SELECT if(position('00000000-0000-4000-8000-000000000001' IN blob6) > 0, 'failed', 'running') AS outcome, SUM(_sample_interval) AS checks
+FROM tide_manifest
+WHERE timestamp > NOW() - INTERVAL '24' HOUR
+  AND (blob4 = '00000000-0000-4000-8000-000000000001' OR position('00000000-0000-4000-8000-000000000001' IN blob6) > 0)
+GROUP BY outcome
+ORDER BY checks DESC, outcome
+LIMIT 1001
+FORMAT JSON
+```
+
+With fewer checks than `--min-checks` the result is not enough checks. Otherwise the update is bad when `failed` is over
+the share of both groups; exactly at the share is ok.
+
+`--print-sql` prints the queries the same arguments would send, separated by a blank line, for running elsewhere; it sends
+nothing, needs no token or account ID, and does not go with `--json`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Reported; with `--update`, the update is ok or there are not enough checks |
+| 2 | Usage or configuration; nothing was sent |
+| 3 | Unreachable: a request failed or passed its deadline |
+| 4 | The SQL API answered a status other than 200: a redirect, a token it refuses, a rate limit, or an error of its own |
+| 5 | Unparseable reply: over 1 MiB, not JSON, a missing column, or a value or count of another form |
+| 10 | The update is bad; no other Tide failure exits with it |
+
+Exit 1 is left to an uncaught error, so it always means a bug, and an outage never reads as a bad update.

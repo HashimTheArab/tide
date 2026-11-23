@@ -8,11 +8,12 @@ import { REPUBLISH_USAGE, ROLLBACK_USAGE, republish, rollback } from "./publish-
 import { PUBLISH_USAGE, publish } from "./publish.ts";
 import { REGISTER_BUILD_USAGE, registerBuild } from "./register-build.ts";
 import { ROLLOUT_USAGE, rollout } from "./rollout.ts";
+import { STATS_USAGE, stats } from "./stats.ts";
 import { status } from "./status.ts";
 import { storage } from "./storage-report.ts";
 import { bucketFromEnv } from "./storage.ts";
 
-const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLOUT_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}\n${CERTIFICATE_USAGE}`;
+const USAGE = `usage: tide status\nusage: tide storage\n${EXPORT_USAGE}\n${PUBLISH_USAGE}\n${ROLLOUT_USAGE}\n${ROLLBACK_USAGE}\n${REPUBLISH_USAGE}\n${REGISTER_BUILD_USAGE}\n${PROBE_USAGE}\n${STATS_USAGE}\n${CERTIFICATE_USAGE}`;
 // The listing alone names --json and the rollout probe, so every refusal keeps its text.
 const LISTING = `${USAGE}
        tide status --json
@@ -21,7 +22,8 @@ const LISTING = `${USAGE}
        tide rollout ... --json
        tide rollback ... --json
        tide republish ... --json
-       tide probe ... [--rollout-side new --rollout-update <updateId>] [--json]`;
+       tide probe ... [--rollout-side new --rollout-update <updateId>] [--json]
+       tide stats ... --json`;
 // Commands that parse arguments and read their own configuration.
 const COMMANDS = {
   export: exportProject,
@@ -31,6 +33,7 @@ const COMMANDS = {
   republish,
   "register-build": registerBuild,
   probe,
+  stats,
   certificate,
 };
 // Commands whose one argument, if any, is --json.

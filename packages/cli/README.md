@@ -55,11 +55,21 @@ first, as in [Signing identity](https://github.com/HashimTheArab/tide/blob/main/
 | `tide status`                   | Lists what each channel serves right now                    |
 | `tide storage`                  | Lists files nothing uses any more; deletes nothing          |
 | `tide probe`                    | Checks a live server the way an installed app would         |
+| `tide stats`                    | Counts update checks and failures; Workers only             |
 
 `tide publish --json` prints one JSON document for scripts to read, and so do `tide rollout --json`,
-`tide rollback --json`, `tide republish --json`, `tide status --json`, `tide storage --json` and `tide probe --json`
+`tide rollback --json`, `tide republish --json`, `tide status --json`, `tide storage --json`, `tide probe --json` and
+`tide stats --json`
 ([fields](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#json-output)). During a rollout,
 `tide probe --rollout-side new --rollout-update <updateId>` checks the update being sent out.
+
+`tide stats` reads your Worker's Analytics Engine points with a read-only token: `TIDE_ANALYTICS_TOKEN` (Account
+Analytics Read), `TIDE_ANALYTICS_ACCOUNT_ID` and, unless it is `tide_manifest`, `TIDE_ANALYTICS_DATASET`. The Node
+server's checks are not there. It counts checks, not devices, and exits 0 reported, 2 usage, 3 unreachable, 4 a
+refusing status and 5 an unparseable reply. Given
+`tide stats --update <updateId> --max-failed-share <percent> --min-checks <n>` it exits 10 for a bad update and 0 for
+an ok one or not enough checks. `tide stats --print-sql` prints the queries and sends nothing
+([details](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#tide-stats)).
 
 The server is [`@tide-ota/server`](https://www.npmjs.com/package/@tide-ota/server). CI setup, keys and every flag:
 [publishing](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md#publishing) and [the CLI reference](https://github.com/HashimTheArab/tide/blob/main/docs/design.md#cli).
