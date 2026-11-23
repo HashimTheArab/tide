@@ -159,7 +159,8 @@ const safe = (s) =>
     .slice(0, 90);
 const sev = { P0: 0, P1: 1, P2: 2, P3: 3 };
 const blocking = (f, r) => sev[f.severity] <= 1 || (f.severity === "P2" && r <= 2);
-const brief = (f) => `${f.id} ${f.severity} ${f.file}${f.line ? `:${f.line}` : ""}: ${f.title}`;
+const brief = (f) =>
+  `${f.id} ${f.severity} ${f.file.replace(`${WT}/`, "")}${f.line ? `:${f.line}` : ""}: ${f.title}`;
 const bullets = (xs, none) => (xs.length ? xs.map((x) => `- ${x}`).join("\n") : none);
 // A dropped connection returns no result; one retry absorbs it, and a second empty result still hands back.
 const call = async (prompt, opts) => {
@@ -503,6 +504,18 @@ ${review ? `\n## Review\n\n${review}\n` : ""}
 ${FOOTER}`;
 const history = [];
 
+// The build wrote the PR text; simplifying and fixing changed the code under it.
+const currentText = async () =>
+  must(
+    await opus(
+      `In ${WT}, the PR text below was written before later commits. Read \`git diff origin/main...HEAD\` and correct every statement the final code contradicts. Drop tests and code that no longer exist, and say which commit any manual or device run was made on. Keep what is still true as it is. Edit, commit and run nothing that changes the checkout.
+${JSON.stringify({ summary: built.summary, decisions: built.decisions, tests: built.tests }, null, 1)}`,
+      "PR text",
+      obj({ summary: str, decisions: strs, tests: strs }, ["summary", "decisions", "tests"]),
+    ),
+    "PR text",
+  );
+
 // Catches the branch up with main (merge, never rebase), gates and pushes it, then auto-merges or labels it.
 async function finish() {
   phase("Merge");
@@ -520,6 +533,7 @@ async function finish() {
       await ok("pause auto-merge", `cd ${WT} && gh pr merge ${PR} --disable-auto`);
     if (merged) await push(g);
   }
+  if (built && fixed.length) built = { ...built, ...(await currentText()) };
   if (built) await publishBody(reviewText());
   else if (merged) {
     // A catch-up run did not build the body, so it replaces only the gate line.
