@@ -74,6 +74,7 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
     throw new Error(`${serial} is not an emulator`);
   }
   const abi = (await adb(["shell", "getprop", "ro.product.cpu.abi"])).trim();
+  const apps = new Set<string>();
   const reports = await followLog(stack, adbPath, serial, adb);
   return {
     serial,
@@ -89,6 +90,9 @@ export async function androidDevice(stack: Stack, options: AndroidOptions): Prom
         await adb(["uninstall", packageName]);
       }
       await adb(["install", apk], INSTALL_MS);
+      if (booted || apps.has(packageName)) return;
+      apps.add(packageName);
+      stack.onClose(() => adb(["uninstall", packageName]).then(() => undefined));
     },
     async launch(packageName) {
       const out = await adb(["shell", "am", "start", "-W", "-n", `${packageName}/.MainActivity`]);

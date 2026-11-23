@@ -19,7 +19,7 @@ import { RSA_SHA256, certificate, pem } from "../../packages/protocol/test/fixtu
 const LOOPBACK = "127.0.0.1";
 const MULTIPART = /^multipart\/mixed; boundary=(.*)$/s;
 // Operator and cloud credentials in the caller's shell never reach a child.
-const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS)_/i;
+const CREDENTIAL = /^(?:TIDE|AWS|ACTIONS|CLOUDFLARE|CF)_|_TOKEN$/i;
 type Step = () => Promise<void> | void;
 const DAY_MS = 24 * 60 * 60 * 1000;
 

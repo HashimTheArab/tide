@@ -1,9 +1,9 @@
 // The conformance app: one shared source built per expo-updates version, configured for a stack's Tide and identity.
 import { once } from "node:events";
 import {
+  appendFileSync,
   copyFileSync,
   cpSync,
-  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -240,13 +240,17 @@ async function run(
   cwd: string,
   log: string,
 ) {
-  const sink = createWriteStream(log, { flags: "a" });
   const proc = stack.spawn(command, args, env, cwd);
-  proc.stdout.pipe(sink, { end: false });
-  proc.stderr.pipe(sink, { end: false });
+  for (const stream of [proc.stdout, proc.stderr]) {
+    stream.on("data", (chunk: Buffer) => {
+      try {
+        appendFileSync(log, chunk);
+      } catch {
+        // A full disk fails the build itself; an error here would end the run without its cleanup.
+      }
+    });
+  }
   const [code, signal] = (await once(proc, "close")) as [number | null, NodeJS.Signals | null];
-  sink.end();
-  await once(sink, "close");
   if (code !== 0) {
     const name = command.split("/").at(-1);
     throw new Error(

@@ -195,6 +195,23 @@ esac
     expect(result.tmpEntries).toEqual([]);
   });
 
+  test("a build log that cannot be written does not end the run before its cleanup", async () => {
+    const fake = fakeSdk({ running: { "emulator-5554": {} } });
+    const bin = join(fake.sdk, "bin");
+    mkdirSync(bin);
+    const npm =
+      '#!/bin/sh\nrm -f build.log && mkdir -p build.log node_modules/.bin && ln -s "$0" node_modules/.bin/expo && echo npm\n';
+    writeFileSync(join(bin, "npm"), npm, { mode: 0o755 });
+    const result = await conformance(
+      ["--platform", "android", "--expo", "55", "--scenario", "embedded"],
+      { PATH: `${bin}:${process.env.PATH ?? ""}`, ANDROID_HOME: fake.sdk },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stdout).toMatch(/^android expo-updates 55 embedded: fail: not run: /);
+    expect(result.tmpEntries).toEqual([]);
+    expect(fake.state().reverse).toEqual([]);
+  });
+
   test("every version runs when the device cleanup fails, which is said and exits 1", async () => {
     const fake = fakeSdk({ running: { "emulator-5554": {} } });
     const bin = join(fake.sdk, "bin");
