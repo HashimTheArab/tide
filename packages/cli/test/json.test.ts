@@ -672,6 +672,7 @@ describe("usage", () => {
        tide rollback ... --json
        tide republish ... --json
        tide probe ... [--rollout-side new --rollout-update <updateId>] [--json]
+       tide stats ... --json
 `,
     });
   });

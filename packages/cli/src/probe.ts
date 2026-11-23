@@ -13,7 +13,6 @@ import {
   parseMultipart,
   parseSfvDictionary,
   readLimited,
-  replyKey,
   rolloutBucket,
   rolloutClientId,
   verifyChainedSignature,
@@ -23,7 +22,7 @@ import {
 import type { Env } from "./keys.ts";
 import { jsonDocument } from "./json.ts";
 import { BUILD_KEYID, KeyError, buildIdentity, isObject, member } from "./keys.ts";
-import { urlBase } from "./publish-record.ts";
+import { targetProblem, urlBase } from "./publish-record.ts";
 
 /** Exit codes by failure class; 1 is left to Node's exit on an uncaught error, so it always means a bug. */
 export const PROBE_EXIT = {
@@ -151,15 +150,12 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
   } catch {
     throw usage(`unrecognised arguments; ${PROBE_USAGE}`);
   }
-  const { channel, platform } = values;
+  const { channel, platform = "" } = values;
   const server = values["server-url"];
   const runtime = values["runtime-version"];
   const appId = values["app-id"];
   if (server === undefined || channel === undefined || runtime === undefined) {
     throw usage(`--server-url, --channel and --runtime-version are required; ${PROBE_USAGE}`);
-  }
-  if (platform !== "ios" && platform !== "android") {
-    throw usage("--platform must be ios or android");
   }
   const base = urlBase(server);
   if (base === undefined) {
@@ -167,13 +163,8 @@ async function configure(args: readonly string[], env: Env): Promise<Probe> {
       "--server-url must be an https URL with no credentials, query or fragment (http only to a loopback IP)",
     );
   }
-  try {
-    replyKey(channel, runtime, platform);
-  } catch (e) {
-    if (!(e instanceof ProtocolError)) throw e;
-    const flag = e.field === "channel" ? "--channel" : "--runtime-version";
-    throw usage(`${flag} ${e.message.slice(e.field.length + 1)}`);
-  }
+  const problem = targetProblem(channel, runtime, platform);
+  if (problem !== undefined) throw usage(problem);
   if (appId !== undefined && !HEADER_VALUE.test(appId)) {
     throw usage("--app-id must be printable ASCII without edge whitespace");
   }

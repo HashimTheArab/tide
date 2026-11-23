@@ -174,6 +174,8 @@ tide register-build --platform android --runtime-version 1.0.0 \
 | `tide storage` | Lists files nothing references any more; deletes nothing |
 | `tide probe --server-url <url> --channel <name> --runtime-version <version> --platform ios\|android` | Checks a live server the way an installed app would |
 | `tide probe ... --rollout-side new --rollout-update <updateId>` | Checks the update a rollout is sending out |
+| `tide stats` | On Workers, counts update checks per update, failed update and rollout side |
+| `tide stats --update <updateId> --max-failed-share <percent> --min-checks <n>` | On Workers, exits 10 when too large a share of checks list the update as failed |
 | `tide publish --from <dir> --channel <name> --rollout <percent>` | Sends a new update to a share of devices |
 | `tide rollout <percent>\|complete\|revert --channel <name> --runtime-version <version>` | Raises a rollout's share, sends it to every device, or stops it |
 | `tide rollback --embedded --channel <name> --runtime-version <version>` | Sends apps back to the bundle inside the store build |
@@ -188,8 +190,15 @@ they embed, given as exactly one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD
 `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN` set to `true` for builds that embed a CA root. It then checks a live server end
 to end: it verifies the reply's signature under that certificate, or under the served chain's leaf, and compares the
 served bundle's hash with the signed manifest. On Workers, every update check that reaches a reply also records one
-Analytics Engine data point, a probe's included; the container records nothing. [docs/design.md](docs/design.md#cli) documents every command's rules
-and exit codes.
+Analytics Engine data point, a probe's included; the container records nothing.
+
+`tide stats` reads those points back, so it works for Workers only. It needs a Cloudflare API token with the one
+permission Account Analytics Read in `TIDE_ANALYTICS_TOKEN`, your account ID in `TIDE_ANALYTICS_ACCOUNT_ID`, and the
+environment's dataset in `TIDE_ANALYTICS_DATASET` (default `tide_manifest`). It counts checks, not devices: a device
+checks many times. An outage or a bad token never exits 10. `tide stats --print-sql` prints its queries and sends
+nothing ([queries and exit codes](docs/design.md#tide-stats)).
+
+[docs/design.md](docs/design.md#cli) documents every command's rules and exit codes.
 
 ## Security model
 
@@ -209,7 +218,7 @@ and exit codes.
 | --- | --- |
 | `packages/server` | The Hono server: runtime-free core, plus Workers and Node entry points |
 | `packages/protocol` | The shared manifest, multipart, signature and patch contract |
-| `packages/cli` | The CLI: export, publish, register builds, roll back, inspect and probe |
+| `packages/cli` | The CLI: export, publish, register builds, roll back, inspect, probe and read stats |
 | `conformance/` | Stock `expo-updates` release apps checked against a local Tide |
 | `examples/operator/` | The minimal operator Worker described in the quick start |
 | `docs/` | Design, deploy guide, roadmap and decision records |
