@@ -16,6 +16,7 @@ Start here; keep this index current when adding a doc.
 - [Roadmap](roadmap.md): draft, the phases that build the design
 - [Testing standard](testing.md): decided, what to test and what reviewers reject
 - [Deploying](deploy.md): draft, an operator's Worker, staging and production, and the container
+- [Operating Tide](agents.md): draft, which command answers a question and which acts on it, for people and agents
 - [Delivery loop](delivery-loop.md): decided, how a roadmap phase goes from plan to merge
 - [Releasing](release.md): draft, the one-time npm setup, the checks before each release and the tag that publishes
 - [Comparison sources](comparison.md): draft, the sources behind the README comparison table

@@ -1,6 +1,7 @@
 // Fails when docs/ holds a file outside an assets/ or examples/ folder that is not an indexed markdown doc with status
 // front matter, when deploy.md omits a permission the server's S3 credentials need, when README.md drifts from the
-// tagline, the files it links or the CLI's commands and flags, or when the CLI's README misses a command or flag.
+// tagline, the files it links or the CLI's commands and flags, when the CLI's README misses a command or flag, or when
+// agents.md or an example names a command or flag the CLI does not have.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -106,6 +107,24 @@ const cliNamed = commandsIn(
 );
 for (const command of flags.keys()) {
   if (!cliNamed.has(command)) errors.push(`packages/cli/README.md: does not name tide ${command}`);
+}
+// The runbook and the examples (or the files from argv[4] on). A runbook flag must exist wherever it is named.
+const operating =
+  process.argv.length > 4
+    ? process.argv.slice(4)
+    : [
+        "agents.md",
+        ...readdirSync(join(docsDir, "examples")).map((name) => `examples/${name}`),
+      ].map((name) => join(docsDir, name));
+const anyFlag = new Set([...flags.values()].flatMap((known) => [...known]));
+for (const path of operating) {
+  const doc = readFileSync(path, "utf8");
+  const name = relative(root, path);
+  commandsIn(doc, name);
+  if (!path.endsWith(".md")) continue;
+  for (const [flag] of doc.matchAll(/(?<![\w-])--[a-z][a-z-]*/g)) {
+    if (!anyFlag.has(flag)) errors.push(`${name}: no tide command has ${flag}`);
+  }
 }
 
 if (errors.length > 0) {

@@ -66,3 +66,49 @@ test.each(["probe", "stats"])("the README names every variable tide %s reads", (
   const operations = section(README, "## Operations");
   for (const name of names) expect(operations).toContain(`\`${name}\``);
 });
+
+test("the docs check rejects a command or flag the runbook or an example names and the CLI lacks", () => {
+  const check = (name: string, text: string) => {
+    const path = join(tempRoot(), name);
+    writeFileSync(path, text);
+    const [readme, cli] = [join(ROOT, "README.md"), join(ROOT, "packages/cli/README.md")];
+    return spawnSync(process.execPath, [join(ROOT, "scripts/check-docs.mjs"), readme, cli, path], {
+      encoding: "utf8",
+    });
+  };
+  const runbook = readFileSync(join(ROOT, "docs/agents.md"), "utf8");
+  const example = readFileSync(join(ROOT, "docs/examples/revert-rollouts.yml"), "utf8");
+  expect(check("agents.md", runbook).status).toBe(0);
+  expect(check("revert.yml", example).status).toBe(0);
+  for (const [name, text, problem] of [
+    [
+      "agents.md",
+      `${runbook}\n`.replace("tide rollout revert", "tide revert"),
+      "names tide revert",
+    ],
+    ["agents.md", runbook.replace("`--platform`", "`--only`"), "no tide command has --only"],
+    [
+      "revert.yml",
+      example.replace("--max-failed-share", "--max-share"),
+      "tide stats has no --max-share",
+    ],
+    ["revert.yml", example.replace("tide rollout revert", "tide pause"), "names tide pause"],
+  ] as const) {
+    const { status, stderr } = check(name, text);
+    expect(status).toBe(1);
+    expect(stderr).toContain(`${name}: ${problem}`);
+  }
+});
+
+// What an operator must know before acting on a verdict.
+test.each(["docs/agents.md", "docs/examples/revert-rollouts.yml"])(
+  "%s says what a count and a revert are, and that the server has no webhook or pause",
+  (path) => {
+    const text = readFileSync(join(ROOT, path), "utf8").replaceAll(/\s+(?:#\s+)?/g, " ");
+    expect(text).toMatch(/checks, not devices/);
+    expect(text).toMatch(
+      /does not move devices already on the update|never moves a device that already runs the update/,
+    );
+    expect(text).toMatch(/no webhook(?:,| and) no pause/);
+  },
+);

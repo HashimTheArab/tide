@@ -190,7 +190,8 @@ they embed, given as exactly one of `TIDE_BUILD_CERTIFICATE_FILE` or `TIDE_BUILD
 `TIDE_BUILD_INCLUDE_CERTIFICATE_CHAIN` set to `true` for builds that embed a CA root. It then checks a live server end
 to end: it verifies the reply's signature under that certificate, or under the served chain's leaf, and compares the
 served bundle's hash with the signed manifest. On Workers, every update check that reaches a reply also records one
-Analytics Engine data point, a probe's included; the container records nothing.
+Analytics Engine data point, a probe's included; the container records nothing, unless `TIDE_ANALYTICS=stdout` makes it
+write the same point as [one JSON line](docs/design.md#observability) on stdout.
 
 `tide stats` reads those points back, so it works for Workers only. It needs a Cloudflare API token with the one
 permission Account Analytics Read in `TIDE_ANALYTICS_TOKEN`, your account ID in `TIDE_ANALYTICS_ACCOUNT_ID`, and the
@@ -198,7 +199,8 @@ environment's dataset in `TIDE_ANALYTICS_DATASET` (default `tide_manifest`). It 
 checks many times. An outage or a bad token never exits 10. `tide stats --print-sql` prints its queries and sends
 nothing ([queries and exit codes](docs/design.md#tide-stats)).
 
-[docs/design.md](docs/design.md#cli) documents every command's rules and exit codes.
+[docs/design.md](docs/design.md#cli) documents every command's rules and exit codes. [docs/agents.md](docs/agents.md) is a
+runbook for people and coding agents, with an example CI job that reverts a bad rollout.
 
 ## Security model
 
