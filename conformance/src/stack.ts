@@ -148,9 +148,9 @@ async function startStack(): Promise<Stack> {
  */
 export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<T> {
   const starting = startStack();
-  let exiting = false;
+  const exiting = new AbortController();
   const onSignal = (signal: NodeJS.Signals) => {
-    exiting = true;
+    exiting.abort();
     void starting
       .then((s) => s.close())
       .catch(() => undefined)
@@ -167,7 +167,7 @@ export async function withStack<T>(body: (stack: Stack) => Promise<T>): Promise<
     }
   } finally {
     // Never returns to a caller that could start another stack before the exit.
-    if (exiting) await new Promise(() => undefined);
+    if (exiting.signal.aborted) await new Promise(() => undefined);
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
