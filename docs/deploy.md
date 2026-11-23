@@ -73,12 +73,12 @@ Once per environment, in this order.
        set -e
        mkdir ~/tide-pkgs ~/tide-cli && cd ~/tide-pkgs
        for p in cli protocol; do
-         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-         gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-           --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+         npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.2.0"
+         gh attestation verify "tide-ota-$p-0.2.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+           --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.2.0
        done
        npm install --prefix ~/tide-cli --offline --ignore-scripts --no-fund \
-         ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+         ./tide-ota-cli-0.2.0.tgz ./tide-ota-protocol-0.2.0.tgz
      )
      ```
 
@@ -206,12 +206,12 @@ separate jobs of one workflow:
     ```sh
     mkdir "$RUNNER_TEMP/tide-pkgs" && cd "$RUNNER_TEMP/tide-pkgs"
     for p in cli protocol; do
-      npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-      gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-        --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+      npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.2.0"
+      gh attestation verify "tide-ota-$p-0.2.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+        --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.2.0
     done
     npm install --prefix "$RUNNER_TEMP/tide" --offline --ignore-scripts --no-fund \
-      ./tide-ota-cli-0.1.0.tgz ./tide-ota-protocol-0.1.0.tgz
+      ./tide-ota-cli-0.2.0.tgz ./tide-ota-protocol-0.2.0.tgz
     echo "$RUNNER_TEMP/tide/node_modules/.bin" >> "$GITHUB_PATH"
     ```
 

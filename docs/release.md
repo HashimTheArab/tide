@@ -96,9 +96,9 @@ with the same bytes.
 
   ```sh
   for p in protocol server cli; do
-    npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.1.0"
-    gh attestation verify "tide-ota-$p-0.1.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
-      --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.1.0
+    npm pack --registry https://registry.npmjs.org/ "@tide-ota/$p@0.2.0"
+    gh attestation verify "tide-ota-$p-0.2.0.tgz" --repo HashimTheArab/tide --deny-self-hosted-runners \
+      --cert-identity https://github.com/HashimTheArab/tide/.github/workflows/release.yml@refs/tags/v0.2.0
   done
   ```
 
