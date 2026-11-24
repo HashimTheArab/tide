@@ -17,7 +17,7 @@
     "aws-kms",
     "bsdiff"
   ],
-  "homepage": "https://github.com/HashimTheArab/tide#publishing",
+  "homepage": "https://github.com/HashimTheArab/tide/blob/main/docs/getting-started.md#3-publish-an-update",
   "bugs": {
     "url": "https://github.com/HashimTheArab/tide/issues"
   },
