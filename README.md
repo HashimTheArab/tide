@@ -13,33 +13,35 @@ Tide is a self-hosted alternative to EAS Update. It sends over-the-air updates t
 
 ## Features
 
-- **Stock client:** works with `expo-updates` as Expo ships it, with no SDK to swap in and no Expo account
-- **No database:** one R2 or S3-compatible bucket holds everything
-- **Signed updates:** you sign when you publish, with a key file or AWS KMS, so the server never holds a signing key
-- **Small downloads:** bsdiff patches from earlier updates and from the bundle inside your store build; Hermes apps can
-  go further ([70% less on Bluesky's Android app](docs/decisions/0002-hermes-delta-compiles.md))
-- **Staged rollouts:** send an update to a share of devices, then raise it, finish it or revert it
-- **Rollbacks:** return to an earlier update or to the store build
-- **Key rotation:** replace a signing certificate without a new store build, using certificate chains
-- **Built for CI:** JSON output, exit codes to branch on, a live server check and failure stats
-- **Tested with real apps:** every release runs on an Android emulator and an iOS simulator first
+- Uses stock `expo-updates`. No SDK swap, no Expo account.
+- Updates are signed when you publish them, with a key file or AWS KMS. The server never holds the key.
+- Devices download a bsdiff patch against an earlier update or the bundle inside the store build. Hermes apps can also
+  compile updates against that bundle, which
+  [cut downloads by 70% on Bluesky's Android app](docs/decisions/0002-hermes-delta-compiles.md).
+- Send an update to a share of devices first, then raise, finish or revert it. Roll back to an earlier update or to the
+  store build.
+- If the app embeds a CA root, you can replace the signing certificate without a new store build.
+- No database. Everything is in one R2 or S3-compatible bucket.
+- CI jobs can publish, check the live server and, on Workers, count failed updates. Every result has JSON output and an
+  exit code to branch on.
+- Every release is tested with real apps on an Android emulator and an iOS simulator.
 
 ## Example
 
-The Worker:
+The Worker is one line:
 
 ```ts
 export { default } from "@tide-ota/server/workers";
 ```
 
-Publishing an update:
+Publishing:
 
 ```sh
 npx tide export --out ../update                       # builds the app, needs no secrets
 npx tide publish --from ../update --channel main      # signs and uploads it
 ```
 
-[Getting started](docs/getting-started.md) covers the rest: the bucket, the certificate and the app config.
+[Getting started](docs/getting-started.md) covers setup: bucket, certificate and app config.
 
 ## Comparison
 
@@ -64,8 +66,8 @@ npx tide publish --from ../update --channel main      # signs and uploads it
 
 ## Contributing
 
-Tide is pre-1.0. Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems
-privately, as [SECURITY.md](SECURITY.md) describes.
+Tide is pre-1.0. Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security
+problems privately: see [SECURITY.md](SECURITY.md).
 
 ## License
 

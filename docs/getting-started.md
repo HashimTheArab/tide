@@ -5,12 +5,11 @@ updated: 2026-11-24
 
 # Getting started
 
-Serve and publish a first update. Tide's packages need Node 24.11 or later. [Deploying](deploy.md) has the full
-production setup.
+Publish a first update. You need Node 24.11 or later. [Deploying](deploy.md) covers the full production setup.
 
-## 1. Run a server
+## 1. Run the server
 
-### Cloudflare Workers
+### On Cloudflare Workers
 
 In your Worker project:
 
@@ -27,9 +26,9 @@ npx wrangler r2 bucket create <bucket>
 npx wrangler deploy --env staging
 ```
 
-Always pass `--env`: without it the Worker has no bucket.
+Always pass `--env`: without it, the Worker has no bucket.
 
-### Node or a container
+### With Node or a container
 
 ```sh
 npm install @tide-ota/server
@@ -39,10 +38,10 @@ TIDE_DISK_DIR=/srv/tide-bucket node node_modules/@tide-ota/server/dist/node.js
 This serves a local directory on port 8787. For an S3-compatible bucket, set the `TIDE_S3_*` variables instead
 ([all variables](deploy.md#the-container)).
 
-### Addresses
+### Your domains
 
-Give the server and the bucket's assets each a domain you own. Both addresses go into signed updates on users' devices,
-so they must keep working as long as those builds are installed.
+Give the server and the bucket's assets each a domain you own. Both go into signed updates on users' devices,
+so they must keep working while those builds are installed.
 
 ## 2. Set up the app
 
@@ -60,10 +59,10 @@ Make a signing certificate ([step 5](deploy.md#setting-up-an-environment)), then
 }
 ```
 
-The channel header is required. A runtime version with nothing published gets a signed "no update available", not an
-error.
+The channel header is required. A runtime version with nothing published gets a signed reply saying no update
+is available.
 
-## 3. Publish
+## 3. Publish an update
 
 ```sh
 npm install --save-dev @tide-ota/cli
@@ -72,10 +71,10 @@ npx tide publish --from <dir> --channel main        # signs and uploads; runs no
 ```
 
 `tide publish` reads the bucket, the signing key, the build's certificate, `TIDE_SERVER_URL` and `TIDE_ASSET_URL` from
-the environment. In CI, run the two commands as separate jobs and one publish at a time
+the environment. In CI, run the two commands as separate jobs, one publish at a time
 ([a complete CI setup](deploy.md#publishing)).
 
-Check the result the way an installed app would:
+Check what an installed app would see:
 
 ```sh
 npx tide probe --server-url https://updates.example.com --channel main --runtime-version 1.0.0 --platform ios
@@ -83,8 +82,8 @@ npx tide probe --server-url https://updates.example.com --channel main --runtime
 
 ## 4. Make downloads smaller
 
-Set `updates.enableBsdiffPatchSupport` in the app. Tide then serves patches from earlier updates. To also patch from the
-bundle inside a store build, so a fresh install's first update is small, register that build once:
+Set `updates.enableBsdiffPatchSupport` in the app, and Tide will serve patches from earlier updates. To patch
+from the bundle inside a store build too, so a fresh install's first update is small, register that build once:
 
 ```sh
 npx tide register-build --platform android --runtime-version 1.0.0 \
@@ -94,8 +93,8 @@ npx tide register-build --platform android --runtime-version 1.0.0 \
 [Patches](design.md#patches) says which files to take from an APK or an `.app`. Hermes apps can also
 [compile against the store build's bundle](deploy.md#delta-compiles).
 
-## Next
+## Where to go next
 
-- [Commands](../packages/cli/README.md): rollouts, rollbacks and checks
-- [Deploying](deploy.md): accounts, domains, CI and the container
-- [Operating Tide](agents.md): what to run when an update goes wrong
+- [Commands](../packages/cli/README.md) for rollouts, rollbacks and checks
+- [Deploying](deploy.md) for accounts, domains, CI and the container
+- [Operating Tide](agents.md) for when an update goes wrong
