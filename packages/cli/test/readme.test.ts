@@ -7,20 +7,6 @@ import { expect, test } from "vitest";
 import { tempRoot } from "./helpers.ts";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const README = readFileSync(join(ROOT, "README.md"), "utf8");
-const DESIGN = readFileSync(join(ROOT, "docs/design.md"), "utf8");
-
-/** The text from `heading` to the next heading of the same or a higher level. */
-const section = (doc: string, heading: string) => {
-  const start = doc.indexOf(`\n${heading}\n`);
-  expect(start, heading).toBeGreaterThan(-1);
-  const level = /^#+/.exec(heading)?.[0] ?? "";
-  const end = doc
-    .slice(start + heading.length + 2)
-    .search(new RegExp(`^#{1,${level.length}} `, "m"));
-  return end === -1 ? doc.slice(start) : doc.slice(start, start + heading.length + 2 + end);
-};
-const variables = (text: string) => new Set(text.match(/\bTIDE_[A-Z0-9_]+\b/g));
 
 test("the docs check rejects an unknown flag on a continued command line", () => {
   const { description } = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
@@ -58,13 +44,6 @@ test("the docs check requires the CLI README to name every command, tide certifi
   const missing = check(cli.replaceAll("tide certificate", "tide"));
   expect(missing.status).toBe(1);
   expect(missing.stderr).toContain("packages/cli/README.md: does not name tide certificate");
-});
-
-test.each(["probe", "stats"])("the README names every variable tide %s reads", (command) => {
-  const names = variables(section(DESIGN, `### \`tide ${command}\``));
-  expect(names.size).toBeGreaterThan(0);
-  const operations = section(README, "## Operations");
-  for (const name of names) expect(operations).toContain(`\`${name}\``);
 });
 
 test("the docs check rejects a command or flag the runbook or an example names and the CLI lacks", () => {

@@ -23,6 +23,6 @@ Tide (report those upstream).
 
 ## Supported versions
 
-Tide has no releases yet. Only the `main` branch is supported, and fixes land there.
+Only the latest release is supported. Fixes land on `main` and ship in the next one.
 
 Reports are handled on a best-effort basis, with no response-time commitment.
