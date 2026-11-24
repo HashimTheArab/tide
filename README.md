@@ -15,8 +15,8 @@ Tide is a self-hosted alternative to EAS Update. It sends over-the-air updates t
 
 - Uses stock `expo-updates`. No SDK swap, no Expo account.
 - Updates are signed when you publish them, with a key file or AWS KMS. The server never holds the key.
-- Devices download a bsdiff patch against an earlier update or the bundle inside the store build. Hermes apps can also
-  compile updates against that bundle, which
+- Devices can [download a bsdiff patch](docs/getting-started.md#4-make-downloads-smaller) against an earlier update or
+  the bundle inside the store build. Hermes apps can also compile updates against that bundle, which
   [cut downloads by 70% on Bluesky's Android app](docs/decisions/0002-hermes-delta-compiles.md).
 - Send an update to a share of devices first, then raise, finish or revert it. Roll back to an earlier update or to the
   store build.

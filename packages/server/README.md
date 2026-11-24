@@ -52,4 +52,4 @@ health check. It records nothing unless `TIDE_ANALYTICS=stdout`, which writes on
 ```
 
 Setup, domains and keys: [the deploy guide](https://github.com/HashimTheArab/tide/blob/main/docs/deploy.md). How Tide compares with EAS Update and other
-servers: [the Tide README](https://github.com/HashimTheArab/tide#how-tide-compares).
+servers: [the Tide README](https://github.com/HashimTheArab/tide#comparison).
