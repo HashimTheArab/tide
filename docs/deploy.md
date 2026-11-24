@@ -58,6 +58,9 @@ Once per environment, in this order.
 4. **Asset domain.** Connect a custom domain (for example `assets.example.com`) to the bucket's public access.
    `https://assets.example.com/assets/<hex>` then serves the object `assets/<hex>`. Every object in the bucket
    becomes public; Tide stores nothing secret there. Connect it before the first publish.
+   Cloudflare caches by file extension and these URLs have none, so add a Cache Rule for that hostname: **Eligible for
+   cache**, with Edge TTL "Use cache-control header if present, bypass cache if not". Every asset carries its own
+   `Cache-Control`. Smart Tiered Cache then keeps most misses away from the bucket's region.
 5. **Signing identity.** A self-signed certificate per environment with its `keyid` (`design.md`, Keys). Tide
    rejects unsigned apps. Put the certificate where the app config reads it (here `keys/certificate.pem`), made one
    of two ways:
