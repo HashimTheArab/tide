@@ -577,23 +577,24 @@ describe.each([
     expect(await probing("roll", next)).toEqual(passing(next));
   });
 
-  test("a rollout reverted to its earlier manifest, rollback or none is a mismatch", async () => {
+  // One case per test: each starts five probes, and all three in one test time out on a busy runner.
+  test.each([
+    ["manifest", "the server served another update than --rollout-update"],
+    ["rollback", "the server served a directive, not --rollout-update"],
+    ["none", "the server served a directive, not --rollout-update"],
+  ])("a rollout reverted to its earlier %s is a mismatch", async (earlier, message) => {
     const { base } = store.published();
-    await publishIos("to-manifest");
-    await publishIos("to-rollback");
-    const embedded = ["--embedded", ...channelArgs("to-rollback"), "--platform", "ios"];
-    expect(await rollback(embedded, write(), quiet)).toBe(0);
-    for (const [channel, message] of [
-      ["to-manifest", "the server served another update than --rollout-update"],
-      ["to-rollback", "the server served a directive, not --rollout-update"],
-      ["to-none", "the server served a directive, not --rollout-update"],
-    ] as const) {
-      const next = await publishIos(channel, ["--rollout", "50"]);
-      expect(await probing(channel, next), channel).toEqual(passing(next));
-      await move(channel, "revert");
-      expect(await probing(channel, next), channel).toEqual(MISMATCH);
-      expect(await tide(args(base, channel, asking(next)))).toEqual(failure(9, message));
+    const channel = `to-${earlier}`;
+    if (earlier !== "none") await publishIos(channel);
+    if (earlier === "rollback") {
+      const embedded = ["--embedded", ...channelArgs(channel), "--platform", "ios"];
+      expect(await rollback(embedded, write(), quiet)).toBe(0);
     }
+    const next = await publishIos(channel, ["--rollout", "50"]);
+    expect(await probing(channel, next)).toEqual(passing(next));
+    await move(channel, "revert");
+    expect(await probing(channel, next)).toEqual(MISMATCH);
+    expect(await tide(args(base, channel, asking(next)))).toEqual(failure(9, message));
   });
 
   test("a rollout replaced by another update is a mismatch, and the update it was replaced by passes", async () => {
